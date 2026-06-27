@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.git/
+tests/
+docs/
+skills/
+bundle/
+.okf/
+viz.html
+.DS_Store

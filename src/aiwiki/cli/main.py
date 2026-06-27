@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-CONFIG = Path(os.environ.get("AIWIKI_CONFIG", str(Path.home() / ".config" / "ai-wiki" / "config.json")))
+CONFIG = Path(os.environ.get("AIWIKI_CONFIG", str(Path.home() / ".ai-wiki" / "config.json")))
 # A real User-Agent — the urllib default ("Python-urllib/x") trips Cloudflare bot rules (error 1010).
 _UA = "ai-wiki-cli/0.0.1 (+https://github.com/Scorpion1221/ai-wiki)"
 
