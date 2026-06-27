@@ -22,6 +22,8 @@ import urllib.request
 from pathlib import Path
 
 CONFIG = Path(os.environ.get("AIWIKI_CONFIG", str(Path.home() / ".config" / "ai-wiki" / "config.json")))
+# A real User-Agent — the urllib default ("Python-urllib/x") trips Cloudflare bot rules (error 1010).
+_UA = "ai-wiki-cli/0.0.1 (+https://github.com/Scorpion1221/ai-wiki)"
 
 
 def _load() -> dict:
@@ -41,7 +43,7 @@ def _api(route: str, **params) -> dict:
         sys.exit("not configured — run: ai-wiki config set --endpoint <url> --token <tok>")
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     url = f"{endpoint.rstrip('/')}{route}" + (f"?{qs}" if qs else "")
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": _UA})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())
@@ -59,7 +61,7 @@ def _post(route: str, payload: dict) -> dict:
     req = urllib.request.Request(
         f"{endpoint.rstrip('/')}{route}",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": _UA},
         method="POST",
     )
     try:
