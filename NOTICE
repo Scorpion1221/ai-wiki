@@ -1,0 +1,8 @@
+ai-wiki
+Copyright 2026 Scorpion1221
+
+The deterministic maintenance engine under src/aiwiki/engine/ is derived from the
+Open Knowledge Format (OKF) tooling in GoogleCloudPlatform/knowledge-catalog,
+licensed under the Apache License, Version 2.0.
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).

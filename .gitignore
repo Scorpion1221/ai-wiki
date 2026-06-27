@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual envs / uv
+.venv/
+.uv/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OKF bundle local-only artifacts (never commit)
+.okf/
+viz.html
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
