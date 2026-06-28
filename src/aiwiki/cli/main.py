@@ -167,9 +167,9 @@ def main(argv=None) -> int:
     p_search.add_argument("--json", action="store_true")
     p_log = sub.add_parser("log", help="recent change ledger")
     p_log.add_argument("--tail", type=int, default=30)
-    p_ing = sub.add_parser("ingest", help="submit a source for curation into the active bundle")
-    p_ing.add_argument("file", nargs="?", help="markdown file (omit or '-' to read stdin)")
-    p_ing.add_argument("--title", help="optional title for the source")
+    p_ing = sub.add_parser("ingest", help="submit source(s) for curation into the active bundle")
+    p_ing.add_argument("files", nargs="*", help="markdown file(s); omit or '-' to read stdin")
+    p_ing.add_argument("--title", help="title for the source (single file only; ignored for many)")
     p_jobs = sub.add_parser("jobs", help="check an ingest job by id")
     p_jobs.add_argument("job_id")
 
@@ -217,14 +217,21 @@ def main(argv=None) -> int:
     elif a.cmd == "log":
         print("\n".join(_api("/log", bundle=bsel, tail=a.tail)["lines"]))
     elif a.cmd == "ingest":
-        if not a.file or a.file == "-":
-            text = sys.stdin.read()
+        files = a.files or ["-"]
+        for f in files:
+            if f == "-":
+                text, title = sys.stdin.read(), (a.title if len(files) == 1 else None)
+            else:
+                text = Path(f).expanduser().read_text(encoding="utf-8")
+                # one explicit title only makes sense for a single file; else use the filename
+                title = a.title if (a.title and len(files) == 1) else Path(f).stem
+            job = _post("/ingest", {"text": text, "title": title}, bundle=bsel)
+            label = f if f != "-" else "(stdin)"
+            print(f"{label} → source {job['source']}  job {job['id']}  ({job.get('curation', '?')})")
+        if len(files) > 1:
+            print(f"\nqueued {len(files)} source(s); poll with: ai-wiki jobs <job-id>")
         else:
-            text = Path(a.file).expanduser().read_text(encoding="utf-8")
-        job = _post("/ingest", {"text": text, "title": a.title}, bundle=bsel)
-        print(f"source: {job['source']}")
-        print(f"job:    {job['id']}  (curation: {job.get('curation', '?')})")
-        print(f"poll:   ai-wiki jobs {job['id']}")
+            print(f"poll:   ai-wiki jobs {job['id']}")
     elif a.cmd == "jobs":
         print(json.dumps(_api(f"/jobs/{a.job_id}", bundle=bsel), ensure_ascii=False, indent=2))
     return 0

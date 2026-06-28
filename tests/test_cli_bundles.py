@@ -89,6 +89,24 @@ def test_legacy_flat_config_is_read(monkeypatch, tmp_path: Path) -> None:
     assert cli._active() is None
 
 
+def test_ingest_multiple_files(monkeypatch, tmp_path: Path) -> None:
+    _point_config(monkeypatch, tmp_path)
+    cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"])
+    cli.main(["bundle", "use", "kb"])
+    (tmp_path / "f1.md").write_text("alpha", encoding="utf-8")
+    (tmp_path / "f2.md").write_text("beta", encoding="utf-8")
+    posts = []
+
+    def fake_post(route, payload, **kw):
+        posts.append((payload["title"], payload["text"], kw.get("bundle")))
+        return {"source": f"sources/inbox/{payload['title']}.md", "id": f"job{len(posts)}", "curation": "queued"}
+
+    monkeypatch.setattr(cli, "_post", fake_post)
+    assert cli.main(["ingest", str(tmp_path / "f1.md"), str(tmp_path / "f2.md")]) == 0
+    # one POST per file; --title omitted so each title is the filename stem; active bundle carried
+    assert posts == [("f1", "alpha", "kb"), ("f2", "beta", "kb")]
+
+
 def test_legacy_multi_endpoint_config_migrates(monkeypatch, tmp_path: Path) -> None:
     p = _point_config(monkeypatch, tmp_path)
     # the old {current, bundles:{name:{endpoint,token}}} schema: adopt the active one's conn

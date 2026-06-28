@@ -24,6 +24,16 @@ uses an agent.
 - **Runtime** (`src/aiwiki/runtime/`) — triggers a headless `claude -p` curation pass on
   ingest. The only LLM-using part; disable it (`AIWIKI_CURATE=off`) for a pure read deploy.
 
+### Read/write split (multi-writer)
+
+A public **read-only mirror** (`AIWIKI_DISABLE=ingest,create,delete`) and a team **ingest
+worker** (curation enabled, with `claude` + a writable git remote) can be two deployments
+of the same service. `POST /ingest` only *queues* a source; a single serial worker drains
+the queue one job at a time (so concurrent submissions never race on the bundle/git),
+rebases onto the remote before curating, commits, and pushes. On a rejected push it rebases
+onto the moved remote and resolves any conflict with a second OKF-aware `claude` pass, then
+retries (a push that still fails keeps the local commit). The mirror pulls the result.
+
 ## Quick start
 
 ```bash

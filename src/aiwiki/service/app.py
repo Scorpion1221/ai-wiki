@@ -16,14 +16,15 @@ import os
 import re
 import shutil
 from collections import Counter
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
-from ..runtime import curate
 from . import bundle as B
 from . import ingest as I
+from . import worker
 
 # --- bundle root ---------------------------------------------------------------------
 # Multi-bundle: AIWIKI_BUNDLES points at a dir of bundles. Single-bundle (back-compat):
@@ -48,8 +49,19 @@ if not TOKEN:
 # Endpoints listed (comma-separated) in AIWIKI_DISABLE return 403 — e.g. a read-only
 # deploy uses AIWIKI_DISABLE=ingest,create,delete; a "drill-only" one adds search,grep.
 DISABLED = {x.strip() for x in os.environ.get("AIWIKI_DISABLE", "").split(",") if x.strip()}
+CURATE_ON = os.environ.get("AIWIKI_CURATE", "auto") != "off"
 
-app = FastAPI(title="ai-wiki", version="0.0.1")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On a writer (curation enabled), start the serial worker and recover prior jobs.
+    if CURATE_ON:
+        worker.ensure_started()
+        worker.recover(list(_registry().values()))
+    yield
+
+
+app = FastAPI(title="ai-wiki", version="0.0.1", lifespan=lifespan)
 
 
 def _auth(authorization: str | None) -> None:
@@ -212,11 +224,11 @@ class IngestBody(BaseModel):
 
 
 @app.post("/ingest")
-def ingest(body: IngestBody, background: BackgroundTasks, bundle: str | None = None,
-           authorization: str | None = Header(default=None)):
-    """Land a submitted markdown source in the bundle's sources/inbox/, then curate it.
+def ingest(body: IngestBody, bundle: str | None = None, authorization: str | None = Header(default=None)):
+    """Land a submitted markdown source in the bundle's sources/inbox/, then queue curation.
 
-    Curation (a headless `claude -p` pass) runs in the background unless AIWIKI_CURATE=off.
+    Curation (a headless `claude -p` pass) is processed by a single serial worker, so
+    concurrent ingests can't race on the bundle/git. Disabled with AIWIKI_CURATE=off.
     """
     _auth(authorization)
     _enabled("ingest")
@@ -226,9 +238,10 @@ def ingest(body: IngestBody, background: BackgroundTasks, bundle: str | None = N
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     job = I.new_job(BUNDLE, source_rel)
-    if os.environ.get("AIWIKI_CURATE", "auto") != "off":
-        background.add_task(curate.run, BUNDLE, source_rel, I.job_path(BUNDLE, job["id"]))
-        job["curation"] = "triggered"
+    if CURATE_ON:
+        worker.ensure_started()
+        worker.submit(BUNDLE, source_rel, I.job_path(BUNDLE, job["id"]))
+        job["curation"] = "queued"
     else:
         job["curation"] = "off"
     return job

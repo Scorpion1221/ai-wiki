@@ -86,6 +86,7 @@ def test_create_and_delete_bundle(root: Path, monkeypatch) -> None:
     assert r.status_code == 201 and r.json()["name"] == "kb-new"
     assert "kb-new" in {b["name"] for b in c.get("/bundles", headers=AUTH).json()["bundles"]}
     assert (root / "kb-new" / "purpose.md").is_file()  # scaffolded a valid bundle
+    assert ".okf/" in (root / "kb-new" / ".gitignore").read_text()  # job records never committed
     assert c.post("/bundles", json={"name": "kb-new"}, headers=AUTH).status_code == 409  # dup
     assert c.post("/bundles", json={"name": "../escape"}, headers=AUTH).status_code == 400  # name gate
     assert c.delete("/bundles/kb-new", headers=AUTH).status_code == 200

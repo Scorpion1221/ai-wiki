@@ -59,12 +59,18 @@ relationships) or `search`/`grep` to jump to a term.
 
 ## 4. Contribute knowledge (if the deployment allows writes)
 
-You never edit concepts directly. You submit a *source*; a curation agent folds it into
+You never edit concepts directly. You submit *sources*; a curation agent folds them into
 the bundle as probationary concepts and flags contradictions.
 
 ```bash
-ai-wiki ingest notes.md        # or:  cat notes.md | ai-wiki ingest -
-ai-wiki jobs <job-id>          # poll curation status
+ai-wiki ingest notes.md                 # one source
+ai-wiki ingest a.md b.md c.md           # many at once (one curation job each)
+cat notes.md | ai-wiki ingest -         # or from stdin
+ai-wiki jobs <job-id>                    # poll curation status
 ```
 
-Read-only deployments return `403` on `ingest` — that's expected.
+Reads and writes can live on different endpoints: a public, read-only **mirror**
+(`ingest` → `403`) and a team **ingest worker** (curation enabled) that has `claude` + a
+writable git remote. Submissions are queued and processed one at a time by the worker;
+it commits + pushes to the source repo, and the mirror pulls the result. Point `ai-wiki
+config set` at whichever endpoint you've been given.
