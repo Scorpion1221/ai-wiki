@@ -9,6 +9,7 @@ Standalone:  python -m aiwiki.runtime.curate <bundle> <source-rel> [<job.json>]
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +43,29 @@ def _save(job_path: Path, job: dict) -> None:
     job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _git_sync(bundle: Path, message: str) -> dict:
+    """Commit the bundle and try to push it. If the push fails, the commit still stands
+    ("push 不了就 commit"). Default behaviour after a successful curation; AIWIKI_GIT=off
+    disables it. The bundle is expected to be a git clone of its source-of-truth repo."""
+    if not (bundle / ".git").is_dir():
+        return {"committed": False, "pushed": False, "note": "bundle is not a git repo"}
+    git = ["git", "-C", str(bundle)]
+
+    def _run(args, t=120):
+        return subprocess.run([*git, *args], capture_output=True, text=True, timeout=t)
+
+    _run(["add", "-A"])
+    commit = _run(["commit", "-m", message])
+    if commit.returncode != 0:  # nothing to commit, or commit error
+        note = (commit.stdout + commit.stderr).strip()[-200:]
+        return {"committed": False, "pushed": False, "note": note or "nothing to commit"}
+    push = _run(["push"])
+    if push.returncode == 0:
+        return {"committed": True, "pushed": True, "note": ""}
+    return {"committed": True, "pushed": False,
+            "note": "push failed (commit kept): " + (push.stderr or "").strip()[-200:]}
+
+
 def run(bundle: Path, source_rel: str, job_path: Path) -> None:
     job = json.loads(job_path.read_text(encoding="utf-8")) if job_path.is_file() else {"source": source_rel}
     job["status"] = "running"
@@ -58,6 +82,9 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
         job["status"] = "done" if proc.returncode == 0 else "failed"
         if proc.returncode != 0:
             job["error"] = (proc.stderr or "").strip()[-2000:]
+        elif os.environ.get("AIWIKI_GIT", "auto") != "off":
+            # default: commit + push the updated bundle (push-fail keeps the commit)
+            job["git"] = _git_sync(bundle, f"ingest: {source_rel}")
     except subprocess.TimeoutExpired:
         job["status"] = "failed"
         job["error"] = f"curation timed out after {TIMEOUT_S}s"
