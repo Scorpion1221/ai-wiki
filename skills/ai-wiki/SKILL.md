@@ -88,7 +88,7 @@ fuzzy or cross-language recall when the location is unknown.
 | `ai-wiki search "<q>" [--top-k N] [--json]` | ranked lexical search (CJK-aware) |
 | `ai-wiki grep <pattern> [dir] [--fixed]` | regex search; `--fixed` = literal |
 | `ai-wiki log [--tail N]` | change ledger — what was added/corrected, when |
-| `ai-wiki ingest <file>` / `jobs <id>` | submit a source for curation (if writes are enabled) |
+| `ai-wiki ingest <files…>` / `jobs <id>` | submit source(s) — any type (md/pdf/image/text) — for curation (if writes enabled) |
 
 ## Limits
 
