@@ -10,17 +10,21 @@ jobs (interrupted by a restart) are marked failed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 from ..runtime import curate
+from . import ingest as I
 
 _q: queue.Queue = queue.Queue()
 _started = False
 _lock = threading.Lock()
+SWEEP_INTERVAL_S = 60
 
 
 def submit(bundle: Path, source_rel: str, job_path: Path) -> None:
@@ -45,6 +49,60 @@ def ensure_started() -> None:
             return
         threading.Thread(target=_run, name="curation-worker", daemon=True).start()
         _started = True
+
+
+def _known_shas(bundle: Path) -> set[str]:
+    """sha256 of every source any job already tracks (so the sweep never double-enqueues)."""
+    shas: set[str] = set()
+    jdir = bundle / ".okf" / "jobs"
+    if not jdir.is_dir():
+        return shas
+    for jf in jdir.glob("*.json"):
+        try:
+            s = json.loads(jf.read_text(encoding="utf-8")).get("sha256")
+        except (OSError, ValueError):
+            continue
+        if s:
+            shas.add(s)
+    return shas
+
+
+def sweep_once(bundles: list[Path]) -> int:
+    """Pick up sources sitting in sources/inbox/ that no job has seen yet (e.g. dropped
+    out-of-band) and queue the curatable ones. Deduped by content sha. Returns #queued."""
+    queued = 0
+    for b in bundles:
+        inbox = b / "sources" / "inbox"
+        if not inbox.is_dir():
+            continue
+        known = _known_shas(b)
+        for f in sorted(inbox.iterdir()):
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            data = f.read_bytes()
+            sha = hashlib.sha256(data).hexdigest()
+            if sha in known:
+                continue
+            source_rel = f.relative_to(b).as_posix()
+            curatable = I.is_curatable(source_rel, data)
+            job = I.new_job(b, source_rel, sha, curatable, filename=f.name)
+            known.add(sha)
+            if curatable:
+                submit(b, source_rel, I.job_path(b, job["id"]))
+                queued += 1
+    return queued
+
+
+def start_sweeper(bundles_fn) -> None:
+    """Run sweep_once on a timer, in the background. bundles_fn() yields current bundle paths."""
+    def _loop():
+        while True:
+            time.sleep(SWEEP_INTERVAL_S)
+            try:
+                sweep_once(bundles_fn())
+            except Exception:  # noqa: BLE001 — a bad sweep must never kill the loop
+                pass
+    threading.Thread(target=_loop, name="inbox-sweeper", daemon=True).start()
 
 
 def recover(bundles: list[Path]) -> None:

@@ -89,22 +89,35 @@ def test_legacy_flat_config_is_read(monkeypatch, tmp_path: Path) -> None:
     assert cli._active() is None
 
 
-def test_ingest_multiple_files(monkeypatch, tmp_path: Path) -> None:
+def test_ingest_multiple_files_base64(monkeypatch, tmp_path: Path) -> None:
+    import base64
     _point_config(monkeypatch, tmp_path)
     cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"])
     cli.main(["bundle", "use", "kb"])
     (tmp_path / "f1.md").write_text("alpha", encoding="utf-8")
-    (tmp_path / "f2.md").write_text("beta", encoding="utf-8")
+    (tmp_path / "f2.pdf").write_bytes(b"%PDF-1.4 binary\x00bytes")  # binary survives via base64
     posts = []
 
     def fake_post(route, payload, **kw):
-        posts.append((payload["title"], payload["text"], kw.get("bundle")))
-        return {"source": f"sources/inbox/{payload['title']}.md", "id": f"job{len(posts)}", "curation": "queued"}
+        posts.append((payload["filename"], base64.b64decode(payload["content_b64"]), kw.get("bundle")))
+        return {"source": f"sources/inbox/{payload['filename']}", "id": f"job{len(posts)}", "curation": "queued"}
 
     monkeypatch.setattr(cli, "_post", fake_post)
-    assert cli.main(["ingest", str(tmp_path / "f1.md"), str(tmp_path / "f2.md")]) == 0
-    # one POST per file; --title omitted so each title is the filename stem; active bundle carried
-    assert posts == [("f1", "alpha", "kb"), ("f2", "beta", "kb")]
+    assert cli.main(["ingest", str(tmp_path / "f1.md"), str(tmp_path / "f2.pdf")]) == 0
+    # one POST per file, raw bytes round-trip through base64, filename + active bundle carried
+    assert posts == [("f1.md", b"alpha", "kb"), ("f2.pdf", b"%PDF-1.4 binary\x00bytes", "kb")]
+
+
+def test_ingest_stdin_text(monkeypatch, tmp_path: Path) -> None:
+    import io
+    _point_config(monkeypatch, tmp_path)
+    cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"])
+    captured = {}
+    monkeypatch.setattr(cli, "_post", lambda route, payload, **kw: captured.update(payload) or
+                        {"source": "sources/inbox/x.md", "id": "j1", "curation": "queued"})
+    monkeypatch.setattr("sys.stdin", io.StringIO("pasted note"))
+    assert cli.main(["ingest", "--title", "My Note"]) == 0
+    assert captured == {"text": "pasted note", "title": "My Note"}  # stdin → text path
 
 
 def test_legacy_multi_endpoint_config_migrates(monkeypatch, tmp_path: Path) -> None:

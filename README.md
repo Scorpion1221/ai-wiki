@@ -28,11 +28,15 @@ uses an agent.
 
 A public **read-only mirror** (`AIWIKI_DISABLE=ingest,create,delete`) and a team **ingest
 worker** (curation enabled, with `claude` + a writable git remote) can be two deployments
-of the same service. `POST /ingest` only *queues* a source; a single serial worker drains
-the queue one job at a time (so concurrent submissions never race on the bundle/git),
-rebases onto the remote before curating, commits, and pushes. On a rejected push it rebases
-onto the moved remote and resolves any conflict with a second OKF-aware `claude` pass, then
-retries (a push that still fails keeps the local commit). The mirror pulls the result.
+of the same service — and behind one URL via path-routing (`/ingest`,`/jobs` → worker,
+reads → mirror). `POST /ingest` takes pasted `text` or any file (`content_b64`+`filename`),
+stored verbatim in `sources/inbox/`. Sources claude can read (text/code/PDF/image) are
+queued; other types are flagged `needs-conversion`. A single serial worker drains the
+queue one job at a time (so concurrent submissions never race on the bundle/git) — it also
+sweeps the inbox on a timer to pick up out-of-band drops — rebases onto the remote before
+curating, commits, and pushes. On a rejected push it rebases onto the moved remote and
+resolves any conflict with a second OKF-aware `claude` pass, then retries (a push that
+still fails keeps the local commit). The mirror pulls the result.
 
 ## Quick start
 

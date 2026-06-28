@@ -1,6 +1,11 @@
 """Receive side of the write path: land a submitted source in sources/inbox/ and track a job.
 
-Deterministic, stdlib only. The actual curation is delegated to runtime/curate.py.
+Sources are stored **as-is** — original bytes, original extension (a pasted text snippet
+with no filename defaults to .md). We never mutate the file; provenance (sha, title,
+original name, time) lives on the job record, and content-drift on sources/.hashes.yaml
+(written by scan_sources). The actual curation is delegated to runtime/curate.py.
+
+Deterministic, stdlib only.
 """
 from __future__ import annotations
 
@@ -11,8 +16,13 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-MAX_BYTES = 5_000_000
-_SLUG_RE = re.compile(r"[^\w一-鿿-]+")
+MAX_BYTES = 25_000_000
+_SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
+
+# Sources claude can curate directly: anything decodable as UTF-8 text (markdown, code,
+# csv, json, html, …) plus PDFs and images (read natively). Anything else is stored but
+# flagged needs-conversion rather than auto-curated.
+_READABLE_BINARY_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 def _now() -> str:
@@ -20,39 +30,64 @@ def _now() -> str:
 
 
 def slugify(title: str | None, fallback: str) -> str:
-    s = _SLUG_RE.sub("-", (title or "").strip().lower()).strip("-")
+    s = _SLUG_RE.sub("-", (title or "").strip().lower()).strip("-.")
     return (s or fallback)[:60]
 
 
-def write_source(bundle: Path, text: str, title: str | None = None) -> str:
-    """Snapshot a submitted markdown source into sources/inbox/. Returns its bundle path."""
-    if not text or not text.strip():
-        raise ValueError("empty source text")
-    if len(text.encode("utf-8")) > MAX_BYTES:
+def is_curatable(filename: str, data: bytes) -> bool:
+    if Path(filename).suffix.lower() in _READABLE_BINARY_EXT:
+        return True
+    try:
+        data.decode("utf-8")  # text / code / markup / csv / json / …
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def write_source(bundle: Path, data: bytes, filename: str | None = None,
+                 title: str | None = None) -> tuple[str, str]:
+    """Snapshot a submitted source (raw bytes) into sources/inbox/. Returns (bundle-path, sha256).
+
+    The file is stored verbatim under its original extension (or .md for pasted text).
+    """
+    if not data or not data.strip():
+        raise ValueError("empty source")
+    if len(data) > MAX_BYTES:
         raise ValueError(f"source exceeds {MAX_BYTES} bytes")
-    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    sha = hashlib.sha256(data).hexdigest()
     inbox = bundle / "sources" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
-    dest = inbox / f"{slugify(title, 'ingest-' + sha[:8])}.md"
+    if filename:
+        ext = Path(filename).suffix.lower() or ".md"
+        stem = slugify(Path(filename).stem, "ingest-" + sha[:8])
+        name = f"{stem}{ext}"
+    else:  # pasted text, no filename → markdown
+        name = f"{slugify(title, 'ingest-' + sha[:8])}.md"
+    dest = inbox / name
     n = 1
     while dest.exists():
-        dest = inbox / f"{dest.stem.rsplit('-', 1)[0] if n > 1 else dest.stem}-{n}.md"
+        dest = inbox / f"{dest.stem.rsplit('-', 1)[0] if n > 1 else dest.stem}-{n}{dest.suffix}"
         n += 1
-    fm = f"---\nsource_type: ingested\ningested: {_now()}\nsource_sha256: {sha}\n"
-    if title:
-        fm += f"title: {json.dumps(title, ensure_ascii=False)}\n"
-    fm += "---\n\n"
-    dest.write_text(fm + text.rstrip() + "\n", encoding="utf-8")
-    return dest.relative_to(bundle).as_posix()
+    dest.write_bytes(data)
+    return dest.relative_to(bundle).as_posix(), sha
 
 
 def job_path(bundle: Path, job_id: str) -> Path:
     return bundle / ".okf" / "jobs" / f"{job_id}.json"
 
 
-def new_job(bundle: Path, source_rel: str) -> dict:
+def new_job(bundle: Path, source_rel: str, sha: str, curatable: bool,
+            title: str | None = None, filename: str | None = None) -> dict:
     (bundle / ".okf" / "jobs").mkdir(parents=True, exist_ok=True)
-    job = {"id": uuid.uuid4().hex[:12], "source": source_rel, "status": "queued", "created": _now()}
+    job = {
+        "id": uuid.uuid4().hex[:12], "source": source_rel, "sha256": sha,
+        "status": "queued" if curatable else "needs-conversion",
+        "created": _now(),
+    }
+    if title:
+        job["title"] = title
+    if filename:
+        job["original_name"] = filename
     job_path(bundle, job["id"]).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     return job
 

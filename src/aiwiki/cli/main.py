@@ -18,6 +18,7 @@ and migrated transparently.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -219,17 +220,18 @@ def main(argv=None) -> int:
     elif a.cmd == "ingest":
         files = a.files or ["-"]
         for f in files:
-            if f == "-":
-                text, title = sys.stdin.read(), (a.title if len(files) == 1 else None)
-            else:
-                text = Path(f).expanduser().read_text(encoding="utf-8")
-                # one explicit title only makes sense for a single file; else use the filename
-                title = a.title if (a.title and len(files) == 1) else Path(f).stem
-            job = _post("/ingest", {"text": text, "title": title}, bundle=bsel)
+            single = len(files) == 1
+            if f == "-":  # pasted text from stdin → stored as .md
+                payload = {"text": sys.stdin.read(), "title": a.title if single else None}
+            else:  # any file: ship raw bytes base64 so binaries (pdf/image/…) survive intact
+                p = Path(f).expanduser()
+                payload = {"content_b64": base64.b64encode(p.read_bytes()).decode("ascii"),
+                           "filename": p.name, "title": a.title if (a.title and single) else None}
+            job = _post("/ingest", payload, bundle=bsel)
             label = f if f != "-" else "(stdin)"
             print(f"{label} → source {job['source']}  job {job['id']}  ({job.get('curation', '?')})")
         if len(files) > 1:
-            print(f"\nqueued {len(files)} source(s); poll with: ai-wiki jobs <job-id>")
+            print(f"\nsubmitted {len(files)} source(s); poll with: ai-wiki jobs <job-id>")
         else:
             print(f"poll:   ai-wiki jobs {job['id']}")
     elif a.cmd == "jobs":

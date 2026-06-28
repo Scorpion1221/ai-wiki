@@ -12,6 +12,8 @@ Config via env (read at import):
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 import shutil
@@ -54,10 +56,12 @@ CURATE_ON = os.environ.get("AIWIKI_CURATE", "auto") != "off"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # On a writer (curation enabled), start the serial worker and recover prior jobs.
+    # On a writer (curation enabled): start the serial worker, recover prior jobs, and
+    # sweep the inbox on a timer to pick up sources dropped out-of-band.
     if CURATE_ON:
         worker.ensure_started()
         worker.recover(list(_registry().values()))
+        worker.start_sweeper(lambda: list(_registry().values()))
     yield
 
 
@@ -219,29 +223,47 @@ def log(tail: int = 30, bundle: str | None = None, authorization: str | None = H
 
 
 class IngestBody(BaseModel):
-    text: str
+    text: str | None = None            # pasted text → stored as .md
+    content_b64: str | None = None     # any file (binary-safe), base64-encoded
+    filename: str | None = None        # original name (drives the stored extension)
     title: str | None = None
 
 
 @app.post("/ingest")
 def ingest(body: IngestBody, bundle: str | None = None, authorization: str | None = Header(default=None)):
-    """Land a submitted markdown source in the bundle's sources/inbox/, then queue curation.
+    """Land a submitted source (any type) in the bundle's sources/inbox/, then queue curation.
 
-    Curation (a headless `claude -p` pass) is processed by a single serial worker, so
-    concurrent ingests can't race on the bundle/git. Disabled with AIWIKI_CURATE=off.
+    Accepts pasted `text` (stored .md) or any file as `content_b64`+`filename` (stored
+    verbatim). Sources claude can read (text/code/pdf/image) are queued for curation — a
+    single serial worker processes one at a time, so concurrent ingests never race on the
+    bundle/git. Other types are stored but flagged `needs-conversion`. Disabled with
+    AIWIKI_CURATE=off; the whole endpoint is gated by AIWIKI_DISABLE=ingest.
     """
     _auth(authorization)
     _enabled("ingest")
     _name, BUNDLE = _resolve(bundle)
+    if body.content_b64 is not None:
+        try:
+            data = base64.b64decode(body.content_b64, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(status_code=400, detail="content_b64 is not valid base64") from None
+        filename = body.filename or "upload"
+    elif body.text is not None:
+        data, filename = body.text.encode("utf-8"), body.filename
+    else:
+        raise HTTPException(status_code=400, detail="provide `text` or `content_b64`")
     try:
-        source_rel = I.write_source(BUNDLE, body.text, body.title)
+        source_rel, sha = I.write_source(BUNDLE, data, filename, body.title)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
-    job = I.new_job(BUNDLE, source_rel)
-    if CURATE_ON:
+    curatable = I.is_curatable(source_rel, data)
+    job = I.new_job(BUNDLE, source_rel, sha, curatable, body.title, filename)
+    if curatable and CURATE_ON:
         worker.ensure_started()
         worker.submit(BUNDLE, source_rel, I.job_path(BUNDLE, job["id"]))
         job["curation"] = "queued"
+    elif not curatable:
+        job["curation"] = "needs-conversion"  # stored as a snapshot, not auto-curated
     else:
         job["curation"] = "off"
     return job

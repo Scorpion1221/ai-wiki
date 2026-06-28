@@ -64,10 +64,14 @@ the bundle as probationary concepts and flags contradictions.
 
 ```bash
 ai-wiki ingest notes.md                 # one source
-ai-wiki ingest a.md b.md c.md           # many at once (one curation job each)
-cat notes.md | ai-wiki ingest -         # or from stdin
+ai-wiki ingest a.md report.pdf chart.png  # any types, many at once (one job each)
+cat notes.md | ai-wiki ingest -         # pasted text from stdin (stored as .md)
 ai-wiki jobs <job-id>                    # poll curation status
 ```
+
+Any file type is accepted and stored verbatim. Sources claude can read directly
+(text/markdown/code/PDF/images) are curated automatically; other types (e.g. docx,
+audio) are stored but flagged `needs-conversion` rather than guessed at.
 
 Reads and writes can live on different endpoints: a public, read-only **mirror**
 (`ingest` → `403`) and a team **ingest worker** (curation enabled) that has `claude` + a
