@@ -51,6 +51,7 @@ def bundle(tmp_path: Path) -> Path:
 
 def _client(bundle: Path, monkeypatch):
     monkeypatch.setenv("AIWIKI_BUNDLE", str(bundle))
+    monkeypatch.delenv("AIWIKI_BUNDLES", raising=False)
     monkeypatch.setenv("AIWIKI_TOKEN", "testtok")
     monkeypatch.setenv("AIWIKI_CURATE", "off")
     from aiwiki.service import app as appmod

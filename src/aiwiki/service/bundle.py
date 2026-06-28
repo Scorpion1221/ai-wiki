@@ -15,6 +15,39 @@ RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SKIP_TOP = {"sources", ".okf"}
 _CJK = r"一-鿿"
 
+# A directory is a *bundle* (knowledge base) if it carries one of these markers. Used to
+# discover the bundles hosted under a server's root dir, and to scaffold a new empty one.
+_BUNDLE_MARKERS = ("SCHEMA.md", "purpose.md", "index.md", ".okf")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")  # bundle names: slug-ish, filesystem-safe
+
+
+def is_bundle(p: Path) -> bool:
+    return p.is_dir() and not p.name.startswith(".") and any((p / m).exists() for m in _BUNDLE_MARKERS)
+
+
+def discover(root: Path) -> dict[str, Path]:
+    """Map bundle-name -> path for every bundle directly under `root` (name-sorted)."""
+    if not root.is_dir():
+        return {}
+    return {p.name: p for p in sorted(root.iterdir()) if is_bundle(p)}
+
+
+def count_concepts(root: Path) -> int:
+    return sum(1 for _ in concepts(root))
+
+
+def scaffold(target: Path, name: str) -> None:
+    """Create a minimal, valid empty bundle at `target` (ingest then populates it)."""
+    (target / ".okf" / "jobs").mkdir(parents=True, exist_ok=True)
+    (target / "sources" / "inbox").mkdir(parents=True, exist_ok=True)
+    (target / "purpose.md").write_text(
+        f"# Purpose\n\nKnowledge base **{name}** — newly created. Ingest sources to populate it.\n",
+        encoding="utf-8")
+    (target / "index.md").write_text(f"# {name}\n\n(empty — no concepts yet)\n", encoding="utf-8")
+    (target / "index-meta.yaml").write_text(
+        f"title: {name}\ndescription: \"\"\ndirectories: {{}}\n", encoding="utf-8")
+    (target / "log.md").write_text("# Change log\n", encoding="utf-8")
+
 # Structural (non-concept) markdown files, with what each is.
 _DOC_LABELS = {
     "SCHEMA.md": "structural contract — read first (taxonomy, conventions, update policy)",

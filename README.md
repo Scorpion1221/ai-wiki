@@ -16,8 +16,10 @@ uses an agent.
   detection, index generation, link/health lint, and update invariants (array-union,
   identity-lock, body-shrink guard). PyYAML + stdlib only; no LLM, no network.
 - **Service** (`src/aiwiki/service/`) — FastAPI read API (`health/ls/cat/grep/search/log`)
-  + write path (`POST /ingest`, `GET /jobs/{id}`). Bearer-token auth, path sandboxing,
-  and an `AIWIKI_DISABLE` switch for read-only / drill-only deployments.
+  + write path (`POST /ingest`, `GET /jobs/{id}`). One server hosts **many bundles** under
+  a single URL: list them with `GET /bundles`, pick one per request with `?bundle=<name>`,
+  create/delete with `POST`/`DELETE /bundles`. Bearer-token auth, path sandboxing, and an
+  `AIWIKI_DISABLE` switch for read-only / drill-only deployments.
 - **CLI** (`src/aiwiki/cli/`) — `ai-wiki`, a thin stdlib-only client.
 - **Runtime** (`src/aiwiki/runtime/`) — triggers a headless `claude -p` curation pass on
   ingest. The only LLM-using part; disable it (`AIWIKI_CURATE=off`) for a pure read deploy.
@@ -27,8 +29,10 @@ uses an agent.
 ```bash
 uv sync --extra service --extra dev
 uv run ai-wiki config set --endpoint http://127.0.0.1:8787 --token "$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
-AIWIKI_BUNDLE=./bundle ./run-local.sh        # serve a bundle on :8787 (reads the token from the CLI config)
+AIWIKI_BUNDLES=./bundles ./run-local.sh      # serve a dir of bundles on :8787 (token from CLI config)
 
+ai-wiki bundle list        # bundles hosted on the server (* = active)
+ai-wiki bundle use <name>  # switch the active bundle (or `bundle create <name>`)
 ai-wiki health
 ai-wiki ls                 # list a level, like shell ls
 ai-wiki cat <path>
@@ -42,10 +46,12 @@ Engine CLIs are exposed as `okf-validate`, `okf-scan-sources`, `okf-lint`, etc.
 
 | Var | Meaning |
 |-----|---------|
-| `AIWIKI_BUNDLE` | path to the OKF bundle to serve |
+| `AIWIKI_BUNDLES` | dir holding one bundle per subdirectory (multi-bundle mode) |
+| `AIWIKI_BUNDLE` | a single bundle dir (single-bundle mode; back-compat) |
+| `AIWIKI_DEFAULT_BUNDLE` | bundle used when a request omits `?bundle=` (optional) |
 | `AIWIKI_TOKEN` | bearer token clients must present |
 | `AIWIKI_PORT` | service port (default 8787) |
-| `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,search,grep`) |
+| `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,create,delete,search,grep`) |
 | `AIWIKI_CURATE` | `auto` (default) or `off` to disable the curation trigger |
 
 Requires Python ≥ 3.11. Licensed under Apache-2.0 (see LICENSE / NOTICE).
