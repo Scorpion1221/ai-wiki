@@ -57,17 +57,16 @@ def write_source(bundle: Path, data: bytes, filename: str | None = None,
     sha = hashlib.sha256(data).hexdigest()
     inbox = bundle / "sources" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
+    # The stored name carries the content sha, so two concurrent uploads of *different*
+    # content can never map to the same path (kills the same-filename TOCTOU race), while
+    # an exact re-upload maps to the same path and just rewrites identical bytes (idempotent).
+    short = sha[:8]
     if filename:
         ext = Path(filename).suffix.lower() or ".md"
-        stem = slugify(Path(filename).stem, "ingest-" + sha[:8])
-        name = f"{stem}{ext}"
+        name = f"{slugify(Path(filename).stem, 'ingest')}-{short}{ext}"
     else:  # pasted text, no filename → markdown
-        name = f"{slugify(title, 'ingest-' + sha[:8])}.md"
+        name = f"{slugify(title, 'ingest')}-{short}.md"
     dest = inbox / name
-    n = 1
-    while dest.exists():
-        dest = inbox / f"{dest.stem.rsplit('-', 1)[0] if n > 1 else dest.stem}-{n}{dest.suffix}"
-        n += 1
     dest.write_bytes(data)
     return dest.relative_to(bundle).as_posix(), sha
 

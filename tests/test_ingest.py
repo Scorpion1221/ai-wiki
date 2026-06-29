@@ -37,10 +37,22 @@ def test_write_source_is_verbatim(bundle: Path) -> None:
     rel, sha = I.write_source(bundle, b"%PDF-1.4\x00\xff raw", "Report Q3.pdf", title="t")
     p = bundle / rel
     assert rel.endswith(".pdf") and p.read_bytes() == b"%PDF-1.4\x00\xff raw"  # bytes untouched
-    assert "report-q3" in rel  # original name slugified, extension preserved
+    assert "report-q3" in rel and sha[:8] in rel  # slugified name + content-sha suffix, ext preserved
     # pasted text (no filename) lands as .md, with NO injected frontmatter
     rel2, _ = I.write_source(bundle, b"just text", None, title="note")
     assert rel2.endswith(".md") and (bundle / rel2).read_text() == "just text"
+
+
+def test_write_source_no_samename_collision(bundle: Path) -> None:
+    # two different docs sharing a filename get distinct paths (sha suffix) — no overwrite
+    a, _ = I.write_source(bundle, b"alpha content", "report.pdf")
+    b, _ = I.write_source(bundle, b"beta content", "report.pdf")
+    assert a != b
+    assert (bundle / a).read_bytes() == b"alpha content"
+    assert (bundle / b).read_bytes() == b"beta content"
+    # an exact re-upload is idempotent (same path, same bytes)
+    a2, _ = I.write_source(bundle, b"alpha content", "report.pdf")
+    assert a2 == a
 
 
 def test_is_curatable() -> None:
