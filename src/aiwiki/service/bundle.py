@@ -194,8 +194,24 @@ def _tokens(q: str) -> set[str]:
     return toks
 
 
+def _snippet(body: str, terms: set[str], width: int = 160) -> str:
+    """Best-matching body line — lets the caller judge relevance without a cat."""
+    best, best_hits = "", 0
+    for line in body.splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if not stripped:
+            continue
+        low = stripped.lower()
+        hits = sum(low.count(t) for t in terms)
+        if hits > best_hits:
+            best, best_hits = stripped, hits
+    return best[:width]
+
+
 def search(root: Path, query: str, top_k: int = 10) -> list[dict]:
-    """Lexical, CJK-aware. title*8 + tags*4 + body*1, status/recency as tie-breakers."""
+    """Lexical, CJK-aware. (title|aliases)*8 + (tags|description)*4 + body*1,
+    status/recency as tie-breakers. Results carry description + best-line snippet
+    so the caller can prune candidates without cat-ing each one."""
     terms = _tokens(query)
     if not terms:
         return []
@@ -204,9 +220,13 @@ def search(root: Path, query: str, top_k: int = 10) -> list[dict]:
     for p, rel in concepts(root):
         fm, body = parse(p.read_text(encoding="utf-8"))
         title = str(fm.get("title") or "").lower()
+        aliases = " ".join(map(str, fm.get("aliases") or [])).lower()
         tags = " ".join(map(str, fm.get("tags") or [])).lower()
+        desc = str(fm.get("description") or "").lower()
         low = body.lower()
-        score = sum(8 * title.count(t) + 4 * tags.count(t) + low.count(t) for t in terms)
+        score = sum(8 * (title.count(t) + aliases.count(t))
+                    + 4 * (tags.count(t) + desc.count(t))
+                    + low.count(t) for t in terms)
         if score:
             ts = str(fm.get("source_updated_at") or fm.get("timestamp") or "")
             scored.append((score, rank.get(fm.get("status"), 0), ts, {
@@ -214,7 +234,56 @@ def search(root: Path, query: str, top_k: int = 10) -> list[dict]:
                 "status": fm.get("status"), "timestamp": str(fm.get("timestamp") or ""),
                 "source_updated_at": str(fm.get("source_updated_at") or ""),
                 "tags": fm.get("tags") or [], "score": score,
+                "description": fm.get("description"),
+                "snippet": _snippet(body, terms),
             }))
     # score desc, then status-rank desc, then recency (source_updated_at/timestamp) desc
     scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
     return [d for *_, d in scored[:top_k]]
+
+
+_LINK_RE = re.compile(r"\]\(([^)\s]+\.md)(?:#[^)]*)?\)")
+
+
+def _outbound(root: Path, p: Path, rel: str, ids: set[str]) -> list[str]:
+    """Concept paths this concept's body links to (relative markdown links only)."""
+    _fm, body = parse(p.read_text(encoding="utf-8"))
+    out, cdir = [], (root / rel).parent
+    for m in _LINK_RE.finditer(body):
+        target = m.group(1)
+        if "://" in target or target.startswith("/"):
+            continue
+        try:
+            resolved = (cdir / target).resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            continue
+        if resolved in ids and resolved != rel and resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def links(root: Path, rel: str) -> dict:
+    """Both directions of the concept link graph for `rel`: outbound (what it
+    references) and inbound (what references it — the backlinks `# Related concepts`
+    alone cannot give, since concept links are forward-only)."""
+    rel = rel.strip("/")
+    target = safe_resolve(root, rel)  # ValueError (escape) handled by caller
+    if not target.is_file():
+        raise FileNotFoundError(rel)
+    by_rel = {r: p for p, r in concepts(root)}
+    if rel not in by_rel:
+        raise FileNotFoundError(rel)  # reserved/structural files have no link graph
+    ids = set(by_rel)
+
+    def entry(r: str) -> dict:
+        fm, _ = parse(by_rel[r].read_text(encoding="utf-8"))
+        return {"path": r, "title": fm.get("title"), "type": fm.get("type"),
+                "description": fm.get("description")}
+
+    outbound = _outbound(root, by_rel[rel], rel, ids)
+    inbound = [r for r in sorted(ids)
+               if r != rel and rel in _outbound(root, by_rel[r], r, ids)]
+    fm, _ = parse(by_rel[rel].read_text(encoding="utf-8"))
+    return {"path": rel, "title": fm.get("title"),
+            "outbound": [entry(r) for r in outbound],
+            "inbound": [entry(r) for r in inbound]}

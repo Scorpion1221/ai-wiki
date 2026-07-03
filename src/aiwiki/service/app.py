@@ -213,6 +213,19 @@ def search(q: str = Query(...), top_k: int = 10, bundle: str | None = None,
     return {"results": B.search(BUNDLE, q, top_k)}
 
 
+@app.get("/links")
+def links(path: str = Query(...), bundle: str | None = None,
+          authorization: str | None = Header(default=None)):
+    _auth(authorization)
+    _name, BUNDLE = _resolve(bundle)
+    try:
+        return B.links(BUNDLE, path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="path escapes bundle") from None
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"not a concept: {path}") from None
+
+
 @app.get("/log")
 def log(tail: int = 30, bundle: str | None = None, authorization: str | None = Header(default=None)):
     _auth(authorization)

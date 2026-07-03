@@ -62,8 +62,32 @@ ai-wiki grep "<pattern>"                # regex across all concepts
 ai-wiki grep "<literal>" --fixed        # literal — use --fixed for paths/symbols
 ```
 
+Each search hit carries a `description` and a best-matching body `snippet` — read those
+before deciding whether to `cat` a result; don't blind-cat every hit in the list.
+
 Tip: when you know the exact term, `grep`/`ls` beat `search`; reach for `search` for
 fuzzy or cross-language recall when the location is unknown.
+
+**Trace the link graph both directions:**
+
+```
+ai-wiki links <dir>/<concept>.md   # outbound (what it cites) + inbound (what cites it)
+```
+
+`# Related concepts` in a page's body only shows outbound links. Use `links` to also see
+*backlinks* — other concepts that point at this one — which is how you find, e.g., every
+experiment/risk/playbook touching a metric, not just what that metric happens to link out to.
+
+**For vague, indirect, or cross-language questions — fan out, then close the loop:**
+
+1. Issue 2-3 `search` calls with different phrasings of the question: the user's original
+   wording, an English/Chinese switch, and a paraphrase avoiding the docs' likely exact
+   terms. Take the union of hits — a single phrasing under-recalls on a bilingual KB.
+2. For each strong hit, run `ai-wiki links <path>` and skim one hop out (both directions).
+   If that hop surfaces nothing new and relevant, treat coverage as complete; if it does,
+   follow it before answering.
+3. Only settle for a single `search` call + its `# Related concepts` when the question
+   uses the docs' own terminology and clearly has one home (i.e. an "easy" lookup).
 
 ## 3. Answer with discipline
 
@@ -85,14 +109,14 @@ fuzzy or cross-language recall when the location is unknown.
 | `ai-wiki -b <name> <cmd>` | run one command against a non-active bundle |
 | `ai-wiki ls [dir] [-R] [-a] [--json]` | list a level like `ls`; `-R` recurse, `-a` dotfiles |
 | `ai-wiki cat <path>` | read a concept (or any file in the bundle) |
-| `ai-wiki search "<q>" [--top-k N] [--json]` | ranked lexical search (CJK-aware) |
+| `ai-wiki search "<q>" [--top-k N] [--json]` | ranked lexical search (CJK-aware); hits include description + snippet |
 | `ai-wiki grep <pattern> [dir] [--fixed]` | regex search; `--fixed` = literal |
+| `ai-wiki links <path> [--json]` | outbound + inbound (backlink) graph for one concept |
 | `ai-wiki log [--tail N]` | change ledger — what was added/corrected, when |
 | `ai-wiki ingest <files…>` / `jobs <id>` | submit source(s) — any type (md/pdf/image/text) — for curation (if writes enabled) |
 
 ## Limits
 
-- Links are **forward-only** (a concept lists what it references). There is no `backlinks`
-  command — to find "what links here", `grep` the filename. Whole-graph / centrality
-  questions belong to an offline graph view, not this CLI.
+- Whole-graph / centrality questions (e.g. "most-referenced concept") belong to an offline
+  graph view, not this CLI — `links` covers one concept's neighborhood, not the full graph.
 - Read-only deployments return `403` on `ingest` — that's expected.

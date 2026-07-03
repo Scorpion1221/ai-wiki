@@ -166,6 +166,9 @@ def main(argv=None) -> int:
     p_search.add_argument("query")
     p_search.add_argument("--top-k", type=int, default=10)
     p_search.add_argument("--json", action="store_true")
+    p_links = sub.add_parser("links", help="link graph of a concept: outbound + inbound (backlinks)")
+    p_links.add_argument("path")
+    p_links.add_argument("--json", action="store_true")
     p_log = sub.add_parser("log", help="recent change ledger")
     p_log.add_argument("--tail", type=int, default=30)
     p_ing = sub.add_parser("ingest", help="submit source(s) for curation into the active bundle")
@@ -213,8 +216,25 @@ def main(argv=None) -> int:
             for r in d["results"]:
                 when = r.get("source_updated_at") or r.get("timestamp") or ""
                 print(f"  [{r['score']:>3}] {r['path']:<46} {when}  {r.get('title') or ''}")
+                if r.get("description"):
+                    print(f"        {r['description'][:150]}")
+                if r.get("snippet"):
+                    print(f"        » {r['snippet']}")
             if not d["results"]:
                 print("  (no matches)")
+    elif a.cmd == "links":
+        d = _api("/links", bundle=bsel, path=a.path)
+        if a.json:
+            print(json.dumps(d, ensure_ascii=False, indent=2))
+        else:
+            print(f"{d['path']}  {d.get('title') or ''}")
+            for direction, arrow in (("outbound", "→"), ("inbound", "←")):
+                rows = d.get(direction) or []
+                print(f"\n{arrow} {direction} ({len(rows)}):")
+                for r in rows:
+                    print(f"    {r['path']:<50} {r.get('title') or ''}")
+                if not rows:
+                    print("    (none)")
     elif a.cmd == "log":
         print("\n".join(_api("/log", bundle=bsel, tail=a.tail)["lines"]))
     elif a.cmd == "ingest":

@@ -198,6 +198,15 @@ def lint(root):
                     add("low", "tag", rel, f"tag not in SCHEMA.md taxonomy: {t}",
                         "add it to SCHEMA.md or retag")
 
+    # --- aliases (optional field, but must be a list of strings when present) ---
+    for rel, (fm, _, _) in concepts.items():
+        if "aliases" not in fm:
+            continue
+        aliases = fm.get("aliases")
+        if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+            add("low", "aliases", rel, "aliases: must be a YAML list of strings",
+                "e.g. aliases: [周包升级月包, W2M]")
+
     # --- page size ---
     for rel, (_, _, n) in concepts.items():
         if n > PAGE_LIMIT:
