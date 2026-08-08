@@ -9,4 +9,6 @@ Subpackages:
 See docs/design.md for the full architecture.
 """
 
-__version__ = "0.0.1"
+from aiwiki.version import VERSION
+
+__version__ = VERSION

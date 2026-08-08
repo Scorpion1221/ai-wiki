@@ -1,122 +1,107 @@
 ---
 name: ai-wiki
 description: >-
-  Consult a curated OKF knowledge bundle — products, features, metrics & their
-  definitions/SQL, experiments and their readouts, data sources, playbooks, decisions,
-  and risks — through the read-only `ai-wiki` CLI. Use whenever a question's answer
-  likely lives in the team's knowledge base / wiki: a metric's definition or how it is
-  computed, an experiment result, a past decision, an event/field name, a price, or
-  "look it up in the wiki". Navigate with ls/cat/search/grep, trust only what the CLI
-  returns, and cite the concept paths used. Read-only by default (writes go through ingest).
+  Consult the team's curated OKF knowledge bundle through `ai-wiki`. Use for metric
+  definitions/SQL, product or feature facts, event and field names, pricing, experiments,
+  past decisions, risks, playbooks, and any request to look something up in the wiki.
+  Cite concept paths and never invent facts that the CLI did not return.
 ---
 
-# ai-wiki — consult the knowledge base
+# ai-wiki — consult curated team knowledge
 
-`ai-wiki` is a read-only window onto a curated OKF knowledge bundle served over an HTTP
-API. The service runs no LLM — everything it returns is authored, verifiable content.
-Trust it over memory, and cite the concept paths you use.
+`ai-wiki` is a deterministic read window over an authored OKF bundle. It runs no LLM on
+reads. Treat its returned concepts as evidence, not memory, and cite the paths you use.
 
-## 0. Be configured + reachable
+## Start from live context
 
-```
-ai-wiki health          # active bundle: size + counts by type/status
-ai-wiki bundle list     # knowledge bases hosted on the server (* = active)
-```
-
-One server hosts many bundles. If unconfigured, connect (ask the owner for endpoint + token),
-then pick a bundle:
-
-```
-ai-wiki config set --endpoint <url> --token <token>   # connect to the server
-ai-wiki bundle use <name>     # switch active bundle;  -b <name> overrides per command
-ai-wiki bundle create <name>  # create a new empty bundle on the server (if writes allowed)
+```sh
+ai-wiki                    # active bundle, status counts, directories, next commands
+ai-wiki health             # full type/status counts
+ai-wiki bundle list        # bundles hosted by this server
 ```
 
-## 1. Orient first (once per session)
+If the binary is missing, install it once with
+`uv tool install git+https://github.com/Scorpion1221/ai-wiki`. If it is unconfigured, ask
+the owner for the endpoint and token, then run:
 
-```
-ai-wiki cat SCHEMA.md      # concept taxonomy, conventions, update policy
-ai-wiki cat purpose.md     # why this KB exists, scope
-ai-wiki ls                 # the directory map (each dir = a count + description)
-```
-
-## 2. Find content — two ways, usually combined
-
-**Drill (filesystem-like, the default):**
-
-```
-ai-wiki ls                       # top-level dirs + descriptions
-ai-wiki ls <dir>                 # concepts in a directory
-ai-wiki cat <dir>/<concept>.md   # read one
+```sh
+ai-wiki config set --endpoint <url> --token <token>
+ai-wiki bundle use <name>                 # -b <name> overrides once per command
 ```
 
-Every concept ends with a `# Related concepts` section of links — **follow them** to
-pull the thread (e.g. experiment → metric → risk → decision). That is how relationships
-are traced.
+Most metadata and collection commands emit compact TOON. `cat` deliberately emits raw
+Markdown so its content stays readable. Structured commands that support `--json` keep it
+as an escape hatch.
 
-**Search (for fuzzy recall, or when you don't know where it lives):**
+## Lookup workflow
 
-```
-ai-wiki search "<keywords>" --top-k 8   # ranked, CJK-aware
-ai-wiki grep "<pattern>"                # regex across all concepts
-ai-wiki grep "<literal>" --fixed        # literal — use --fixed for paths/symbols
-```
+### 1. Orient once per bundle
 
-Each search hit carries a `description` and a best-matching body `snippet` — read those
-before deciding whether to `cat` a result; don't blind-cat every hit in the list.
-
-Tip: when you know the exact term, `grep`/`ls` beat `search`; reach for `search` for
-fuzzy or cross-language recall when the location is unknown.
-
-**Trace the link graph both directions:**
-
-```
-ai-wiki links <dir>/<concept>.md   # outbound (what it cites) + inbound (what cites it)
+```sh
+ai-wiki cat SCHEMA.md       # taxonomy, conventions, statuses, update policy
+ai-wiki cat purpose.md      # scope and purpose
+ai-wiki ls                  # directory map
 ```
 
-`# Related concepts` in a page's body only shows outbound links. Use `links` to also see
-*backlinks* — other concepts that point at this one — which is how you find, e.g., every
-experiment/risk/playbook touching a metric, not just what that metric happens to link out to.
+### 2. Choose the cheapest retrieval primitive
 
-**For vague, indirect, or cross-language questions — fan out, then close the loop:**
+```sh
+ai-wiki ls <dir>                         # known directory
+ai-wiki grep "<exact term>" --fixed      # exact event, field, path, price, symbol
+ai-wiki grep "<regex>"                   # regex across concepts
+ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
+```
 
-1. Issue 2-3 `search` calls with different phrasings of the question: the user's original
-   wording, an English/Chinese switch, and a paraphrase avoiding the docs' likely exact
-   terms. Take the union of hits — a single phrasing under-recalls on a bilingual KB.
-2. For each strong hit, run `ai-wiki links <path>` and skim one hop out (both directions).
-   If that hop surfaces nothing new and relevant, treat coverage as complete; if it does,
-   follow it before answering.
-3. Only settle for a single `search` call + its `# Related concepts` when the question
-   uses the docs' own terminology and clearly has one home (i.e. an "easy" lookup).
+Search results already include path, title, status, description/snippet context, and total
+count. Do not blind-`cat` every hit. Use `--top-k <N>` only when the default truncates a
+relevant result set. `grep` prints at most 100 hits by default and tells you when to rerun
+with `--limit 0`.
 
-## 3. Answer with discipline
+For vague, indirect, or bilingual questions, try 2–3 meaningfully different queries
+(original wording, Chinese/English switch, and a paraphrase). Do not fan out mechanically
+when the user's exact term already has one obvious home.
 
-- **Cite concept paths**: e.g. "Based on `metrics/<x>.md` and `experiments/<y>.md`…".
-- **Only trust CLI output.** Never invent metric definitions, prices, event names, dates,
-  or experiment outcomes the CLI did not return.
-- **Respect status/confidence.** Concepts carry `status` (draft/reviewed/canonical/stale)
-  and `confidence`. Flag uncertainty for `draft`/low-confidence concepts rather than
-  presenting them as settled. Watch for `contested: true` or a `⚠️ …correction` note — a
-  prior conclusion was corrected; report the corrected value, not the old one.
+### 3. Trace relationships in both directions
 
-## Command reference
+```sh
+ai-wiki links <dir>/<concept>.md
+```
 
-| Command | Use |
-|---|---|
-| `ai-wiki health` | bundle overview (counts by type/status) |
-| `ai-wiki config set --endpoint <url> --token <tok>` | connect to the server hosting the bundles |
-| `ai-wiki bundle list/use/create/rm` | bundles on the server: list, switch active, create, delete (`rm` confirms; `-y` to skip) |
-| `ai-wiki -b <name> <cmd>` | run one command against a non-active bundle |
-| `ai-wiki ls [dir] [-R] [-a] [--json]` | list a level like `ls`; `-R` recurse, `-a` dotfiles |
-| `ai-wiki cat <path>` | read a concept (or any file in the bundle) |
-| `ai-wiki search "<q>" [--top-k N] [--json]` | ranked lexical search (CJK-aware); hits include description + snippet |
-| `ai-wiki grep <pattern> [dir] [--fixed]` | regex search; `--fixed` = literal |
-| `ai-wiki links <path> [--json]` | outbound + inbound (backlink) graph for one concept |
-| `ai-wiki log [--tail N]` | change ledger — what was added/corrected, when |
-| `ai-wiki ingest <files…>` / `jobs <id>` | submit source(s) — any type (md/pdf/image/text) — for curation (if writes enabled) |
+`links` returns outbound references and inbound backlinks. Follow one relevant hop when it
+could change the answer—especially experiment ↔ metric ↔ decision/risk. Stop when the next
+hop adds no relevant evidence; this is retrieval, not graph tourism 🤡
 
-## Limits
+### 4. Read the source concept
 
-- Whole-graph / centrality questions (e.g. "most-referenced concept") belong to an offline
-  graph view, not this CLI — `links` covers one concept's neighborhood, not the full graph.
-- Read-only deployments return `403` on `ingest` — that's expected.
+```sh
+ai-wiki cat <dir>/<concept>.md
+ai-wiki cat <path> --full       # only if the preview reports truncation
+```
+
+`cat` previews up to 8,000 characters. It prints the total size and exact `--full` command
+only when truncated, so do not request `--full` pre-emptively.
+
+## Evidence discipline
+
+- Cite concept paths, for example `metrics/<x>.md` and `experiments/<y>.md`.
+- Trust only returned content. Never invent definitions, prices, event names, dates, or outcomes.
+- Respect `status`, `confidence`, `contested: true`, and correction notes. Report the corrected
+  value; label draft/low-confidence material as uncertain.
+- Separate what a concept explicitly states from your inference across concepts.
+- Definitive empty arrays/counts mean the command succeeded and found nothing; do not rerun just
+  to verify emptiness.
+
+## Submit sources only when asked
+
+```sh
+ai-wiki ingest notes.md
+ai-wiki ingest report.pdf chart.png
+cat notes.md | ai-wiki ingest - --title "<title>"
+ai-wiki jobs <job-id>
+```
+
+Ingest submits sources; it never edits concepts directly. Read-only deployments may return
+`403`. Bundle deletion is non-interactive and requires explicit `--yes`.
+
+Use `ai-wiki <command> --help` for complete flags and examples. `-v`, `-V`, and `--version`
+return the bare CLI version.

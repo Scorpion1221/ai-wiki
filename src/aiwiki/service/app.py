@@ -205,12 +205,13 @@ def grep(q: str = Query(...), dir: str | None = None, fixed: bool = False,
 
 
 @app.get("/search")
-def search(q: str = Query(...), top_k: int = 10, bundle: str | None = None,
+def search(q: str = Query(...), top_k: int = Query(10, gt=0, le=1000), bundle: str | None = None,
            authorization: str | None = Header(default=None)):
     _auth(authorization)
     _enabled("search")
     _name, BUNDLE = _resolve(bundle)
-    return {"results": B.search(BUNDLE, q, top_k)}
+    results = B.search(BUNDLE, q, None)
+    return {"results": results[:top_k], "total": len(results)}
 
 
 @app.get("/links")

@@ -76,7 +76,9 @@ def test_service_reads_and_searches(bundle: Path, monkeypatch) -> None:
     assert root["topics/"]["kind"] == "dir"
     body = c.get("/cat", params={"path": "topics/http-cache.md"}, headers=AUTH).json()
     assert "# Citations" in body["content"]
-    hits = c.get("/search", params={"q": "cache"}, headers=AUTH).json()["results"]
+    search = c.get("/search", params={"q": "cache"}, headers=AUTH).json()
+    hits = search["results"]
     assert hits and hits[0]["path"] == "topics/http-cache.md"
+    assert search["total"] == 1
     # path traversal is rejected
     assert c.get("/cat", params={"path": "../../etc/passwd"}, headers=AUTH).status_code == 400

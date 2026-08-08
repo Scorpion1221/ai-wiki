@@ -20,7 +20,9 @@ uses an agent.
   a single URL: list them with `GET /bundles`, pick one per request with `?bundle=<name>`,
   create/delete with `POST`/`DELETE /bundles`. Bearer-token auth, path sandboxing, and an
   `AIWIKI_DISABLE` switch for read-only / drill-only deployments.
-- **CLI** (`src/aiwiki/cli/`) — `ai-wiki`, a thin stdlib-only client.
+- **CLI** (`src/aiwiki/cli/`) — `ai-wiki`, a thin stdlib-only, agent-first client. Its no-args home view
+  shows live bundle context; structured output is compact TOON (with `--json` escape hatches), while
+  `cat` stays raw Markdown.
 - **Runtime** (`src/aiwiki/runtime/`) — triggers a headless `claude -p` curation pass on
   ingest. The only LLM-using part; disable it (`AIWIKI_CURATE=off`) for a pure read deploy.
 
@@ -45,16 +47,19 @@ uv sync --extra service --extra dev
 uv run ai-wiki config set --endpoint http://127.0.0.1:8787 --token "$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
 AIWIKI_BUNDLES=./bundles ./run-local.sh      # serve a dir of bundles on :8787 (token from CLI config)
 
-ai-wiki bundle list        # bundles hosted on the server (* = active)
+ai-wiki                    # live bundle overview + directories + next commands
+ai-wiki bundle list        # bundles hosted on the server (active/default state)
 ai-wiki bundle use <name>  # switch the active bundle (or `bundle create <name>`)
 ai-wiki health
 ai-wiki ls                 # list a level, like shell ls
-ai-wiki cat <path>
+ai-wiki cat <path>         # 8,000-char preview; add --full only if truncated
 ai-wiki search "<query>"
 ai-wiki ingest notes.md    # submit a source for curation (needs `claude` + AIWIKI_CURATE!=off)
 ```
 
 Engine CLIs are exposed as `okf-validate`, `okf-scan-sources`, `okf-lint`, etc.
+
+The CLI is non-interactive: usage/API failures are structured on stdout with exit code 2/1, and destructive `bundle rm` requires `--yes`. Bare `-v`, `-V`, and `--version` probes return only the version.
 
 ## Configuration (env)
 

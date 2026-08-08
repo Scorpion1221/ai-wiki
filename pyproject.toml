@@ -23,7 +23,7 @@ dev = [
 
 # Deterministic engine CLIs + the ai-wiki client. Each maps to a `main(argv=None)`.
 [project.scripts]
-ai-wiki = "aiwiki.cli.main:main"
+ai-wiki = "aiwiki.cli.entry:main"
 okf-validate = "aiwiki.engine.validate:main"
 okf-scan-sources = "aiwiki.engine.scan_sources:main"
 okf-update-concept = "aiwiki.engine.update_concept:main"

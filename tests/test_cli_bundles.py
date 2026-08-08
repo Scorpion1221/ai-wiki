@@ -43,8 +43,8 @@ def test_bundle_list_marks_active_and_default(monkeypatch, tmp_path, capsys) -> 
     })
     assert cli.main(["bundle", "list"]) == 0
     out = capsys.readouterr().out
-    assert "* kb-b" in out and "7 concepts" in out
-    assert "kb-a" in out and "(default)" in out
+    assert '"kb-b",7,"active"' in out
+    assert '"kb-a",3,"default"' in out
 
 
 def test_bundle_create_posts_and_switches(monkeypatch, tmp_path) -> None:
@@ -130,3 +130,96 @@ def test_legacy_multi_endpoint_config_migrates(monkeypatch, tmp_path: Path) -> N
     }))
     assert cli._conn() == ("https://a/", "t1")
     assert cli._active() is None
+
+
+def test_version_fast_paths_are_bare(capsys) -> None:
+    from aiwiki.cli import entry
+    from aiwiki.version import VERSION
+
+    project = Path(__file__).parents[1] / "pyproject.toml"
+    import tomllib
+
+    assert tomllib.loads(project.read_text())["project"]["version"] == VERSION
+
+    assert entry.main(["--version"]) == 0
+    assert capsys.readouterr().out == "0.0.1\n"
+    assert cli.main(["-V"]) == 0
+    assert capsys.readouterr().out == "0.0.1\n"
+
+
+def test_home_view_is_live_content(monkeypatch, tmp_path: Path, capsys) -> None:
+    _point_config(monkeypatch, tmp_path)
+    cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"])
+    capsys.readouterr()
+
+    def fake_api(route, **kw):
+        if route == "/health":
+            return {"bundle": "kb", "concepts": 7, "by_status": {"reviewed": 7}}
+        assert route == "/ls"
+        return {"items": [{"path": "metrics/", "kind": "dir", "concepts": 3}]}
+
+    monkeypatch.setattr(cli, "_api", fake_api)
+    assert cli.main([]) == 0
+    out = capsys.readouterr().out
+    assert "bin:" in out and "description:" in out
+    assert 'name: "kb"' in out and "concepts: 7" in out
+    assert 'directories[1]{path,concepts}:\n  "metrics/",3' in out
+    assert "usage:" not in out
+
+
+def test_usage_errors_are_structured_on_stdout(capsys) -> None:
+    import pytest
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["search", "--stat", "closed"])
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert captured.err == ""
+    assert "error:" in captured.out
+    assert 'kind: "usage"' in captured.out
+    assert "unrecognized arguments: --stat" in captured.out
+    assert '"ai-wiki search --help"' in captured.out
+
+
+def test_bundle_rm_requires_flag_without_prompt_or_api(monkeypatch, capsys) -> None:
+    import pytest
+
+    monkeypatch.setattr(cli, "_post", lambda *a, **kw: pytest.fail("must validate before API call"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["bundle", "rm", "old-kb"])
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert captured.err == ""
+    assert '"ai-wiki bundle rm old-kb --yes"' in captured.out
+
+
+def test_cat_truncates_with_full_escape_hatch(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: {"content": "abcdefghij"})
+    assert cli.main(["cat", "x.md", "--max-chars", "4"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("abcd\n")
+    assert "truncated at 4 of 10 chars" in out
+    assert "ai-wiki cat x.md --full" in out
+
+    assert cli.main(["cat", "x.md", "--full"]) == 0
+    assert capsys.readouterr().out == "abcdefghij"
+
+
+def test_grep_limit_reports_total_and_escape_hatch(monkeypatch, capsys) -> None:
+    hits = [{"path": "x.md", "line": i, "text": f"hit {i}"} for i in range(3)]
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: {"hits": hits})
+    assert cli.main(["grep", "hit", "--limit", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "shown: 2" in out and "total: 3" in out and "truncated: true" in out
+    assert "hits[2]{path,line,text}:" in out
+    assert '"ai-wiki grep \\"hit\\" --limit 0"' in out
+
+
+def test_ingest_title_rejects_multiple_inputs_before_api(monkeypatch, capsys) -> None:
+    import pytest
+
+    monkeypatch.setattr(cli, "_post", lambda *a, **kw: pytest.fail("must validate before API call"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["ingest", "a.md", "b.md", "--title", "ignored before"])
+    assert exc.value.code == 2
+    assert "--title requires exactly one input" in capsys.readouterr().out

@@ -22,10 +22,10 @@ the endpoint + token.)
 
 ```bash
 ai-wiki config set --endpoint https://<host>/ --token <token>   # connect to the server
-ai-wiki bundle list             # bundles hosted there (* = active, default marked)
+ai-wiki bundle list             # bundles hosted there (active/default state)
 ai-wiki bundle use solvely-web  # switch the active bundle (saved locally)
 ai-wiki bundle create my-kb     # create a new empty bundle on the server
-ai-wiki bundle rm my-kb         # delete a bundle on the server (confirms; -y to skip)
+ai-wiki bundle rm my-kb --yes   # delete a bundle; explicit non-interactive confirmation
 ai-wiki -b other search "..."   # one-off: read a different bundle for this command
 ```
 
@@ -35,21 +35,25 @@ commands target the default automatically.
 ## 3. Read it — like a filesystem
 
 ```bash
+ai-wiki                              # live bundle overview + next commands
 ai-wiki health                       # size + counts by type/status
 ai-wiki cat SCHEMA.md                # ORIENT FIRST: taxonomy + conventions
 ai-wiki cat purpose.md               #              why this KB exists
 ai-wiki ls                           # top-level dirs (like shell ls)
 ai-wiki ls <dir>                     # drill into a directory
 ai-wiki ls -R                        # recurse, flat (all concepts);  -a includes dotfiles
-ai-wiki cat <dir>/<name>.md          # read a concept
+ai-wiki cat <dir>/<name>.md          # read preview; use --full only if truncated
 ai-wiki search "<query>"             # ranked, CJK-aware
-ai-wiki grep "<pattern>" [--fixed]   # regex (or literal with --fixed)
+ai-wiki grep "<pattern>" [--fixed]   # regex (or literal); default 100 hits, --limit 0 for all
+ai-wiki links <dir>/<name>.md        # outbound + inbound backlinks
 ai-wiki log                          # change ledger (what changed/was corrected)
 ```
 
 **Navigation:** orient via `SCHEMA.md`/`purpose.md`, then either drill
 (`ls` → `ls <dir>` → `cat`, following each concept's `# Related concepts` links to trace
 relationships) or `search`/`grep` to jump to a term.
+
+Structured metadata/collection commands emit compact TOON; `cat` stays raw Markdown.
 
 **Discipline:**
 - Cite the concept paths you used (e.g. `metrics/<name>.md`).

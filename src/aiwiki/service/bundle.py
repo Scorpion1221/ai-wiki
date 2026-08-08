@@ -208,7 +208,7 @@ def _snippet(body: str, terms: set[str], width: int = 160) -> str:
     return best[:width]
 
 
-def search(root: Path, query: str, top_k: int = 10) -> list[dict]:
+def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
     """Lexical, CJK-aware. (title|aliases)*8 + (tags|description)*4 + body*1,
     status/recency as tie-breakers. Results carry description + best-line snippet
     so the caller can prune candidates without cat-ing each one."""
@@ -239,7 +239,8 @@ def search(root: Path, query: str, top_k: int = 10) -> list[dict]:
             }))
     # score desc, then status-rank desc, then recency (source_updated_at/timestamp) desc
     scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
-    return [d for *_, d in scored[:top_k]]
+    results = [d for *_, d in scored]
+    return results if top_k is None else results[:top_k]
 
 
 _LINK_RE = re.compile(r"\]\(([^)\s]+\.md)(?:#[^)]*)?\)")
