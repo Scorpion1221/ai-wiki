@@ -542,11 +542,13 @@ def main(argv=None) -> int:
                            "filename": p.name, "title": a.title if (a.title and single) else None}
             job = _post("/ingest", payload, bundle=bsel)
             label = f if f != "-" else "(stdin)"
-            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"),
-                              "curation": job.get("curation") or job.get("status")})
+            state = f"no-op:{job.get('status')}" if job.get("deduplicated") else (
+                job.get("curation") or job.get("status")
+            )
+            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state})
         emit(
             _count_lines(len(submitted), len(submitted)),
-            table_lines("submissions", submitted, ("input", "source", "job", "curation")),
+            table_lines("submissions", submitted, ("input", "source", "job", "state")),
             table_lines("help", ({"command": "ai-wiki jobs <job-id>", "purpose": "check curation status"},),
                         ("command", "purpose")),
         )

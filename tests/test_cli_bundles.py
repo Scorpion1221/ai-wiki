@@ -120,6 +120,20 @@ def test_ingest_stdin_text(monkeypatch, tmp_path: Path) -> None:
     assert captured == {"text": "pasted note", "title": "My Note"}  # stdin → text path
 
 
+def test_ingest_duplicate_reports_noop(monkeypatch, tmp_path: Path, capsys) -> None:
+    _point_config(monkeypatch, tmp_path)
+    cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"])
+    (tmp_path / "same.md").write_text("same", encoding="utf-8")
+    monkeypatch.setattr(cli, "_post", lambda *args, **kwargs: {
+        "source": "sources/n.md", "id": "oldjob", "status": "done", "deduplicated": True,
+    })
+
+    assert cli.main(["ingest", str(tmp_path / "same.md")]) == 0
+    out = capsys.readouterr().out
+    assert "submissions[1]{input,source,job,state}:" in out
+    assert "no-op:done" in out
+
+
 def test_legacy_multi_endpoint_config_migrates(monkeypatch, tmp_path: Path) -> None:
     p = _point_config(monkeypatch, tmp_path)
     # the old {current, bundles:{name:{endpoint,token}}} schema: adopt the active one's conn

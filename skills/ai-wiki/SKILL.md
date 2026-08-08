@@ -101,7 +101,9 @@ ai-wiki jobs <job-id>
 ```
 
 Ingest submits sources; it never edits concepts directly. Read-only deployments may return
-`403`. Bundle deletion is non-interactive and requires explicit `--yes`.
+`403`. Re-submitting identical content is a successful no-op and returns the existing job.
+For completed jobs, `ai-wiki jobs <job-id>` includes validation status, the exact commit,
+and changed files. Bundle deletion is non-interactive and requires explicit `--yes`.
 
 Use `ai-wiki <command> --help` for complete flags and examples. `-v`, `-V`, and `--version`
 return the bare CLI version.

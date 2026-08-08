@@ -269,20 +269,24 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
     else:
         raise HTTPException(status_code=400, detail="provide `text` or `content_b64`")
     try:
-        source_rel, sha = I.write_source(BUNDLE, data, filename, body.title)
+        job, deduplicated = I.receive_source(BUNDLE, data, filename, body.title)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
-    curatable = I.is_curatable(source_rel, data)
-    job = I.new_job(BUNDLE, source_rel, sha, curatable, body.title, filename)
+    if deduplicated:
+        return {**job, "deduplicated": True}
+    source_rel = job["source"]
+    curatable = job["status"] == "queued"
     if curatable and CURATE_ON:
-        worker.ensure_started()
-        worker.submit(BUNDLE, source_rel, I.job_path(BUNDLE, job["id"]))
         job["curation"] = "queued"
     elif not curatable:
         job["curation"] = "needs-conversion"  # stored as a snapshot, not auto-curated
     else:
         job["curation"] = "off"
-    return job
+    I.save_job(BUNDLE, job)
+    if curatable and CURATE_ON:
+        worker.ensure_started()
+        worker.submit(BUNDLE, source_rel, I.job_path(BUNDLE, job["id"]))
+    return {**job, "deduplicated": False}
 
 
 @app.get("/jobs/{job_id}")

@@ -19,6 +19,8 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..engine.validate import validate as validate_bundle
+
 TIMEOUT_S = 900
 GIT_TIMEOUT_S = 120
 CONFLICT_TIMEOUT_S = 600
@@ -85,6 +87,23 @@ def _has_remote(root: Path) -> bool:
     return bool(_git(root, "remote").stdout.strip())
 
 
+def _working_files(root: Path) -> list[str]:
+    files = set(_git(root, "diff", "--name-only").stdout.splitlines())
+    files.update(_git(root, "diff", "--cached", "--name-only").stdout.splitlines())
+    files.update(_git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines())
+    return sorted(f for f in files if f)
+
+
+def _commit_result(root: Path, changed_files: list[str], pushed: bool, **extra) -> dict:
+    return {
+        "committed": True,
+        "pushed": pushed,
+        "commit": _git(root, "rev-parse", "HEAD").stdout.strip(),
+        "changed_files": changed_files,
+        **extra,
+    }
+
+
 def _pre_sync(root: Path) -> dict:
     """Before curating, rebase onto the remote so we build on the latest state. The tree is
     clean here, so this is a clean fast-forward/rebase; best-effort (no remote/offline → skip)."""
@@ -113,18 +132,19 @@ def _commit_and_push(root: Path, message: str, max_attempts: int = 4) -> dict:
     """Commit the working tree, then push. On a rejected push (someone moved the branch),
     rebase onto the remote; if that conflicts, a claude pass resolves it and we retry.
     A push that still fails keeps the local commit."""
+    changed_files = _working_files(root)
     _git(root, "add", "-A")
     commit = _git(root, "commit", "-m", message)
     if commit.returncode != 0:
-        return {"committed": False, "pushed": False,
+        return {"committed": False, "pushed": False, "changed_files": changed_files,
                 "note": (commit.stdout + commit.stderr).strip()[-200:] or "nothing to commit"}
     if not _has_remote(root):
-        return {"committed": True, "pushed": False, "note": "no remote"}
+        return _commit_result(root, changed_files, False, note="no remote")
     br = _branch(root)
     resolved = 0
     for _ in range(max_attempts):
         if _git(root, "push", "origin", br).returncode == 0:
-            out = {"committed": True, "pushed": True}
+            out = _commit_result(root, changed_files, True)
             if resolved:
                 out["conflicts_resolved"] = resolved
             return out
@@ -134,13 +154,17 @@ def _commit_and_push(root: Path, message: str, max_attempts: int = 4) -> dict:
             conflicted = [f for f in _git(root, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if f]
             if not conflicted or not _resolve_conflicts(root, conflicted):
                 _git(root, "rebase", "--abort")
-                return {"committed": True, "pushed": False, "note": "unresolved rebase conflict (commit kept)"}
+                return _commit_result(
+                    root, changed_files, False, note="unresolved rebase conflict (commit kept)"
+                )
             _git(root, "add", "-A")
-            if _git(root, "rebase", "--continue").returncode != 0:
+            if _git(root, "-c", "core.editor=true", "rebase", "--continue").returncode != 0:
                 _git(root, "rebase", "--abort")
-                return {"committed": True, "pushed": False, "note": "rebase --continue failed (commit kept)"}
+                return _commit_result(root, changed_files, False, note="rebase --continue failed (commit kept)")
             resolved += len(conflicted)
-    return {"committed": True, "pushed": False, "note": f"push rejected after {max_attempts} attempts (commit kept)"}
+    return _commit_result(
+        root, changed_files, False, note=f"push rejected after {max_attempts} attempts (commit kept)"
+    )
 
 
 def _git_sync(bundle: Path, message: str) -> dict:
@@ -171,11 +195,29 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
         )
         job["returncode"] = proc.returncode
         job["summary"] = (proc.stdout or "").strip()[-4000:]
-        job["status"] = "done" if proc.returncode == 0 else "failed"
         if proc.returncode != 0:
+            job["status"] = "failed"
             job["error"] = (proc.stderr or "").strip()[-2000:]
-        elif root is not None:
-            job["git"] = _commit_and_push(root, f"ingest: {source_rel}")
+            job["validation"] = {"status": "not_run", "reason": "curation failed"}
+        else:
+            errors = validate_bundle(bundle)
+            job["validation"] = {"status": "passed" if not errors else "failed", "error_count": len(errors)}
+            if errors:
+                job["validation"]["errors"] = errors[:20]
+                if len(errors) > 20:
+                    job["validation"]["truncated"] = True
+                job["status"] = "failed"
+                job["error"] = f"bundle validation failed with {len(errors)} error(s)"
+                job["changed_files"] = _working_files(root) if root is not None else []
+            else:
+                job["status"] = "done"
+                if root is not None:
+                    job["git"] = _commit_and_push(root, f"ingest: {source_rel}")
+                    job["commit"] = job["git"].get("commit")
+                    job["changed_files"] = job["git"].get("changed_files", [])
+                else:
+                    job["commit"] = None
+                    job["changed_files"] = []
     except subprocess.TimeoutExpired:
         job["status"] = "failed"
         job["error"] = f"curation timed out after {TIMEOUT_S}s"

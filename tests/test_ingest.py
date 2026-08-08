@@ -82,6 +82,47 @@ def test_ingest_text_and_binary_and_unsupported(bundle: Path, monkeypatch) -> No
     assert c.post("/ingest", json={"title": "nothing"}, headers=AUTH).status_code == 400
 
 
+def test_ingest_same_content_is_noop_and_failed_job_can_retry(bundle: Path, monkeypatch) -> None:
+    _appmod, c = _client(bundle, monkeypatch)
+    first = c.post("/ingest", json={"text": "same source", "title": "n"}, headers=AUTH).json()
+    second = c.post("/ingest", json={"text": "same source", "title": "renamed"}, headers=AUTH).json()
+    assert first["deduplicated"] is False and second["deduplicated"] is True
+    assert second["id"] == first["id"]
+    assert I.read_job(bundle, first["id"])["curation"] == "off"  # response state is persisted
+
+    failed = I.read_job(bundle, first["id"])
+    failed["status"] = "failed"
+    I.save_job(bundle, failed)
+    retry = c.post("/ingest", json={"text": "same source", "title": "retry"}, headers=AUTH).json()
+    assert retry["deduplicated"] is False and retry["id"] != first["id"]
+
+
+def test_done_source_noop_does_not_recreate_inbox_file(bundle: Path, monkeypatch) -> None:
+    _appmod, c = _client(bundle, monkeypatch)
+    first = c.post("/ingest", json={"text": "already curated"}, headers=AUTH).json()
+    source = bundle / first["source"]
+    source.unlink()  # the curator normally moves it from inbox into sources/
+    done = I.read_job(bundle, first["id"])
+    done["status"] = "done"
+    I.save_job(bundle, done)
+
+    again = c.post("/ingest", json={"text": "already curated"}, headers=AUTH).json()
+    assert again["deduplicated"] is True and again["id"] == first["id"]
+    assert not source.exists()
+
+
+def test_duplicate_queued_source_is_submitted_once(bundle: Path, monkeypatch) -> None:
+    appmod, c = _client(bundle, monkeypatch, curate="auto")
+    submitted = []
+    monkeypatch.setattr(appmod.worker, "ensure_started", lambda: None)
+    monkeypatch.setattr(appmod.worker, "submit", lambda *args: submitted.append(args))
+
+    first = c.post("/ingest", json={"text": "queue once"}, headers=AUTH).json()
+    second = c.post("/ingest", json={"text": "queue once"}, headers=AUTH).json()
+    assert first["deduplicated"] is False and second["deduplicated"] is True
+    assert len(submitted) == 1
+
+
 def test_sweep_picks_up_out_of_band_drops(bundle: Path, monkeypatch) -> None:
     from aiwiki.service import worker
     submitted = []

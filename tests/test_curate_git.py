@@ -61,6 +61,8 @@ def test_commits_even_when_push_fails(tmp_path: Path) -> None:
     (repo / "a.md").write_text("y", encoding="utf-8")
     out = curate._git_sync(repo, "ingest: test")
     assert out["committed"] is True and out["pushed"] is False  # commit kept despite push fail
+    assert out["commit"] == _git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert out["changed_files"] == ["a.md"]
     log = subprocess.run(["git", "-C", str(repo), "log", "--oneline"], capture_output=True, text=True).stdout
     assert "ingest: test" in log
 
@@ -68,7 +70,7 @@ def test_commits_even_when_push_fails(tmp_path: Path) -> None:
 def test_noop_when_nothing_changed(tmp_path: Path) -> None:
     repo = _new_repo(tmp_path)
     out = curate._git_sync(repo, "noop")
-    assert out["committed"] is False
+    assert out["committed"] is False and out["changed_files"] == []
 
 
 def test_not_a_git_repo(tmp_path: Path) -> None:

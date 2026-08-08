@@ -36,7 +36,10 @@ stored verbatim in `sources/inbox/`. Sources claude can read (text/code/PDF/imag
 queued; other types are flagged `needs-conversion`. A single serial worker drains the
 queue one job at a time (so concurrent submissions never race on the bundle/git) — it also
 sweeps the inbox on a timer to pick up out-of-band drops — rebases onto the remote before
-curating, commits, and pushes. On a rejected push it rebases onto the moved remote and
+curating, independently validates the result, then commits and pushes only if validation
+passes. Re-submitting identical content returns the existing non-failed job as a successful
+no-op; failed jobs can be retried. `GET /jobs/{id}` reports validation, commit,
+and changed files. On a rejected push it rebases onto the moved remote and
 resolves any conflict with a second OKF-aware `claude` pass, then retries (a push that
 still fails keeps the local commit). The mirror pulls the result.
 

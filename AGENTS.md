@@ -75,7 +75,9 @@ ai-wiki jobs <job-id>                    # poll curation status
 
 Any file type is accepted and stored verbatim. Sources claude can read directly
 (text/markdown/code/PDF/images) are curated automatically; other types (e.g. docx,
-audio) are stored but flagged `needs-conversion` rather than guessed at.
+audio) are stored but flagged `needs-conversion` rather than guessed at. Re-submitting
+identical content is a successful no-op. A completed job reports deterministic validation,
+the exact Git commit, and changed files.
 
 Reads and writes can live on different endpoints: a public, read-only **mirror**
 (`ingest` → `403`) and a team **ingest worker** (curation enabled) that has `claude` + a

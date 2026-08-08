@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ _SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
 # csv, json, html, …) plus PDFs and images (read natively). Anything else is stored but
 # flagged needs-conversion rather than auto-curated.
 _READABLE_BINARY_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion"}
+_JOB_LOCK = threading.Lock()
 
 
 def _now() -> str:
@@ -89,6 +92,38 @@ def new_job(bundle: Path, source_rel: str, sha: str, curatable: bool,
         job["original_name"] = filename
     job_path(bundle, job["id"]).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     return job
+
+
+def find_job_by_sha(bundle: Path, sha: str) -> dict | None:
+    """Return the newest reusable job for this exact source content."""
+    jobs = bundle / ".okf" / "jobs"
+    if not jobs.is_dir():
+        return None
+    for path in sorted(jobs.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if job.get("sha256") == sha and job.get("status") in _REUSABLE_JOB_STATUSES:
+            return job
+    return None
+
+
+def receive_source(bundle: Path, data: bytes, filename: str | None = None,
+                   title: str | None = None) -> tuple[dict, bool]:
+    """Store new source content and create its job atomically; failed jobs remain retryable."""
+    sha = hashlib.sha256(data).hexdigest()
+    with _JOB_LOCK:
+        existing = find_job_by_sha(bundle, sha)
+        if existing is not None:
+            return existing, True
+        source_rel, sha = write_source(bundle, data, filename, title)
+        curatable = is_curatable(source_rel, data)
+        return new_job(bundle, source_rel, sha, curatable, title, filename), False
+
+
+def save_job(bundle: Path, job: dict) -> None:
+    job_path(bundle, job["id"]).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def read_job(bundle: Path, job_id: str) -> dict | None:
