@@ -94,6 +94,33 @@ def _working_files(root: Path) -> list[str]:
     return sorted(f for f in files if f)
 
 
+def _exclude_inbox(root: Path, bundle: Path) -> None:
+    """Keep operational inbox files out of this clone's commits.
+
+    Existing bundles may predate the scaffolded ``sources/inbox/`` .gitignore rule.
+    Use Git's local exclude file so a failed job cannot leak into a later job's
+    ``git add -A`` without modifying the knowledge bundle during pre-sync.
+    """
+    try:
+        bundle_rel = bundle.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return
+    pattern = f"/{bundle_rel}/sources/inbox/" if bundle_rel else "/sources/inbox/"
+    git_path = _git(root, "rev-parse", "--git-path", "info/exclude")
+    if git_path.returncode != 0 or not git_path.stdout.strip():
+        return
+    exclude = Path(git_path.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = root / exclude
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if pattern not in existing.splitlines():
+        with exclude.open("a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"{pattern}\n")
+
+
 def _commit_result(root: Path, changed_files: list[str], pushed: bool, **extra) -> dict:
     return {
         "committed": True,
@@ -186,6 +213,7 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
     root = _repo_root(bundle) if git_on else None
     try:
         if root is not None:
+            _exclude_inbox(root, bundle)
             job["pre_sync"] = _pre_sync(root)  # build on the latest remote state
             _save(job_path, job)
         proc = subprocess.run(

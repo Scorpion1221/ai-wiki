@@ -59,3 +59,35 @@ def test_validation_pass_records_commit_and_changed_files(tmp_path: Path, monkey
     assert job["validation"] == {"status": "passed", "error_count": 0}
     assert job["commit"] == "abc123"
     assert job["changed_files"] == ["concepts/new.md", "sources/n.md"]
+
+
+def test_failed_inbox_source_is_excluded_from_later_commit(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    bundle = root / "knowledge"
+    inbox = bundle / "sources" / "inbox"
+    inbox.mkdir(parents=True)
+    subprocess.run(["git", "init", "-b", "main", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+    (bundle / "purpose.md").write_text("# Purpose\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "initial"], check=True, capture_output=True)
+
+    (inbox / "failed-job.md").write_text("must not leak\n", encoding="utf-8")
+    curate._exclude_inbox(root, bundle)
+    concept = bundle / "features" / "new.md"
+    concept.parent.mkdir(parents=True)
+    concept.write_text("# New\n", encoding="utf-8")
+
+    result = curate._commit_and_push(root, "ingest: current job")
+
+    assert result["committed"] is True
+    assert result["changed_files"] == ["knowledge/features/new.md"]
+    committed = subprocess.run(
+        ["git", "-C", str(root), "show", "--pretty=format:", "--name-only", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert committed == ["knowledge/features/new.md"]
+    assert (inbox / "failed-job.md").is_file()

@@ -40,8 +40,12 @@ def scaffold(target: Path, name: str) -> None:
     """Create a minimal, valid empty bundle at `target` (ingest then populates it)."""
     (target / ".okf" / "jobs").mkdir(parents=True, exist_ok=True)
     (target / "sources" / "inbox").mkdir(parents=True, exist_ok=True)
-    # .okf/ holds per-device job records + backups — operational, never committed.
-    (target / ".gitignore").write_text(".okf/\nviz.html\n.obsidian/\n.gstack/\n.DS_Store\n", encoding="utf-8")
+    # .okf/ and sources/inbox/ are operational state — only curated source snapshots
+    # under sources/ belong in Git.
+    (target / ".gitignore").write_text(
+        ".okf/\nsources/inbox/\nviz.html\n.obsidian/\n.gstack/\n.DS_Store\n",
+        encoding="utf-8",
+    )
     (target / "purpose.md").write_text(
         f"# Purpose\n\nKnowledge base **{name}** — newly created. Ingest sources to populate it.\n",
         encoding="utf-8")
