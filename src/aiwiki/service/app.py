@@ -24,6 +24,8 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
+from aiwiki.version import VERSION
+
 from . import bundle as B
 from . import ingest as I
 from . import worker
@@ -65,7 +67,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="ai-wiki", version="0.0.1", lifespan=lifespan)
+app = FastAPI(title="ai-wiki", version=VERSION, lifespan=lifespan)
 
 
 def _auth(authorization: str | None) -> None:

@@ -142,9 +142,9 @@ def test_version_fast_paths_are_bare(capsys) -> None:
     assert tomllib.loads(project.read_text())["project"]["version"] == VERSION
 
     assert entry.main(["--version"]) == 0
-    assert capsys.readouterr().out == "0.0.1\n"
+    assert capsys.readouterr().out == f"{VERSION}\n"
     assert cli.main(["-V"]) == 0
-    assert capsys.readouterr().out == "0.0.1\n"
+    assert capsys.readouterr().out == f"{VERSION}\n"
 
 
 def test_home_view_is_live_content(monkeypatch, tmp_path: Path, capsys) -> None:
