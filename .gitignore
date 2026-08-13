@@ -19,7 +19,7 @@ htmlcov/
 
 # OKF bundle local-only artifacts (never commit)
 .okf/
-viz.html
+/viz.html
 
 # Editor / OS
 .DS_Store

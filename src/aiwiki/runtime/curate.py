@@ -19,6 +19,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..engine.render_viz import generate_visualization
 from ..engine.validate import validate as validate_bundle
 
 TIMEOUT_S = 900
@@ -119,6 +120,24 @@ def _exclude_inbox(root: Path, bundle: Path) -> None:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write(f"{pattern}\n")
+
+
+def _refresh_visualization(root: Path, bundle: Path) -> dict | None:
+    """Refresh an opt-in, repo-root visualization before the curation commit."""
+    if _git(root, "ls-files", "--error-unmatch", "--", "viz.html").returncode != 0:
+        return None
+    output = root / "viz.html"
+    name = None
+    if output.is_file():
+        for line in output.read_text(encoding="utf-8").splitlines():
+            if line.startswith("window.BUNDLE_NAME = ") and line.endswith(";"):
+                try:
+                    name = json.loads(line.removeprefix("window.BUNDLE_NAME = ")[:-1])
+                except (TypeError, ValueError):
+                    pass
+                break
+    stats = generate_visualization(bundle, output, bundle_name=name)
+    return {"path": "viz.html", **stats}
 
 
 def _commit_result(root: Path, changed_files: list[str], pushed: bool, **extra) -> dict:
@@ -240,6 +259,9 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
             else:
                 job["status"] = "done"
                 if root is not None:
+                    visualization = _refresh_visualization(root, bundle)
+                    if visualization is not None:
+                        job["visualization"] = visualization
                     job["git"] = _commit_and_push(root, f"ingest: {source_rel}")
                     job["commit"] = job["git"].get("commit")
                     job["changed_files"] = job["git"].get("changed_files", [])

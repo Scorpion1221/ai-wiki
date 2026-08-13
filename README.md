@@ -41,7 +41,9 @@ passes. Re-submitting identical content returns the existing non-failed job as a
 no-op; failed jobs can be retried. `GET /jobs/{id}` reports validation, commit,
 and changed files. On a rejected push it rebases onto the moved remote and
 resolves any conflict with a second OKF-aware `claude` pass, then retries (a push that
-still fails keeps the local commit). The mirror pulls the result.
+still fails keeps the local commit). If the bundle repository already tracks a root
+`viz.html`, successful curation refreshes that snapshot before the same commit; repositories
+without one remain unchanged. The mirror pulls the result.
 
 ## Quick start
 
@@ -58,6 +60,7 @@ ai-wiki ls                 # list a level, like shell ls
 ai-wiki cat <path>         # 8,000-char preview; add --full only if truncated
 ai-wiki search "<query>"
 ai-wiki ingest notes.md    # submit a source for curation (needs `claude` + AIWIKI_CURATE!=off)
+okf-render-viz <bundle> [out.html]  # generate a local HTML knowledge-graph snapshot
 ```
 
 Engine CLIs are exposed as `okf-validate`, `okf-scan-sources`, `okf-lint`, etc.

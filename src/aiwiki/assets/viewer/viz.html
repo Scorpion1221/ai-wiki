@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OKF Bundle Viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,600&family=Hanken+Grotesk:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<style>
+/*__VIZ_CSS__*/
+</style>
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<header>
+  <div class="brand">
+    <span class="eyebrow">Open Knowledge Format</span>
+    <h1 id="bundle-name"></h1>
+    <div class="stats" id="stats"></div>
+  </div>
+  <div class="controls">
+    <div class="search-wrap">
+      <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="search" type="search" placeholder="Search title · id · tag" autocomplete="off">
+    </div>
+    <select id="filter-type" aria-label="Filter by type">
+      <option value="">All types</option>
+    </select>
+    <select id="layout" aria-label="Graph layout">
+      <option value="cose">Force</option>
+      <option value="concentric">Concentric</option>
+      <option value="breadthfirst">Hierarchy</option>
+      <option value="circle">Circle</option>
+      <option value="grid">Grid</option>
+    </select>
+    <button id="reset" title="Reset view">Reset</button>
+  </div>
+</header>
+
+<main>
+  <section id="graph">
+    <div class="graph-vignette" aria-hidden="true"></div>
+    <div id="legend" class="legend"></div>
+    <div id="graph-hint" class="graph-hint">Drag to pan · scroll to zoom · click a node</div>
+  </section>
+
+  <section id="detail">
+    <article id="detail-content" hidden>
+      <header class="detail-header">
+        <div class="detail-meta-row">
+          <span class="type-chip" id="detail-type"></span>
+          <span class="badges" id="detail-badges"></span>
+        </div>
+        <h2 id="detail-title"></h2>
+        <code class="detail-id" id="detail-id"></code>
+      </header>
+
+      <dl class="frontmatter">
+        <dt>Description</dt><dd id="detail-description"></dd>
+        <dt>Source</dt><dd id="detail-resource"></dd>
+        <dt>Tags</dt><dd id="detail-tags"></dd>
+      </dl>
+
+      <div class="body-divider"><span>Contents</span></div>
+      <div id="detail-body"></div>
+
+      <section id="detail-backlinks" hidden>
+        <div class="body-divider"><span>Cited by</span></div>
+        <ul id="backlinks-list"></ul>
+      </section>
+    </article>
+
+    <div id="detail-empty" class="detail-empty">
+      <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="7" r="2.4"/><circle cx="12" cy="17.5" r="2.4"/>
+        <line x1="8" y1="7" x2="16" y2="7.2"/><line x1="7" y1="8" x2="11" y2="15.6"/><line x1="17" y1="9.2" x2="13" y2="15.6"/>
+      </svg>
+      <p class="detail-empty-title">No concept selected</p>
+      <p class="detail-empty-hint">Click a node on the left to open its dossier — or search and filter by type.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+window.BUNDLE_NAME = __BUNDLE_NAME__;
+window.BUNDLE = __BUNDLE_DATA__;
+</script>
+<script>
+/*__VIZ_JS__*/
+</script>
+</body>
+</html>
