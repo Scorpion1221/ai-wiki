@@ -21,6 +21,14 @@ def test_ingest_prompt_names_every_required_profile_field() -> None:
         assert f"`{field}`" in curate.INGEST_PROMPT
 
 
+def test_ingest_prompt_treats_backlinks_as_substantive_edits() -> None:
+    assert "including a Related concepts/backlink" in curate.INGEST_PROMPT
+    assert "leave the file byte-for-byte unchanged" in curate.INGEST_PROMPT
+    assert "add this ingest snapshot to `sources`" in curate.INGEST_PROMPT
+    assert "advance `generated.at` strictly beyond the prior generation" in curate.INGEST_PROMPT
+    assert "Do not add navigation-only backlinks" in curate.INGEST_PROMPT
+
+
 def test_headless_command_exposes_only_bundle_scoped_content_tools(tmp_path: Path) -> None:
     bundle = tmp_path / "bundle"
     bundle.mkdir()

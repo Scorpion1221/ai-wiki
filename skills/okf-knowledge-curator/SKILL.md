@@ -100,6 +100,13 @@ generated: {by: ai-wiki-curator/<version>, at: <now>}
 It must not add, refresh, or copy a `verified` event. Editing prose is not verification;
 a source timestamp and historical `last_verified_at` are not verification either.
 
+Within an ingest pass, **any** edit to an existing concept—including a Related concepts
+backlink, tag, status, structured source metadata, or prose—is a substantive new revision.
+Either leave the file byte-for-byte unchanged, or add the current immutable ingest snapshot
+to `sources`, set `generated.by` to `process:ai-wiki-curator`, and advance `generated.at`
+strictly beyond the prior generation and every retained verification event. Do not add a
+navigation-only backlink when the current source does not support updating that concept.
+
 Only a real review against the cited source/resource may add:
 
 ```yaml

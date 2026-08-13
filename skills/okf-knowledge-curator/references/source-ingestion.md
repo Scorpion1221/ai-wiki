@@ -13,6 +13,8 @@
   `../sources/<file>`. Never use bare `sources/<file>` from a concept subdirectory.
 - Capture source author and `last_modified` only when known—never infer them.
 - Re-submitting identical content is a no-op; do not create duplicate concepts.
+- An existing concept edit, including a backlink-only edit, must cite the current snapshot
+  and advance `generated`; otherwise leave that concept byte-for-byte unchanged.
 
 ## Local files and Git
 
