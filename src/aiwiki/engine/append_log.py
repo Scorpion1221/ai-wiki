@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Append a parseable entry to a bundle's log.md (the chronological update ledger).
+"""Append an entry to an OKF v0.2 date-grouped ``log.md`` ledger.
 
-OKF SPEC §7 / Karpathy LLM-wiki pattern: log.md is an append-only, grep-parseable
-record of what happened and when. Each entry looks like:
+OKF v0.2 log files use one ISO date heading per day and flat prose bullets,
+newest first::
 
-    ## [YYYY-MM-DD] <op> | <subject>
-    - <note line>
-    - files: a.md, b.md
+    # Update Log
 
-so `grep "^## \\[" log.md | tail -20` gives recent activity at a glance. When log.md
-passes 500 entries it is rotated into log-<YYYY>.md, keeping the live file small.
+    ## 2026-08-13
+    * **Ingest**: Added WAIO-68 source and refreshed two concepts.
+    * **Audit**: Verified the generated concepts against the source snapshot.
 
-Deterministic, stdlib only.
+Legacy ``## [date] operation`` headings are rejected rather than silently mixed
+with the v0.2 format.
 
 Usage:
     append_log.py <bundle> <op> "<subject>" [--files f1 f2 ...] [--note "..."] [--date YYYY-MM-DD]
@@ -19,58 +19,118 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
+import sys
 from datetime import date
 from pathlib import Path
 
-OPS = ["ingest", "query", "update", "merge", "delete", "lint", "create", "note"]
-HEADER = ('# Update Log\n\nAppend-only, newest entries at the bottom. '
-          'Parse recent activity with `grep "^## \\[" log.md | tail`.\n')
-ROTATE_AT = 500
+from aiwiki.engine.document import has_symlink_component
+
+OPS = ["ingest", "audit", "query", "update", "merge", "delete", "lint", "create", "note"]
+HEADER = "# Update Log\n\nAppend-only ledger, newest entries first.\n"
+_DATE_HEADING = re.compile(r"^## (\d{4}-\d{2}-\d{2})$")
 
 
-def _entry_count(text: str) -> int:
-    return sum(1 for ln in text.splitlines() if ln.startswith("## ["))
+def _valid_date(raw: str) -> str:
+    try:
+        parsed = date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"invalid ISO date {raw!r}; expected YYYY-MM-DD") from exc
+    if parsed.isoformat() != raw:
+        raise ValueError(f"invalid ISO date {raw!r}; expected YYYY-MM-DD")
+    return raw
+
+
+def _parse_log(text: str) -> tuple[list[str], dict[str, list[str]]]:
+    """Return the intro and unique date sections; reject non-v0.2 h2 headings."""
+    lines = text.splitlines()
+    starts = []
+    seen = set()
+    for i, line in enumerate(lines):
+        if not line.startswith("##"):
+            continue
+        match = _DATE_HEADING.fullmatch(line)
+        if not match:
+            raise ValueError(
+                f"line {i + 1}: log headings must be '## YYYY-MM-DD'; got {line!r}"
+            )
+        day = _valid_date(match.group(1))
+        if day in seen:
+            raise ValueError(f"line {i + 1}: duplicate date heading {day}; group the bullets")
+        seen.add(day)
+        starts.append((i, day))
+
+    first = starts[0][0] if starts else len(lines)
+    intro = lines[:first]
+    sections = {}
+    for n, (start, day) in enumerate(starts):
+        end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
+        body = lines[start + 1:end]
+        while body and not body[0].strip():
+            body.pop(0)
+        while body and not body[-1].strip():
+            body.pop()
+        sections[day] = body
+    return intro, sections
+
+
+def _render_log(intro: list[str], sections: dict[str, list[str]]) -> str:
+    prefix = "\n".join(intro).rstrip() or HEADER.rstrip()
+    chunks = [prefix]
+    for day in sorted(sections, reverse=True):
+        body = "\n".join(sections[day]).strip()
+        chunks.append(f"## {day}" + (f"\n{body}" if body else ""))
+    return "\n\n".join(chunks).rstrip() + "\n"
+
+
+def _entry(op: str, subject: str, note: str, files: list[str]) -> str:
+    label = op.strip().replace("-", " ").title()
+    if not label:
+        raise ValueError("operation must not be empty")
+    clean_subject = " ".join(subject.split())
+    if not clean_subject:
+        raise ValueError("subject must not be empty")
+    segments = [f"* **{label}**: {clean_subject}"]
+    clean_note = " ".join(note.split())
+    if clean_note:
+        segments.append(clean_note)
+    if files:
+        segments.append("files: " + ", ".join(files))
+    return " — ".join(segments)
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="Append an entry to a bundle's log.md.")
-    p.add_argument("bundle", type=Path)
-    p.add_argument("op", help=f"operation (suggested: {', '.join(OPS)})")
-    p.add_argument("subject")
-    p.add_argument("--files", nargs="*", default=[])
-    p.add_argument("--note", default="")
-    p.add_argument("--date", default=None, help="override date YYYY-MM-DD (default: today)")
-    a = p.parse_args(argv)
+    parser = argparse.ArgumentParser(description="Append an entry to an OKF v0.2 log.md.")
+    parser.add_argument("bundle", type=Path)
+    parser.add_argument("op", help=f"operation (suggested: {', '.join(OPS)})")
+    parser.add_argument("subject")
+    parser.add_argument("--files", nargs="*", default=[])
+    parser.add_argument("--note", default="")
+    parser.add_argument("--date", default=None, help="override date YYYY-MM-DD (default: today)")
+    args = parser.parse_args(argv)
 
-    root = a.bundle.expanduser().resolve()
+    root = args.bundle.expanduser().resolve()
     if not root.is_dir():
-        p.error(f"not a bundle directory: {root}")
+        parser.error(f"not a bundle directory: {root}")
     log = root / "log.md"
-    today = a.date or date.today().isoformat()
+    if has_symlink_component(root, log):
+        print("error: unsafe log path (outside bundle or symlink): log.md", file=sys.stderr)
+        return 2
 
-    text = log.read_text(encoding="utf-8") if log.exists() else HEADER
+    try:
+        today = _valid_date(args.date or date.today().isoformat())
+        entry = _entry(args.op, args.subject, args.note, args.files)
+        text = log.read_text(encoding="utf-8") if log.exists() else HEADER
+        intro, sections = _parse_log(text)
+    except ValueError as exc:
+        print(f"error: invalid OKF v0.2 log: {exc}", file=sys.stderr)
+        return 2
 
-    # Rotate the live log when it grows past the cap.
-    if _entry_count(text) >= ROTATE_AT:
-        year = today[:4]
-        archive = root / f"log-{year}.md"
-        body = text[len(HEADER):] if text.startswith(HEADER) else text
-        prev = (archive.read_text(encoding="utf-8")
-                if archive.exists() else f"# Update Log {year} (archived)\n")
-        archive.write_text(prev.rstrip() + "\n\n" + body.strip() + "\n", encoding="utf-8")
-        text = HEADER
-        print(f"rotated {ROTATE_AT}+ entries into log-{year}.md")
-
-    lines = [f"\n## [{today}] {a.op} | {a.subject}"]
-    for nl in a.note.splitlines():
-        if nl.strip():
-            lines.append(f"- {nl}")
-    if a.files:
-        lines.append("- files: " + ", ".join(a.files))
-    entry = "\n".join(lines) + "\n"
-
-    log.write_text(text.rstrip() + "\n" + entry, encoding="utf-8")
-    print(f"appended to {log.relative_to(root)}: [{today}] {a.op} | {a.subject}")
+    # Newest operation first within the day; date sections are sorted newest first
+    # by _render_log.
+    sections[today] = [entry, *sections.get(today, [])]
+    log.write_text(_render_log(intro, sections), encoding="utf-8")
+    print(f"appended to {log.relative_to(root)}: {today} {args.op} | {args.subject}")
     return 0
 
 

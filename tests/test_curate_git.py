@@ -1,5 +1,4 @@
-"""curate git flow: commit always; push best-effort ('push 不了就 commit'); on a rejected
-push, rebase onto the moved remote and let a claude pass resolve any conflict, then retry."""
+"""Curate git flow: clean concurrent rebases retry; real conflicts abort without LLM edits."""
 from __future__ import annotations
 
 import subprocess
@@ -89,33 +88,61 @@ def test_push_rejected_then_clean_rebase(tmp_path: Path) -> None:
     assert "ingest: c.md" in log and "other: b.md" in log
 
 
-def test_push_rejected_conflict_resolved_by_claude(tmp_path: Path, monkeypatch) -> None:
+def test_push_rejected_conflict_aborts_without_llm_resolution(tmp_path: Path) -> None:
     worker, remote = _new_repo_with_remote(tmp_path)
     _other_writer_pushes(remote, tmp_path, "a.md", "OTHER edit\n")  # same file → conflict
     (worker / "a.md").write_text("WORKER edit\n", encoding="utf-8")
 
-    # stand in for the claude conflict pass: take the union of both sides and stage it
-    def fake_resolve(root: Path, files: list[str]) -> bool:
-        for f in files:
-            text = (root / f).read_text(encoding="utf-8")
-            keep = [ln for ln in text.splitlines() if not ln.startswith(("<<<<<<<", "=======", ">>>>>>>"))]
-            (root / f).write_text("\n".join(keep) + "\n", encoding="utf-8")
-            _git(root, "add", f)
-        return True
-
-    monkeypatch.setattr(curate, "_resolve_conflicts", fake_resolve)
     out = curate._commit_and_push(worker, "ingest: a.md")
-    assert out["committed"] and out["pushed"] and out["conflicts_resolved"] == 1
-    merged = (worker / "a.md").read_text(encoding="utf-8")
-    assert "WORKER edit" in merged and "OTHER edit" in merged  # both sides kept, markers gone
-    assert "<<<<<<<" not in merged
+    assert out["committed"] and out["pushed"] is False
+    assert out["note"] == "rebase conflict; retry from remote"
+    assert "<<<<<<<" not in (worker / "a.md").read_text(encoding="utf-8")
 
 
-def test_push_rejected_conflict_unresolved_keeps_commit(tmp_path: Path, monkeypatch) -> None:
-    worker, remote = _new_repo_with_remote(tmp_path)
-    _other_writer_pushes(remote, tmp_path, "a.md", "OTHER edit\n")
-    (worker / "a.md").write_text("WORKER edit\n", encoding="utf-8")
-    monkeypatch.setattr(curate, "_resolve_conflicts", lambda root, files: False)  # claude can't fix it
-    out = curate._commit_and_push(worker, "ingest: a.md")
-    assert out["committed"] and out["pushed"] is False  # local commit survives the failed push
-    assert "ingest: a.md" in _git(worker, "log", "--oneline").stdout
+def test_commit_push_reports_durable_phase_transitions(tmp_path: Path) -> None:
+    worker, _remote = _new_repo_with_remote(tmp_path)
+    (worker / "b.md").write_text("job\n", encoding="utf-8")
+    transitions = []
+
+    out = curate._commit_and_push(
+        worker, "ingest: durable", progress=lambda phase, result: transitions.append(
+            (phase, result["commit"], result["pushed"])
+        ),
+    )
+
+    assert out["committed"] is True and out["pushed"] is True
+    assert transitions == [
+        ("committed", out["commit"], False),
+        ("pushed", out["commit"], True),
+    ]
+
+
+def test_commit_scope_does_not_stage_monorepo_sibling(tmp_path: Path) -> None:
+    repo = _new_repo(tmp_path)
+    bundle = repo / "kb"
+    bundle.mkdir()
+    (bundle / "concept.md").write_text("bundle change\n", encoding="utf-8")
+    sibling = repo / "sibling.md"
+    sibling.write_text("concurrent sibling\n", encoding="utf-8")
+
+    out = curate._commit_and_push(repo, "ingest: scoped", scope=bundle)
+
+    assert out["committed"] is True
+    assert out["changed_files"] == ["kb/concept.md"]
+    committed = _git(repo, "show", "--pretty=format:", "--name-only", "HEAD").stdout.splitlines()
+    assert committed == ["kb/concept.md"]
+    assert sibling.read_text(encoding="utf-8") == "concurrent sibling\n"
+    assert "?? sibling.md" in _git(repo, "status", "--porcelain").stdout
+
+
+def test_discard_untracked_symlink_does_not_touch_outside_target(tmp_path: Path) -> None:
+    repo = _new_repo(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("sentinel", encoding="utf-8")
+    link = repo / "escape-link"
+    link.symlink_to(outside)
+
+    curate._discard_working_tree(repo)
+
+    assert not link.exists() and not link.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "sentinel"

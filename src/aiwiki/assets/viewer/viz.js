@@ -7,13 +7,103 @@
   document.title = `${bundleName} — OKF Viewer`;
   document.getElementById("bundle-name").textContent = bundleName;
 
+  // ── Untrusted-content gates ────────────────────────────
+  // Every string in the bundle is data, including Markdown-produced HTML and
+  // URL attributes. Keep the allowlists local so the generated viewer remains
+  // a single self-contained file without a sanitizer runtime dependency.
+  const SAFE_MARKDOWN_TAGS = new Set([
+    "A", "BLOCKQUOTE", "BR", "CODE", "DD", "DEL", "DL", "DT", "EM",
+    "H1", "H2", "H3", "H4", "H5", "H6", "HR", "IMG", "LI", "OL", "P",
+    "PRE", "STRONG", "TABLE", "TBODY", "TD", "TFOOT", "TH", "THEAD", "TR", "UL",
+  ]);
+
+  function safeUrl(value) {
+    if (typeof value !== "string") return null;
+    const url = value.trim();
+    if (!url || /[\u0000-\u001f\u007f]/.test(url) || url.includes("\\")) return null;
+    if (/^https?:\/\//i.test(url)) {
+      try {
+        const parsed = new URL(url);
+        return parsed.protocol === "http:" || parsed.protocol === "https:" ? url : null;
+      } catch (_) { return null; }
+    }
+    // Reject protocol-relative URLs and every explicit non-http scheme. The
+    // remaining values are fragment, root-relative, or path-relative URLs.
+    if (url.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(url)) return null;
+    return url;
+  }
+
+  function sanitizeMarkdown(html) {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const elements = Array.from(template.content.querySelectorAll("*"));
+    for (const el of elements) {
+      if (!template.content.contains(el)) continue;
+      if (!SAFE_MARKDOWN_TAGS.has(el.tagName)) {
+        // Preserve visible text, but never executable/raw markup.
+        el.replaceWith(document.createTextNode(el.textContent || ""));
+        continue;
+      }
+
+      const allowed = new Set();
+      if (el.tagName === "A") allowed.add("href");
+      if (el.tagName === "A" || el.tagName === "IMG") allowed.add("title");
+      if (el.tagName === "IMG") { allowed.add("src"); allowed.add("alt"); }
+      if (el.tagName === "CODE") allowed.add("class");
+      if (el.tagName === "OL") allowed.add("start");
+      if (el.tagName === "LI") allowed.add("value");
+      if (el.tagName === "TD" || el.tagName === "TH") allowed.add("align");
+      for (const attr of Array.from(el.attributes)) {
+        if (!allowed.has(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+      }
+
+      if (el.tagName === "A" && el.hasAttribute("href")) {
+        const href = safeUrl(el.getAttribute("href"));
+        if (href === null) el.removeAttribute("href");
+        else el.setAttribute("href", href);
+      }
+      if (el.tagName === "IMG") {
+        const src = safeUrl(el.getAttribute("src"));
+        if (src === null) el.removeAttribute("src");
+        else el.setAttribute("src", src);
+      }
+      if (el.tagName === "CODE" && el.hasAttribute("class")) {
+        const classes = el.className.split(/\s+/).filter((name) => /^language-[\w-]+$/.test(name));
+        if (classes.length) el.className = classes.join(" ");
+        else el.removeAttribute("class");
+      }
+      if ((el.tagName === "TD" || el.tagName === "TH") && el.hasAttribute("align")) {
+        const align = el.getAttribute("align").toLowerCase();
+        if (!["left", "center", "right"].includes(align)) el.removeAttribute("align");
+      }
+    }
+    return template.content;
+  }
+
+  function appendStat(container, value, label, className) {
+    const span = document.createElement("span");
+    if (className) span.className = className;
+    const bold = document.createElement("b");
+    bold.textContent = value;
+    span.append(bold, document.createTextNode(` ${label}`));
+    if (container.childNodes.length) {
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.textContent = "·";
+      container.appendChild(dot);
+    }
+    container.appendChild(span);
+  }
+
   // ── Stats ──────────────────────────────────────────────
-  document.getElementById("stats").innerHTML =
-    `<span><b>${bundle.nodes.length}</b> concepts</span>` +
-    `<span class="dot">·</span>` +
-    `<span><b>${bundle.edges.length}</b> links</span>` +
-    `<span class="dot">·</span>` +
-    `<span><b>${bundle.types.length}</b> types</span>`;
+  const stats = document.getElementById("stats");
+  appendStat(stats, bundle.nodes.length, "concepts");
+  appendStat(stats, bundle.edges.length, "links");
+  appendStat(stats, bundle.types.length, "types");
+  if (bundle.okf_version) appendStat(stats, `v${bundle.okf_version}`, "OKF");
+  if ((bundle.freshness_counts || {}).stale) {
+    appendStat(stats, bundle.freshness_counts.stale, "stale", "stats-stale");
+  }
 
   // ── Type filter dropdown ───────────────────────────────
   const typeSelect = document.getElementById("filter-type");
@@ -59,10 +149,17 @@
     const item = document.createElement("div");
     item.className = "legend-item";
     item.dataset.type = t;
-    item.innerHTML =
-      `<span class="legend-swatch" style="background:${color};color:${color}"></span>` +
-      `<span class="legend-label">${t}</span>` +
-      `<span class="legend-count">${counts[t] ?? ""}</span>`;
+    const swatch = document.createElement("span");
+    swatch.className = "legend-swatch";
+    swatch.style.background = color;
+    swatch.style.color = color;
+    const label = document.createElement("span");
+    label.className = "legend-label";
+    label.textContent = t;
+    const count = document.createElement("span");
+    count.className = "legend-count";
+    count.textContent = counts[t] ?? "";
+    item.append(swatch, label, count);
     item.addEventListener("click", () => {
       if (focusTypes.has(t)) focusTypes.delete(t);
       else focusTypes.add(t);
@@ -149,6 +246,9 @@
       { selector: ".faded", style: { "opacity": 0.16 } },
       { selector: ".type-muted", style: { "opacity": 0.1 } },
       { selector: "node.nolabel", style: { "text-opacity": 0 } },
+      { selector: "node[freshness = 'stale'], node[status = 'deprecated']", style: {
+        "opacity": 0.46, "border-style": "dashed", "underlay-opacity": 0.05,
+      } },
       { selector: ".hidden", style: { "display": "none" } },
     ],
     layout: coseLayout(),
@@ -232,7 +332,9 @@
     cy.nodes().forEach((n) => {
       const d = n.data();
       const hay = (d.label || "").toLowerCase() + " " + d.id.toLowerCase() + " " +
-        (d.tags || []).join(" ").toLowerCase() + " " + (d.type || "").toLowerCase();
+        (d.tags || []).join(" ").toLowerCase() + " " + (d.type || "").toLowerCase() + " " +
+        (d.status || "") + " " + (d.trust || "") + " " + (d.freshness || "") + " " +
+        (d.sources || []).map((s) => `${s.id || ""} ${s.title || ""} ${s.resource || ""}`).join(" ").toLowerCase();
       n.toggleClass("dim", !hay.includes(q));
     });
     cy.edges().forEach((edge) => {
@@ -300,7 +402,7 @@
     chip.style.background = hexToRgba(color, 0.13);
     chip.style.borderColor = hexToRgba(color, 0.32);
 
-    // status + confidence badges
+    // OKF v0.2 lifecycle, trust, and freshness badges
     const badges = document.getElementById("detail-badges");
     badges.innerHTML = "";
     if (data.status) {
@@ -309,10 +411,18 @@
       b.textContent = data.status;
       badges.appendChild(b);
     }
-    if (data.confidence) {
+    if (data.trust) {
       const b = document.createElement("span");
-      b.className = "badge conf-" + String(data.confidence).toLowerCase();
-      b.textContent = data.confidence + " confidence";
+      const current = Boolean(data.verification_current);
+      b.className = "badge trust-" + String(data.trust).toLowerCase() +
+        (current ? " verification-current" : " verification-historical");
+      b.textContent = current ? `${data.trust} · current` : `${data.trust} · historical`;
+      badges.appendChild(b);
+    }
+    if (data.freshness) {
+      const b = document.createElement("span");
+      b.className = "badge freshness-" + String(data.freshness).toLowerCase();
+      b.textContent = data.freshness;
       badges.appendChild(b);
     }
 
@@ -322,13 +432,69 @@
 
     const resourceEl = document.getElementById("detail-resource");
     resourceEl.innerHTML = "";
-    const src = data.resource || data.source_ref || "";
-    if (src && /^https?:\/\//.test(src)) {
+    const src = data.resource || "";
+    const safeResource = safeUrl(src);
+    if (safeResource && /^https?:\/\//i.test(safeResource)) {
       const a = document.createElement("a");
-      a.href = src; a.textContent = src; a.target = "_blank"; a.rel = "noopener";
+      a.href = safeResource; a.textContent = src; a.target = "_blank"; a.rel = "noopener";
       resourceEl.appendChild(a);
     } else {
       resourceEl.textContent = src || "—";
+    }
+
+    const generated = [data.generated_by, data.generated_at].filter(Boolean);
+    document.getElementById("detail-generated").textContent = generated.join(" · ") || "—";
+    const currentVerification = [];
+    if (data.current_verified_by && data.current_verified_by.length) {
+      currentVerification.push(data.current_verified_by.join(", "));
+    }
+    if (data.current_verified_at) currentVerification.push(`latest ${data.current_verified_at}`);
+    document.getElementById("detail-current-verified").textContent =
+      currentVerification.join(" · ") || "none for current revision";
+    const verification = [];
+    if (data.verified_by && data.verified_by.length) verification.push(data.verified_by.join(", "));
+    if (data.verified_at) verification.push(`latest ${data.verified_at}`);
+    document.getElementById("detail-verified").textContent =
+      verification.join(" · ") || "no verification history";
+    document.getElementById("detail-stale-after").textContent = data.stale_after || "—";
+
+    const sourcesEl = document.getElementById("detail-sources");
+    sourcesEl.innerHTML = "";
+    if (data.sources && data.sources.length) {
+      const list = document.createElement("ul");
+      list.className = "source-list";
+      for (const source of data.sources) {
+        const item = document.createElement("li");
+        const title = source.title || source.id || source.resource || "Source";
+        const safeSource = safeUrl(source.resource || "");
+        if (safeSource && /^https?:\/\//i.test(safeSource)) {
+          const a = document.createElement("a");
+          a.href = safeSource; a.textContent = title; a.target = "_blank"; a.rel = "noopener";
+          item.appendChild(a);
+        } else {
+          const label = document.createElement("span");
+          label.textContent = title;
+          item.appendChild(label);
+        }
+        const detail = [
+          source.id && source.id !== title ? source.id : "",
+          source.author || "",
+          source.last_modified ? `modified ${source.last_modified}` : "",
+          source.usage_count != null ? `${source.usage_count} uses` : "",
+        ].filter(Boolean);
+        if (source.resource && source.resource !== title && !/^https?:\/\//i.test(source.resource)) {
+          detail.unshift(source.resource);
+        }
+        if (detail.length) {
+          const meta = document.createElement("small");
+          meta.textContent = detail.join(" · ");
+          item.appendChild(meta);
+        }
+        list.appendChild(item);
+      }
+      sourcesEl.appendChild(list);
+    } else {
+      sourcesEl.textContent = "—";
     }
 
     const tagsEl = document.getElementById("detail-tags");
@@ -346,7 +512,8 @@
 
     const body = bundle.bodies[conceptId] || "";
     const bodyEl = document.getElementById("detail-body");
-    bodyEl.innerHTML = marked.parse(body, { breaks: false, gfm: true });
+    const renderedBody = marked.parse(body, { breaks: false, gfm: true });
+    bodyEl.replaceChildren(sanitizeMarkdown(renderedBody));
     bodyEl.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((h) => {
       h.dataset.anchor = slugify(h.textContent);
     });
@@ -396,7 +563,7 @@
     if (!clean.endsWith(".md")) return null;
     const dir = baseId.split("/").slice(0, -1);
     const parts = clean.replace(/\.md$/, "").split("/");
-    const stack = baseId.includes("/") ? [...dir] : [];
+    const stack = clean.startsWith("/") ? [] : (baseId.includes("/") ? [...dir] : []);
     for (const p of parts) {
       if (p === "." || p === "") continue;
       if (p === "..") stack.pop();
@@ -409,22 +576,31 @@
     root.querySelectorAll("a[href]").forEach((a) => {
       const href = a.getAttribute("href");
       if (!href) return;
-      if (!/^https?:\/\//.test(href) && href.endsWith(".md")) {
-        const target = resolveRel(baseId, href);
+      const safeHref = safeUrl(href);
+      if (safeHref === null) {
+        a.removeAttribute("href");
+        a.className = "unsafe-link";
+        return;
+      }
+      a.setAttribute("href", safeHref);
+      if (!/^https?:\/\//i.test(safeHref) && safeHref.split(/[?#]/, 1)[0].endsWith(".md")) {
+        const target = resolveRel(baseId, safeHref);
         if (target && nodeIndex[target]) {
           a.className = "internal";
-          a.setAttribute("href", "javascript:void(0)");
+          a.setAttribute("href", "#");
           a.addEventListener("click", (e) => { e.preventDefault(); showDetail(target); });
           return;
         }
       }
       // In-page anchor (e.g. a doc's table-of-contents): scroll within the
       // dossier instead of opening a useless new tab.
-      if (href.startsWith("#")) {
+      if (safeHref.startsWith("#")) {
         a.className = "internal";
         a.addEventListener("click", (e) => {
           e.preventDefault();
-          const slug = slugify(decodeURIComponent(href.slice(1)));
+          let decoded = "";
+          try { decoded = decodeURIComponent(safeHref.slice(1)); } catch (_) { return; }
+          const slug = slugify(decoded);
           const tgt = slug && root.querySelector('[data-anchor="' + slug + '"]');
           if (tgt) tgt.scrollIntoView({ behavior: "smooth", block: "start" });
         });

@@ -112,6 +112,8 @@ header::after {
 }
 .stats b { color: var(--text-dim); font-weight: 600; }
 .stats .dot { color: var(--line-strong); }
+.stats .stats-stale,
+.stats .stats-stale b { color: #f78c6b; }
 
 /* ───────────────────────── Controls ───────────────────────── */
 .controls {
@@ -347,13 +349,21 @@ main {
   border: 1px solid var(--line-strong);
   color: var(--text-dim);
 }
-.badge.status-canonical { color: #7ee787; border-color: rgba(126, 231, 135, 0.4); background: rgba(126, 231, 135, 0.08); }
-.badge.status-reviewed  { color: #5eb3f6; border-color: rgba(94, 179, 246, 0.4); background: rgba(94, 179, 246, 0.08); }
-.badge.status-draft     { color: var(--text-faint); }
-.badge.status-stale     { color: #f78c6b; border-color: rgba(247, 140, 107, 0.4); }
-.badge.conf-high   { color: #7ee787; }
-.badge.conf-medium { color: var(--accent); }
-.badge.conf-low    { color: #f497b6; }
+.badge.status-stable     { color: #7ee787; border-color: rgba(126, 231, 135, 0.4); background: rgba(126, 231, 135, 0.08); }
+.badge.status-draft      { color: var(--text-faint); }
+.badge.status-deprecated { color: #f78c6b; border-color: rgba(247, 140, 107, 0.4); }
+.badge.trust-human-reviewed   { color: #7ee787; }
+.badge.trust-machine-confirmed { color: #5eb3f6; }
+.badge.trust-unverified        { color: #f497b6; }
+.badge.verification-current     { border-color: currentColor; }
+.badge.verification-historical  {
+  color: var(--text-faint);
+  border-color: var(--line-strong);
+  background: transparent;
+}
+.badge.freshness-fresh         { color: #5ee0c0; }
+.badge.freshness-stale         { color: #f78c6b; border-color: rgba(247, 140, 107, 0.4); }
+.badge.freshness-unspecified   { color: var(--text-faint); }
 
 #detail-title {
   font-family: var(--serif);
@@ -394,6 +404,9 @@ dl.frontmatter dt {
 dl.frontmatter dd { margin: 0; color: var(--text-dim); line-height: 1.55; }
 dl.frontmatter dd a { color: var(--accent); text-decoration: none; word-break: break-all; border-bottom: 1px solid var(--accent-soft); }
 dl.frontmatter dd a:hover { border-bottom-color: var(--accent); }
+.source-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.source-list li { display: grid; gap: 2px; min-width: 0; }
+.source-list small { color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; word-break: break-word; }
 
 .tag {
   display: inline-block;

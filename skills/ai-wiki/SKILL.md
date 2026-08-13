@@ -1,22 +1,23 @@
 ---
 name: ai-wiki
 description: >-
-  Consult the team's curated OKF knowledge bundle through `ai-wiki`. Use for metric
+  Consult the team's curated OKF v0.2 knowledge bundle through `ai-wiki`. Use for metric
   definitions/SQL, product or feature facts, event and field names, pricing, experiments,
   past decisions, risks, playbooks, and any request to look something up in the wiki.
-  Cite concept paths and never invent facts that the CLI did not return.
+  Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
+  the CLI did not return.
 ---
 
 # ai-wiki — consult curated team knowledge
 
-`ai-wiki` is a deterministic read window over an authored OKF bundle. It runs no LLM on
-reads. Treat its returned concepts as evidence, not memory, and cite the paths you use.
+`ai-wiki` is a deterministic read window over an authored OKF v0.2 bundle. It runs no LLM
+on reads. Treat returned concepts as evidence, not memory, and cite the paths you use.
 
 ## Start from live context
 
 ```sh
-ai-wiki                    # active bundle, status counts, directories, next commands
-ai-wiki health             # full type/status counts
+ai-wiki                    # active bundle, OKF version, trust/freshness counts, directories
+ai-wiki health             # status/trust/freshness counts + bundle Git revision
 ai-wiki bundle list        # bundles hosted by this server
 ```
 
@@ -29,9 +30,9 @@ ai-wiki config set --endpoint <url> --token <token>
 ai-wiki bundle use <name>                 # -b <name> overrides once per command
 ```
 
-Most metadata and collection commands emit compact TOON. `cat` deliberately emits raw
-Markdown so its content stays readable. Structured commands that support `--json` keep it
-as an escape hatch.
+This client and its bundles target **OKF v0.2 only**. Do not write or infer legacy v0.1
+fields such as `timestamp`, string-valued `sources`, `last_verified_at`, or statuses
+`reviewed`/`canonical`/`stale`.
 
 ## Lookup workflow
 
@@ -52,44 +53,78 @@ ai-wiki grep "<regex>"                   # regex across concepts
 ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
 ```
 
-Search results already include path, title, status, description/snippet context, and total
-count. Do not blind-`cat` every hit. Use `--top-k <N>` only when the default truncates a
-relevant result set. `grep` prints at most 100 hits by default and tells you when to rerun
-with `--limit 0`.
+Search and list results expose `status`, `trust`, `freshness`, `generated_at`, `verified_at`,
+and `verification_current`. Search ranks text relevance first and uses trust/freshness to
+break close ties. This keeps relevant evidence discoverable even when it is weak or
+historical; apply the trust/freshness gate after retrieval rather than silently hiding it.
+Never treat ranking as permission to skip that gate.
 
 For vague, indirect, or bilingual questions, try 2–3 meaningfully different queries
 (original wording, Chinese/English switch, and a paraphrase). Do not fan out mechanically
 when the user's exact term already has one obvious home.
 
-### 3. Trace relationships in both directions
+### 3. Trace relationships, then read the concept
 
 ```sh
 ai-wiki links <dir>/<concept>.md
-```
-
-`links` returns outbound references and inbound backlinks. Follow one relevant hop when it
-could change the answer—especially experiment ↔ metric ↔ decision/risk. Stop when the next
-hop adds no relevant evidence; this is retrieval, not graph tourism 🤡
-
-### 4. Read the source concept
-
-```sh
 ai-wiki cat <dir>/<concept>.md
+ai-wiki cat <dir>/<concept>.md --json  # content + derived OKF metadata
 ai-wiki cat <path> --full       # only if the preview reports truncation
 ```
 
-`cat` previews up to 8,000 characters. It prints the total size and exact `--full` command
-only when truncated, so do not request `--full` pre-emptively.
+Follow one relevant graph hop when it could change the answer—especially experiment ↔
+metric ↔ decision/risk. Stop when the next hop adds no relevant evidence.
+Default `cat` stays readable raw Markdown. Use `--json` when an agent needs the response's
+`metadata` object to apply status/trust/freshness gates mechanically alongside `content`.
 
-## Evidence discipline
+## Evidence gate: status + trust + freshness
+
+Derive meaning only from OKF v0.2 signals:
+
+- `status`: `draft | stable | deprecated` (missing status is not acceptable in the team profile).
+- `trust`: `unverified`, `machine-confirmed`, or `human-reviewed`, derived from all
+  `verified` events exactly as OKF v0.2 §5.3 specifies.
+- `freshness`: `fresh`, `stale`, or `unspecified`, derived from `stale_after`.
+
+A trust tier can reflect historical review. `verification_current: false` means no
+verification event is at or after `generated_at`; treat the current revision like
+unverified for current-fact decisions even if its standards-compliant displayed tier is
+machine-confirmed/human-reviewed. `current_verified_at` identifies the latest event that
+does confirm the revision, when present.
+
+Use this order for **current facts**:
+
+1. `stable + fresh + human-reviewed`
+2. `stable + fresh + machine-confirmed`
+3. `stable + fresh + unverified` — usable only with an explicit verification caveat
+4. `draft` — process/context only; never state as settled fact
+5. `stale` or `deprecated` — historical context only, not a current answer
+
+`freshness: unspecified` is not proof of freshness. State the latest `generated_at` and
+`verified_at` available and narrow the claim. If two usable concepts disagree, report the
+conflict and follow `contested`/`contradictions` rather than choosing silently.
+
+### Fail closed for high-risk claims
+
+For **commercial metrics** (payment, revenue, renewal, LTV), **experiment winners**, and
+**“the feature is released/live”** claims, require all of:
+
+- `status: stable`;
+- `freshness: fresh` (`today < stale_after`);
+- `verification_current: true` (a `verified` event exists at or after `generated.at`);
+- sources that directly prove the claimed boundary (requirement ≠ merged code ≠ release ≠ production effect).
+
+If any condition fails, do not output the claim as current truth. Say what is missing or
+expired and, if useful, report only the narrower source-backed statement.
+
+## Answer discipline
 
 - Cite concept paths, for example `metrics/<x>.md` and `experiments/<y>.md`.
-- Trust only returned content. Never invent definitions, prices, event names, dates, or outcomes.
-- Respect `status`, `confidence`, `contested: true`, and correction notes. Report the corrected
-  value; label draft/low-confidence material as uncertain.
-- Separate what a concept explicitly states from your inference across concepts.
-- Definitive empty arrays/counts mean the command succeeded and found nothing; do not rerun just
-  to verify emptiness.
+- Trust only returned content. Never invent definitions, prices, events, dates, or outcomes.
+- Surface `status`, `trust`, `freshness`, and verification date when they affect the answer.
+- Separate explicit facts from your inference across concepts.
+- Definitive empty arrays/counts mean the command succeeded and found nothing; do not rerun
+  just to verify emptiness.
 
 ## Submit sources only when asked
 
@@ -97,13 +132,16 @@ only when truncated, so do not request `--full` pre-emptively.
 ai-wiki ingest notes.md
 ai-wiki ingest report.pdf chart.png
 cat notes.md | ai-wiki ingest - --title "<title>"
-ai-wiki jobs <job-id>
+ai-wiki jobs <ingest-job-id>
 ```
 
 Ingest submits sources; it never edits concepts directly. Read-only deployments may return
 `403`. Re-submitting identical content is a successful no-op and returns the existing job.
-For completed jobs, `ai-wiki jobs <job-id>` includes validation status, the exact commit,
-and changed files. Bundle deletion is non-interactive and requires explicit `--yes`.
+A completed ingest reports validation, commit, and changed files. Maintainers must then run
+the separate audit workflow from the `ai-wiki-maintainer` skill; ordinary readers should
+not claim an ingest is verified merely because curation completed. A terminal
+`needs-conversion` result means the format was stored but not curated; convert it to a
+directly readable artifact and ingest that as a new source rather than polling forever.
 
 Use `ai-wiki <command> --help` for complete flags and examples. `-v`, `-V`, and `--version`
 return the bare CLI version.

@@ -258,7 +258,11 @@ def _home() -> int:
         object_lines("bundle", {
             "name": health.get("bundle"),
             "concepts": health.get("concepts", 0),
+            "okf_version": health.get("okf_version"),
+            "git_revision": health.get("git_revision"),
             "status_counts": health.get("by_status") or {},
+            "trust_counts": health.get("by_trust") or {},
+            "freshness_counts": health.get("by_freshness") or {},
         }),
         table_lines("directories", directories, ("path", "concepts")),
         table_lines("help", (
@@ -371,6 +375,8 @@ def main(argv=None) -> int:
         epilog=_examples("ai-wiki cat metrics/subscription-rate.md", "ai-wiki cat SCHEMA.md --full"), **common,
     )
     p_cat.add_argument("path")
+    p_cat.add_argument("--json", action="store_true",
+                       help="emit content plus derived OKF metadata as JSON")
     cat_size = p_cat.add_mutually_exclusive_group()
     cat_size.add_argument("--full", action="store_true", help="print complete content")
     cat_size.add_argument("--max-chars", type=_positive, default=_DEFAULT_CAT_CHARS,
@@ -416,8 +422,14 @@ def main(argv=None) -> int:
     )
     p_ing.add_argument("files", nargs="*", help="markdown file(s); omit or '-' to read stdin")
     p_ing.add_argument("--title", help="title for the source (requires exactly one input)")
+    p_audit = sub.add_parser(
+        "audit", help="adversarially review a completed ingest job", command_path="ai-wiki audit",
+        epilog=_examples("ai-wiki audit <ingest-job-id>"), **common,
+    )
+    p_audit.add_argument("ingest_job_id")
+    p_audit.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
     p_jobs = sub.add_parser(
-        "jobs", help="check an ingest job by id", command_path="ai-wiki jobs",
+        "jobs", help="check an ingest or audit job by id", command_path="ai-wiki jobs",
         epilog=_examples("ai-wiki jobs <job-id>"), **common,
     )
     p_jobs.add_argument("job_id")
@@ -439,11 +451,21 @@ def main(argv=None) -> int:
             print(json.dumps(d, ensure_ascii=False, indent=2))
         else:
             emit(
-                object_lines("bundle", {"name": d.get("bundle"), "concepts": d.get("concepts", 0)}),
+                object_lines("bundle", {
+                    "name": d.get("bundle"),
+                    "concepts": d.get("concepts", 0),
+                    "okf_version": d.get("okf_version"),
+                    "service_version": d.get("service_version"),
+                    "git_revision": d.get("git_revision"),
+                }),
                 table_lines("types", ({"name": name, "count": count}
                                       for name, count in (d.get("by_type") or {}).items()), ("name", "count")),
                 table_lines("statuses", ({"name": name, "count": count}
                                          for name, count in (d.get("by_status") or {}).items()), ("name", "count")),
+                table_lines("trust", ({"name": name, "count": count}
+                                      for name, count in (d.get("by_trust") or {}).items()), ("name", "count")),
+                table_lines("freshness", ({"name": name, "count": count}
+                                          for name, count in (d.get("by_freshness") or {}).items()), ("name", "count")),
             )
     elif a.cmd == "ls":
         d = _api("/ls", bundle=bsel, dir=a.dir,
@@ -452,11 +474,28 @@ def main(argv=None) -> int:
         if a.json:
             print(json.dumps(items, ensure_ascii=False, indent=2))
         else:
-            rows = ({"path": item.get("path"), "kind": item.get("kind"), "summary": _ls_summary(item)}
+            rows = ({
+                "path": item.get("path"), "kind": item.get("kind"),
+                "status": item.get("status"), "trust": item.get("trust"),
+                "freshness": item.get("freshness"),
+                "verification_current": item.get("verification_current"),
+                "generated_at": item.get("generated_at"),
+                "verified_at": item.get("verified_at"),
+                "current_verified_at": item.get("current_verified_at"),
+                "summary": _ls_summary(item),
+            }
                     for item in items)
-            emit(_count_lines(len(items), len(items)), table_lines("items", rows, ("path", "kind", "summary")))
+            emit(_count_lines(len(items), len(items)), table_lines(
+                "items", rows,
+                ("path", "kind", "status", "trust", "freshness", "verification_current",
+                 "generated_at", "verified_at", "current_verified_at", "summary"),
+            ))
     elif a.cmd == "cat":
-        content = _api("/cat", bundle=bsel, path=a.path)["content"]
+        document = _api("/cat", bundle=bsel, path=a.path)
+        content = document["content"]
+        if a.json:
+            print(json.dumps(document, ensure_ascii=False, indent=2))
+            return 0
         if a.full or len(content) <= a.max_chars:
             print(content, end="")
         else:
@@ -488,13 +527,23 @@ def main(argv=None) -> int:
                 "path": result.get("path"),
                 "title": result.get("title"),
                 "status": result.get("status"),
+                "trust": result.get("trust"),
+                "freshness": result.get("freshness"),
+                "verification_current": result.get("verification_current"),
+                "generated_at": result.get("generated_at"),
+                "verified_at": result.get("verified_at"),
+                "current_verified_at": result.get("current_verified_at"),
                 "score": result.get("score"),
                 "context": " — ".join(value for value in (
                     (result.get("description") or "")[:150], result.get("snippet") or "") if value),
             } for result in results)
             total = d.get("total")
             groups = [_count_lines(len(results), total),
-                      table_lines("results", rows, ("path", "title", "status", "score", "context"))]
+                      table_lines(
+                          "results", rows,
+                          ("path", "title", "status", "trust", "freshness", "verification_current",
+                           "generated_at", "verified_at", "current_verified_at", "score", "context"),
+                      )]
             if isinstance(total, int) and len(results) < total:
                 groups.append(table_lines("help", ({
                     "command": f'ai-wiki search {json.dumps(a.query, ensure_ascii=False)} --top-k {total}',
@@ -529,7 +578,7 @@ def main(argv=None) -> int:
         submitted = []
         for f in files:
             single = len(files) == 1
-            if f == "-":  # pasted text from stdin → stored as .md
+            if f == "-":  # pasted text from stdin → stored as raw Markdown evidence
                 payload = {"text": sys.stdin.read(), "title": a.title if single else None}
             else:  # any file: ship raw bytes base64 so binaries (pdf/image/…) survive intact
                 p = Path(f).expanduser()
@@ -552,6 +601,18 @@ def main(argv=None) -> int:
             table_lines("help", ({"command": "ai-wiki jobs <job-id>", "purpose": "check curation status"},),
                         ("command", "purpose")),
         )
+    elif a.cmd == "audit":
+        job = _post(f"/jobs/{urllib.parse.quote(a.ingest_job_id, safe='')}/audit", {}, bundle=bsel)
+        if a.json:
+            print(json.dumps(job, ensure_ascii=False, indent=2))
+        else:
+            emit(
+                object_lines("job", job),
+                table_lines("help", ({
+                    "command": f"ai-wiki jobs {job.get('id')}",
+                    "purpose": "check adversarial audit status",
+                },), ("command", "purpose")),
+            )
     elif a.cmd == "jobs":
         job = _api(f"/jobs/{a.job_id}", bundle=bsel)
         if a.json:

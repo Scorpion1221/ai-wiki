@@ -2,7 +2,7 @@
 """Health-audit an OKF bundle: the structural/graph checks no other script does.
 
 Complements (does not duplicate) the other tools:
-  * validate_okf_bundle.py — frontmatter / Citations / broken-link GATE.
+  * validate.py            — OKF v0.2 conformance and profile GATE.
   * scan_sources.py        — source sha256 drift (lint points here, doesn't redo it).
   * lint.py (this)         — the AUDITOR: orphans, index completeness, contradictions
                              consistency, tag-taxonomy, page size, stale / verification lag.
@@ -19,10 +19,12 @@ import argparse
 import json
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
+
+from .document import has_symlink_component
 
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SKIP_TOP = {"sources", ".okf"}
@@ -30,7 +32,7 @@ DELIM = "---"
 LINK_RE = re.compile(r"\]\(([^)\s]+\.md)(?:#[^)]*)?\)")
 PAGE_LIMIT = 200
 LOG_ROTATE_NEAR = 480
-VALID_STATUS = {"draft", "reviewed", "canonical", "stale"}
+VALID_STATUS = {"draft", "stable", "deprecated"}
 DEFAULT_LEDGER = ".okf/health.jsonl"
 
 
@@ -50,8 +52,10 @@ def _parse(text):
 
 def _concepts(root):
     for p in sorted(root.rglob("*.md")):
+        if has_symlink_component(root, p):
+            continue
         rel = p.relative_to(root)
-        if p.name in RESERVED or p.name.startswith("log-") or rel.parts[0] in SKIP_TOP:
+        if p.name in RESERVED or rel.parts[0] in SKIP_TOP:
             continue
         yield p, rel.as_posix()
 
@@ -62,7 +66,7 @@ def _norm(s):
 
 def _schema_tags(root):
     sf = root / "SCHEMA.md"
-    if not sf.is_file():
+    if has_symlink_component(root, sf) or not sf.is_file():
         return None
     text = sf.read_text(encoding="utf-8")
     m = re.search(r"#+\s*Tag taxonomy(.+?)(?:\n#|\Z)", text, re.S | re.I)
@@ -99,10 +103,15 @@ def lint(root):
         cdir = (root / rel).parent
         for m in LINK_RE.finditer(body):
             target = m.group(1)
-            if "://" in target or target.startswith("/"):
+            if "://" in target:
                 continue
             try:
-                resolved = (cdir / target).resolve().relative_to(root.resolve()).as_posix()
+                base = root if target.startswith("/") else cdir
+                candidate = base / target.lstrip("/")
+                if has_symlink_component(root, candidate):
+                    add("high", "broken-link", rel, f"link traverses symlink: {target}")
+                    continue
+                resolved = candidate.resolve().relative_to(root.resolve()).as_posix()
             except ValueError:
                 add("high", "broken-link", rel, f"link escapes bundle: {target}")
                 continue
@@ -122,7 +131,7 @@ def lint(root):
     # --- index completeness (concept listed in its dir index; entries resolve) ---
     for rel in sorted(ids):
         idx = (root / rel).parent / "index.md"
-        if not idx.is_file():
+        if has_symlink_component(root, idx) or not idx.is_file():
             add("medium", "index", rel, "directory has no index.md",
                 "run gen_indexes.py")
             continue
@@ -130,14 +139,20 @@ def lint(root):
             add("medium", "index", rel, "concept not listed in its directory index.md",
                 "run gen_indexes.py")
     for idx in sorted(root.rglob("index.md")):
-        if ".okf" in idx.relative_to(root).parts:
+        if has_symlink_component(root, idx) or ".okf" in idx.relative_to(root).parts:
             continue
         for m in LINK_RE.finditer(idx.read_text(encoding="utf-8")):
             t = m.group(1)
-            if "://" in t or t.startswith("/"):
+            if "://" in t:
                 continue
             try:
-                r = (idx.parent / t).resolve().relative_to(root.resolve()).as_posix()
+                base = root if t.startswith("/") else idx.parent
+                candidate = base / t.lstrip("/")
+                if has_symlink_component(root, candidate):
+                    add("medium", "index", idx.relative_to(root).as_posix(),
+                        f"index entry traverses symlink: {t}", "run gen_indexes.py")
+                    continue
+                r = candidate.resolve().relative_to(root.resolve()).as_posix()
             except ValueError:
                 continue
             if not (root / r).exists():
@@ -154,7 +169,12 @@ def lint(root):
         for t in c:
             cdir = (root / rel).parent
             try:
-                r = (cdir / str(t)).resolve().relative_to(root.resolve()).as_posix()
+                candidate = cdir / str(t)
+                if has_symlink_component(root, candidate):
+                    add("high", "contradiction", rel,
+                        f"contradictions target traverses symlink: {t}")
+                    continue
+                r = candidate.resolve().relative_to(root.resolve()).as_posix()
             except ValueError:
                 r = None
             if r is None or r not in ids:
@@ -173,18 +193,32 @@ def lint(root):
                     f"non-reciprocal: lists {t}, but {t} does not list it back",
                     "add the reciprocal contradictions entry (or resolve both)")
 
-    # --- status / verification ---
+    # --- lifecycle / freshness / verification ---
     for rel, (fm, _, _) in concepts.items():
         st = fm.get("status")
-        if st == "stale":
-            add("medium", "stale", rel, "status: stale — needs re-verification")
-        elif st and st not in VALID_STATUS:
+        if st and st not in VALID_STATUS:
             add("medium", "frontmatter", rel, f"invalid status: {st!r}")
-        lv, su = str(fm.get("last_verified_at") or ""), str(fm.get("source_updated_at") or "")
-        if lv and su and lv < su:
+        raw_stale = fm.get("stale_after")
+        if raw_stale:
+            try:
+                stale_on = raw_stale if isinstance(raw_stale, date) else date.fromisoformat(str(raw_stale))
+            except (TypeError, ValueError):
+                stale_on = None  # validator owns the malformed-date error
+            if stale_on is not None and date.today() >= stale_on:
+                add("medium", "stale", rel, f"stale_after {stale_on.isoformat()} has passed")
+
+        generated = fm.get("generated") if isinstance(fm.get("generated"), dict) else {}
+        generated_at = str(generated.get("at") or "")
+        verified = fm.get("verified")
+        events = [verified] if isinstance(verified, dict) else (verified if isinstance(verified, list) else [])
+        verified_at = max(
+            (str(event.get("at") or "") for event in events if isinstance(event, dict)),
+            default="",
+        )
+        if verified_at and generated_at and verified_at < generated_at:
             add("low", "verification-lag", rel,
-                f"last_verified_at ({lv}) older than source_updated_at ({su})",
-                "re-verify against the source and re-stamp")
+                f"latest verified.at ({verified_at}) older than generated.at ({generated_at})",
+                "re-verify the current revision; editing does not preserve verification")
 
     # --- tag taxonomy ---
     allowed = _schema_tags(root)
@@ -212,16 +246,18 @@ def lint(root):
         if n > PAGE_LIMIT:
             add("low", "page-size", rel, f"{n} lines (> {PAGE_LIMIT}) — consider splitting")
 
-    # --- structural file presence + log rotation ---
+    # --- structural file presence + log size ---
     for fn in ("SCHEMA.md", "purpose.md"):
         f = root / fn
-        if not f.is_file() or not f.read_text(encoding="utf-8").strip():
+        if (has_symlink_component(root, f)
+                or not f.is_file() or not f.read_text(encoding="utf-8").strip()):
             add("low", "presence", fn, "missing or empty (Layer-3 contract file)")
     log = root / "log.md"
-    if not log.is_file():
+    if has_symlink_component(root, log) or not log.is_file():
         add("low", "presence", "log.md", "no change ledger — use append_log.py")
     else:
-        n = sum(1 for ln in log.read_text(encoding="utf-8").splitlines() if ln.startswith("## ["))
+        n = sum(1 for ln in log.read_text(encoding="utf-8").splitlines()
+                if re.fullmatch(r"## \d{4}-\d{2}-\d{2}", ln))
         if n >= LOG_ROTATE_NEAR:
             add("low", "log", "log.md", f"{n} entries — nearing rotation (500)")
 

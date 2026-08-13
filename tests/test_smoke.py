@@ -16,7 +16,7 @@ def _write(path: Path, content: str) -> None:
 @pytest.fixture
 def bundle(tmp_path: Path) -> Path:
     root = tmp_path / "kb"
-    _write(root / "sources" / "src-a.md", """
+    _write(root / "sources" / "src-a.md.source", """
         ---
         source_type: manual
         ingested: 2026-01-01T00:00:00Z
@@ -29,22 +29,22 @@ def bundle(tmp_path: Path) -> Path:
         title: HTTP cache
         description: How the response cache keys and expires entries.
         tags: [http, cache]
-        timestamp: 2026-01-01T00:00:00Z
-        status: reviewed
+        generated: {by: process:test-curator, at: 2026-01-01T00:00:00Z}
+        status: stable
         confidence: high
         source_type: manual
-        source_ref: sources/src-a.md
-        sources: [sources/src-a.md]
+        source_ref: sources/src-a.md.source
+        sources:
+          - id: src-a
+            resource: /sources/src-a.md.source
         ---
         # Summary
 
-        Responses are cached by URL with a TTL.
+        Responses are cached by URL with a TTL.[^src-a]
 
-        # Citations
-
-        - sources/src-a.md
+        [^src-a]: Raw source snapshot.
     """)
-    _write(root / "index.md", "# KB\n\nRoot index.\n")
+    _write(root / "index.md", "---\nokf_version: \"0.2\"\n---\n# KB\n\nRoot index.\n")
     _write(root / "index-meta.yaml", "title: KB\ndescription: fixture\ndirectories:\n  topics: Reference topics.\n")
     return root
 
@@ -71,11 +71,15 @@ def test_engine_validates(bundle: Path) -> None:
 def test_service_reads_and_searches(bundle: Path, monkeypatch) -> None:
     c = _client(bundle, monkeypatch)
     assert c.get("/health").status_code == 401  # auth required
-    assert c.get("/health", headers=AUTH).json()["concepts"] == 1
+    health = c.get("/health", headers=AUTH).json()
+    assert health["concepts"] == 1 and health["okf_version"] == "0.2"
+    assert health["service_version"]
     root = {i["path"]: i for i in c.get("/ls", headers=AUTH).json()["items"]}
     assert root["topics/"]["kind"] == "dir"
     body = c.get("/cat", params={"path": "topics/http-cache.md"}, headers=AUTH).json()
-    assert "# Citations" in body["content"]
+    assert "[^src-a]" in body["content"]
+    assert body["metadata"]["status"] == "stable"
+    assert body["metadata"]["trust"] == "unverified"
     search = c.get("/search", params={"q": "cache"}, headers=AUTH).json()
     hits = search["results"]
     assert hits and hits[0]["path"] == "topics/http-cache.md"

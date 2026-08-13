@@ -2,7 +2,8 @@
 """Generate per-directory index.md files for an OKF bundle (progressive disclosure).
 
 Every directory carries an index.md so a human or agent can drill in one level
-at a time. Index files have NO frontmatter (OKF SPEC §6). Each index leads with
+at a time. Directory indexes have no frontmatter; the bundle-root index declares
+``okf_version: "0.2"`` as allowed by OKF v0.2. Each index leads with
 a prose description of what the directory (or, at the root, the whole bundle)
 contains — so a retriever knows the scope before opening any concept — then
 lists entries grouped by section:
@@ -44,6 +45,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -81,7 +83,7 @@ def _meta(path: Path) -> dict[str, str]:
 
 
 def _is_concept(p: Path, root: Path) -> bool:
-    if not p.is_file() or p.suffix != ".md" or p.name in RESERVED or p.name.startswith("log-"):
+    if not p.is_file() or p.suffix != ".md" or p.name in RESERVED:
         return False
     parts = p.relative_to(root).parts
     return SOURCES_DIR not in parts and ".okf" not in parts
@@ -127,10 +129,42 @@ def _grouped_sections(entries: list[tuple[str, str, str, str]]) -> str:
     return "\n\n".join(out)
 
 
+def _source_title(path: Path) -> str:
+    """Display the original filename stem for immutable ``*.source`` artifacts."""
+    original_name = path.name.removesuffix(".source")
+    return Path(original_name).stem or original_name
+
+
+def _assert_no_symlinks(root: Path) -> None:
+    """Refuse a bundle symlink before index generation can follow its target."""
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(directory)
+        safe_dirs: list[str] = []
+        for name in sorted(dirnames):
+            path = base / name
+            if path.is_symlink():
+                raise ValueError(
+                    f"{path.relative_to(root).as_posix()}: symlinks are not allowed in an OKF bundle"
+                )
+            if name != ".git":
+                safe_dirs.append(name)
+        dirnames[:] = safe_dirs
+        for name in sorted(filenames):
+            path = base / name
+            if path.is_symlink():
+                raise ValueError(
+                    f"{path.relative_to(root).as_posix()}: symlinks are not allowed in an OKF bundle"
+                )
+
+
 def generate_indexes(root: Path) -> tuple[list[Path], list[str]]:
-    root = Path(root).resolve()
+    root_input = Path(root).expanduser()
+    if root_input.is_symlink():
+        raise ValueError("bundle root must not be a symlink")
+    root = root_input.resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"Bundle directory not found: {root}")
+    _assert_no_symlinks(root)
 
     sidecar = _load_sidecar(root)
     overrides = sidecar.get("directories") or {}
@@ -193,19 +227,29 @@ def generate_indexes(root: Path) -> tuple[list[Path], list[str]]:
         if is_root:
             src_dir = root / SOURCES_DIR
             if src_dir.is_dir():
-                src_files = sorted(p for p in src_dir.glob("*.md")
-                                   if p.name not in RESERVED)
+                src_files = sorted(
+                    p for p in src_dir.iterdir()
+                    if p.is_file() and not p.name.startswith(".") and p.name not in RESERVED
+                )
                 if src_files:
                     lines = ["# Sources", ""]
                     for p in src_files:
-                        lines.append(f"* [{p.stem}]({SOURCES_DIR}/{p.name}) "
+                        lines.append(f"* [{_source_title(p)}]({SOURCES_DIR}/{p.name}) "
                                      f"- raw source snapshot")
                     parts.append("\n".join(lines))
 
-        if len(parts) == 0:
+        # The root index is the bundle version marker and must exist even for a
+        # brand-new empty bundle with no sidecar or concepts.
+        if len(parts) == 0 and not is_root:
             continue
-        (d / "index.md").write_text("\n\n".join(parts).rstrip() + "\n",
-                                    encoding="utf-8")
+        body = "\n\n".join(parts).rstrip()
+        if is_root:
+            content = '---\nokf_version: "0.2"\n---\n'
+            if body:
+                content += "\n" + body + "\n"
+        else:
+            content = body + "\n"
+        (d / "index.md").write_text(content, encoding="utf-8")
         written.append(d / "index.md")
 
     return written, missing

@@ -168,7 +168,11 @@ def test_home_view_is_live_content(monkeypatch, tmp_path: Path, capsys) -> None:
 
     def fake_api(route, **kw):
         if route == "/health":
-            return {"bundle": "kb", "concepts": 7, "by_status": {"reviewed": 7}}
+            return {
+                "bundle": "kb", "concepts": 7, "okf_version": "0.2",
+                "by_status": {"stable": 7}, "by_trust": {"unverified": 7},
+                "by_freshness": {"unspecified": 7},
+            }
         assert route == "/ls"
         return {"items": [{"path": "metrics/", "kind": "dir", "concepts": 3}]}
 
@@ -177,6 +181,8 @@ def test_home_view_is_live_content(monkeypatch, tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "bin:" in out and "description:" in out
     assert 'name: "kb"' in out and "concepts: 7" in out
+    assert 'okf_version: "0.2"' in out
+    assert "trust_counts:" in out and "freshness_counts:" in out
     assert 'directories[1]{path,concepts}:\n  "metrics/",3' in out
     assert "usage:" not in out
 
@@ -219,6 +225,38 @@ def test_cat_truncates_with_full_escape_hatch(monkeypatch, capsys) -> None:
     assert capsys.readouterr().out == "abcdefghij"
 
 
+def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> None:
+    metadata = {
+        "status": "stable", "trust": "machine-confirmed", "freshness": "fresh",
+        "verification_current": True,
+        "generated_at": "2026-08-13T10:00:00Z", "verified_at": "2026-08-13T11:00:00Z",
+        "current_verified_at": "2026-08-13T11:00:00Z",
+    }
+
+    def fake_api(route, **_kwargs):
+        if route == "/cat":
+            return {"path": "x.md", "content": "body", "metadata": metadata}
+        if route == "/ls":
+            return {"items": [{"path": "x.md", "kind": "concept", "title": "X", **metadata}]}
+        if route == "/search":
+            return {"results": [{"path": "x.md", "title": "X", "score": 8, **metadata}], "total": 1}
+        raise AssertionError(route)
+
+    monkeypatch.setattr(cli, "_api", fake_api)
+    assert cli.main(["cat", "x.md", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["metadata"] == metadata
+
+    assert cli.main(["ls"]) == 0
+    ls_out = capsys.readouterr().out
+    assert "verification_current,generated_at,verified_at,current_verified_at" in ls_out
+    assert '"machine-confirmed","fresh",true' in ls_out
+
+    assert cli.main(["search", "x"]) == 0
+    search_out = capsys.readouterr().out
+    assert "verification_current,generated_at,verified_at,current_verified_at" in search_out
+    assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_out
+
+
 def test_grep_limit_reports_total_and_escape_hatch(monkeypatch, capsys) -> None:
     hits = [{"path": "x.md", "line": i, "text": f"hit {i}"} for i in range(3)]
     monkeypatch.setattr(cli, "_api", lambda *a, **kw: {"hits": hits})
@@ -237,3 +275,14 @@ def test_ingest_title_rejects_multiple_inputs_before_api(monkeypatch, capsys) ->
         cli.main(["ingest", "a.md", "b.md", "--title", "ignored before"])
     assert exc.value.code == 2
     assert "--title requires exactly one input" in capsys.readouterr().out
+
+
+def test_audit_posts_under_jobs_and_reuses_jobs_polling(monkeypatch, capsys) -> None:
+    calls = []
+    monkeypatch.setattr(cli, "_post", lambda route, payload, **kw: calls.append((route, payload, kw)) or {
+        "id": "audit1", "kind": "audit", "parent_job": "ingest1", "status": "queued",
+    })
+    assert cli.main(["-b", "kb", "audit", "ingest1"]) == 0
+    assert calls == [("/jobs/ingest1/audit", {}, {"bundle": "kb"})]
+    out = capsys.readouterr().out
+    assert "audit1" in out and "ai-wiki jobs audit1" in out
