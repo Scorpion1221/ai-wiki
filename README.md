@@ -32,11 +32,12 @@ and adversarial audit use agents.
 ### Read/write split (multi-writer)
 
 A public **read-only mirror** (`AIWIKI_DISABLE=ingest,audit,create,delete`) and a team **ingest
-worker** (curation enabled, with `claude` + a writable git remote) can be two deployments
+worker** (curation enabled, with `codex` + a writable git remote) can be two deployments
 of the same service — and behind one URL via path-routing (`/ingest`,`/jobs` → worker,
 reads → mirror). `POST /ingest` takes pasted `text` or any file (`content_b64`+`filename`),
-stored verbatim in `sources/inbox/`. Sources claude can read (text/code/PDF/image) are
-queued; other types are flagged `needs-conversion`. A single serial worker drains the
+stored verbatim in `sources/inbox/`. Sources Codex can read (text/code/image) are queued;
+PDF and other opaque types are stored as `needs-conversion` until an explicit converter is
+provided. A single serial worker drains the
 queue one job at a time (so concurrent submissions never race on the bundle/git) — it also
 sweeps the inbox on a timer to pick up out-of-band drops — rebases onto the remote before
 curating, independently validates the result, then commits and pushes only if validation
@@ -48,6 +49,12 @@ job failed, rolls back, and restores the inbox source for a retry from latest re
 No second LLM pass mutates already-validated content. If the bundle repository already tracks a root
 `viz.html`, successful curation refreshes that snapshot before the same commit; repositories
 without one remain unchanged. The mirror pulls the result.
+
+The service—not Codex—writes the byte-identical immutable `sources/` snapshot. Curation
+runs in a disposable copy that contains no `.git`, `.okf`, or `sources/inbox`; only concept
+bytes that pass scope, provenance, policy, and full-bundle validation are applied to the
+live transaction. Curator and auditor use an explicit model/reasoning setting, record it
+plus heartbeat timestamps in the job, and run with network/apps/plugins/memory disabled.
 
 The writer durably records its Git base, branch, phase, commit, and the ignored inbox bytes
 before an agent can mutate the bundle. After a service restart it aborts any interrupted
@@ -76,7 +83,7 @@ ai-wiki ls                 # list a level, like shell ls
 ai-wiki cat <path>         # raw Markdown preview; add --full only if truncated
 ai-wiki cat <path> --json  # path + content + derived OKF metadata
 ai-wiki search "<query>"
-ai-wiki ingest notes.md    # submit a source for curation (needs `claude` + AIWIKI_CURATE!=off)
+ai-wiki ingest notes.md    # submit a source for curation (needs `codex` + AIWIKI_CURATE!=off)
 ai-wiki jobs <ingest-job-id>
 ai-wiki audit <ingest-job-id>  # adversarial review of a completed ingest; returns an audit job
 ai-wiki jobs <audit-job-id>
@@ -136,5 +143,8 @@ The CLI is non-interactive: usage/API failures are structured on stdout with exi
 | `AIWIKI_PORT` | service port (default 8787) |
 | `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`) |
 | `AIWIKI_CURATE` | `auto` (default) or `off` to disable the curation trigger |
+| `AIWIKI_AGENT_BIN` | Codex executable (default `codex`) |
+| `AIWIKI_AGENT_MODEL` | explicit curator/auditor model (default `gpt-5.6-sol`) |
+| `AIWIKI_AGENT_REASONING_EFFORT` | explicit reasoning effort (default `high`) |
 
 Requires Python ≥ 3.11. Licensed under Apache-2.0 (see LICENSE / NOTICE).

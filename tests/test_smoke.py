@@ -74,6 +74,7 @@ def test_service_reads_and_searches(bundle: Path, monkeypatch) -> None:
     health = c.get("/health", headers=AUTH).json()
     assert health["concepts"] == 1 and health["okf_version"] == "0.2"
     assert health["service_version"]
+    assert "writer_agent" not in health  # this fixture imports a read-only service
     root = {i["path"]: i for i in c.get("/ls", headers=AUTH).json()["items"]}
     assert root["topics/"]["kind"] == "dir"
     body = c.get("/cat", params={"path": "topics/http-cache.md"}, headers=AUTH).json()

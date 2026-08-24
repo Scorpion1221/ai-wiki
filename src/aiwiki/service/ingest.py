@@ -21,10 +21,11 @@ from pathlib import Path
 MAX_BYTES = 25_000_000
 _SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
 
-# Sources claude can curate directly: anything decodable as UTF-8 text (markdown, code,
-# csv, json, html, …) plus PDFs and images (read natively). Anything else is stored but
-# flagged needs-conversion rather than auto-curated.
-_READABLE_BINARY_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+# Sources Codex can curate directly: anything decodable as UTF-8 text (markdown, code,
+# csv, json, html, …) plus image inputs. PDFs and other opaque binaries are stored but
+# flagged needs-conversion rather than guessed (the writer has no PDF converter contract).
+_READABLE_BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_NEEDS_CONVERSION_EXT = {".pdf"}
 _REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion"}
 _REUSABLE_AUDIT_STATUSES = {"queued", "running", "done"}
 _JOB_LOCK = threading.Lock()
@@ -40,7 +41,10 @@ def slugify(title: str | None, fallback: str) -> str:
 
 
 def is_curatable(filename: str, data: bytes) -> bool:
-    if Path(filename).suffix.lower() in _READABLE_BINARY_EXT:
+    extension = Path(filename).suffix.lower()
+    if extension in _NEEDS_CONVERSION_EXT:
+        return False
+    if extension in _READABLE_BINARY_EXT:
         return True
     try:
         data.decode("utf-8")  # text / code / markup / csv / json / …

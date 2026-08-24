@@ -2,7 +2,7 @@
 
 Subpackages:
   engine  — deterministic OKF bundle maintenance (PyYAML + stdlib only).
-  runtime — headless-Claude curation driver (planned).
+  runtime — sandboxed Codex curation and adversarial-audit driver.
   service — FastAPI HTTP API (planned).
   cli     — `ai-wiki` thin client (planned).
 

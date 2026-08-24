@@ -84,15 +84,15 @@ Agents never edit concepts or the bundle Git repository directly. Submit sources
 
 ```bash
 ai-wiki ingest notes.md
-ai-wiki ingest a.md report.pdf chart.png
+ai-wiki ingest a.md config.json chart.png
 cat notes.md | ai-wiki ingest - --title "<stable source identity>"
 ai-wiki jobs <ingest-job-id>
 ai-wiki audit <ingest-job-id>            # only after ingest status is done
 ai-wiki jobs <audit-job-id>
 ```
 
-Files are stored verbatim. Supported text/code/PDF/image sources are curated; unsupported
-formats remain `needs-conversion` rather than being guessed. Identical submissions and
+Files are stored verbatim. Supported text/code/image sources are curated; PDF and other
+opaque formats remain `needs-conversion` rather than being guessed. Identical submissions and
 repeated audits are successful idempotent no-ops.
 
 Ingest completion is not verification. Interpret the audit terminal result:

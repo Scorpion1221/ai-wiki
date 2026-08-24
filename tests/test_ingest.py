@@ -1,6 +1,6 @@
 """Ingest: any file type stored verbatim (raw bytes, original extension, no frontmatter),
 curatable types queued, others flagged needs-conversion; the inbox sweep picks up
-out-of-band drops. Curation itself is stubbed (no claude)."""
+out-of-band drops. Curation itself is stubbed (no Codex)."""
 from __future__ import annotations
 
 import base64
@@ -85,7 +85,7 @@ def test_write_source_same_sha_prefix_does_not_collide(bundle: Path, monkeypatch
 def test_is_curatable() -> None:
     assert I.is_curatable("a.md", b"# hi")              # text
     assert I.is_curatable("a.csv", "héllo".encode())    # utf-8 text
-    assert I.is_curatable("a.pdf", b"\x00\x01\x02")     # pdf by extension
+    assert not I.is_curatable("a.pdf", b"\x00\x01\x02")  # no implicit PDF converter
     assert I.is_curatable("a.png", b"\x89PNG\r\n")      # image by extension
     assert not I.is_curatable("a.bin", b"\x00\x01\xff\xfe")  # opaque binary → not curatable
 
@@ -95,10 +95,11 @@ def test_ingest_text_and_binary_and_unsupported(bundle: Path, monkeypatch) -> No
     # pasted text
     r = c.post("/ingest", json={"text": "hello world", "title": "n"}, headers=AUTH).json()
     assert r["source"].endswith(".md.source") and r["curation"] == "off"  # curate off in this deploy
-    # a PDF (base64) → curatable, stored verbatim
+    # a PDF (base64) → stored verbatim, but requires explicit conversion
     pdf = base64.b64encode(b"%PDF-1.4 data").decode()
     r = c.post("/ingest", json={"content_b64": pdf, "filename": "x.pdf"}, headers=AUTH).json()
-    assert r["status"] == "queued" and (bundle / r["source"]).read_bytes() == b"%PDF-1.4 data"
+    assert r["status"] == "needs-conversion"
+    assert (bundle / r["source"]).read_bytes() == b"%PDF-1.4 data"
     # an opaque binary → stored but flagged needs-conversion
     blob = base64.b64encode(b"\x00\x01\xff\xfe\x00").decode()
     r = c.post("/ingest", json={"content_b64": blob, "filename": "x.bin"}, headers=AUTH).json()

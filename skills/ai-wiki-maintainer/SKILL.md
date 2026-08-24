@@ -37,6 +37,9 @@ ai-wiki jobs <ingest-job-id>
 ```
 
 Poll with bounded backoff until `status` is `done`, `failed`, or `needs-conversion`.
+While `running`, retain `phase` and `agent.runtime/model/reasoning_effort`; confirm
+`agent.heartbeat_at` advances before treating a long pass as healthy. A frozen heartbeat is
+diagnostic evidence, not permission to launch a duplicate ingest.
 
 - `done`: require validation success and record `commit` plus `changed_files`; continue.
 - `failed`: technical failure. Do not audit and do not advance the source checkpoint.
@@ -95,6 +98,7 @@ Capture `parent_job`, `validation`, `commit`, `changed_files`, and:
 - `audit.verified_concepts`
 - `audit.unverified_concepts`
 - `audit.corrected_concepts`
+- `agent.runtime`, `agent.model`, `agent.reasoning_effort`, and the final heartbeat
 
 Do not translate `needs_attention` into “audit failed,” and do not translate `passed` into a
 claim that every fact in the whole bundle was reviewed—the scope is the parent ingest job.

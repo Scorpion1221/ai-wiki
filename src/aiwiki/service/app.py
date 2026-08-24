@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from aiwiki.version import VERSION
 
 from ..runtime import audit as audit_runtime
+from ..runtime import curate as curate_runtime
 from . import bundle as B
 from . import ingest as I
 from . import worker
@@ -199,7 +200,10 @@ def health(bundle: str | None = None, authorization: str | None = Header(default
     _auth(authorization)
     with _read_window():
         name, BUNDLE = _resolve(bundle)
-        return {"bundle": name, "service_version": VERSION, **B.health(BUNDLE)}
+        result = {"bundle": name, "service_version": VERSION, **B.health(BUNDLE)}
+        if CURATE_ON:
+            result["writer_agent"] = curate_runtime._agent_metadata()
+        return result
 
 
 @app.get("/ls")
@@ -301,7 +305,7 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
 
     Accepts pasted `text` (stored as raw .md.source evidence) or any file as
     `content_b64`+`filename` (stored
-    verbatim). Sources claude can read (text/code/pdf/image) are queued for curation — a
+    verbatim). Sources Codex can read (text/code/image) are queued for curation — a
     single serial worker processes one at a time, so concurrent ingests never race on the
     bundle/git. Other types are stored but flagged `needs-conversion`. Disabled with
     AIWIKI_CURATE=off; the whole endpoint is gated by AIWIKI_DISABLE=ingest.

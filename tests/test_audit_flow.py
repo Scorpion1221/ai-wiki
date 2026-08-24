@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from aiwiki.runtime import audit
+from aiwiki.runtime import audit, curate
 from aiwiki.service import ingest as I
 
 
@@ -115,7 +115,7 @@ def test_nested_bundle_audit_fails_before_agent_or_git_mutation(
     monkeypatch.setattr(audit.curate, "_working_files", unexpected)
     monkeypatch.setattr(audit.curate, "_git", unexpected)
     monkeypatch.setattr(audit.curate, "_rollback_git", unexpected)
-    monkeypatch.setattr(audit.subprocess, "run", unexpected)
+    monkeypatch.setattr(curate, "_agent_process", unexpected)
 
     audit.run(bundle, "ingest1", path)
 
@@ -263,13 +263,13 @@ def _run_runtime(tmp_path: Path, monkeypatch, *, verify: bool, validate_errors=N
     monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: validate_errors or [])
 
-    def fake_claude(*args, **kwargs):
-        assert AUDIT_NOW in args[0][2]
+    def fake_agent(*args, **kwargs):
+        assert AUDIT_NOW in args[0][-1]
         if verify:
             (bundle / "features" / "release.md").write_text(_concept(verified=True), encoding="utf-8")
         return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", fake_claude)
+    monkeypatch.setattr(curate, "_agent_process", fake_agent)
     audit.run(bundle, "ingest1", path)
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -299,7 +299,7 @@ def test_audit_closeout_runs_after_agent_scope_gate_and_logs_scoped_concepts(
     monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
     events = []
 
-    def fake_claude(*args, **kwargs):
+    def fake_agent(*args, **kwargs):
         events.append("agent")
         (bundle / "features" / "release.md").write_text(_concept(verified=True), encoding="utf-8")
         return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
@@ -315,7 +315,7 @@ def test_audit_closeout_runs_after_agent_scope_gate_and_logs_scoped_concepts(
         )
         return {"indexes": ["index.md"], "log": "log.md", "missing_index_descriptions": []}
 
-    monkeypatch.setattr(audit.subprocess, "run", fake_claude)
+    monkeypatch.setattr(curate, "_agent_process", fake_agent)
     monkeypatch.setattr(audit, "_deterministic_closeout", fake_closeout)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
@@ -326,7 +326,7 @@ def test_audit_closeout_runs_after_agent_scope_gate_and_logs_scoped_concepts(
     assert set(result["changed_files"]) == {"features/release.md", "index.md", "log.md"}
 
 
-def test_audit_uses_same_locked_content_tool_boundary(tmp_path: Path, monkeypatch) -> None:
+def test_audit_uses_same_sandboxed_codex_boundary(tmp_path: Path, monkeypatch) -> None:
     bundle = _bundle(tmp_path)
     job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
     path = I.job_path(bundle, job["id"])
@@ -334,21 +334,22 @@ def test_audit_uses_same_locked_content_tool_boundary(tmp_path: Path, monkeypatc
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     captured = []
 
-    def fake_claude(command, **kwargs):
+    def fake_agent(command, **kwargs):
         captured.append(command)
         return subprocess.CompletedProcess(command, 0, stdout="reviewed", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", fake_claude)
+    monkeypatch.setattr(curate, "_agent_process", fake_agent)
     audit.run(bundle, "ingest1", path)
     command = captured[0]
-    assert command[command.index("--tools") + 1] == "Read,Edit,Write"
-    scope = "//" + bundle.resolve().as_posix().lstrip("/") + "/**"
-    assert command[command.index("--allowedTools") + 1] == (
-        f"Read({scope}),Edit({scope})"
-    )
-    assert command[command.index("--permission-mode") + 1] == "dontAsk"
-    assert "bypassPermissions" not in command
-    assert not any(tool in command for tool in ("Bash", "Glob", "Grep", "WebFetch", "Skill", "Agent"))
+    assert command[:2] == [curate.AGENT_BIN, "exec"]
+    assert command[command.index("--model") + 1] == curate.AGENT_MODEL
+    assert command[command.index("--sandbox") + 1] == "workspace-write"
+    assert "sandbox_workspace_write.network_access=false" in command
+    assert "sandbox_workspace_write.exclude_slash_tmp=true" in command
+    assert "--ephemeral" in command
+    assert "--ignore-user-config" in command
+    assert "--ignore-rules" in command
+    assert set(curate._DISABLED_CODEX_FEATURES).issubset(command)
 
 
 @pytest.mark.parametrize("outcome", ["normal", "nonzero", "timeout"])
@@ -366,7 +367,7 @@ def test_git_audit_preserves_concurrent_operational_state_for_every_agent_exit(
     real_run = subprocess.run
 
     def concurrent_enqueue(command, *args, **kwargs):
-        if command[0] != "claude":
+        if command[0] != curate.AGENT_BIN:
             return real_run(command, *args, **kwargs)
         other_job.write_bytes(concurrent)
         concurrent_inbox.parent.mkdir(parents=True, exist_ok=True)
@@ -381,7 +382,7 @@ def test_git_audit_preserves_concurrent_operational_state_for_every_agent_exit(
         )
 
     monkeypatch.delenv("AIWIKI_GIT", raising=False)
-    monkeypatch.setattr(audit.subprocess, "run", concurrent_enqueue)
+    monkeypatch.setattr(curate, "_agent_process", concurrent_enqueue)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     monkeypatch.setattr(
         audit,
@@ -412,26 +413,31 @@ def test_audit_timeout_restores_git_config_and_hook_before_any_git_command(
     original_config = config.read_bytes()
     hook = bundle / ".git" / "hooks" / "pre-commit"
     executed = tmp_path / "hook-executed"
-    real_run = subprocess.run
+    real_git = curate._git
     attacked = False
     safe_git_calls = 0
 
     def metadata_attack(command, *args, **kwargs):
         nonlocal attacked, safe_git_calls
-        if command[0] == "claude":
+        if command[0] == curate.AGENT_BIN:
             config.write_text("[core]\n\thooksPath = .git/hooks\n", encoding="utf-8")
             hook.write_text(f"#!/bin/sh\ntouch {executed}\n", encoding="utf-8")
             hook.chmod(0o755)
             attacked = True
             raise subprocess.TimeoutExpired(command, audit.TIMEOUT_S)
-        if attacked and command[0] == "git":
+        pytest.fail("only the Codex command belongs in _agent_process")
+
+    def guarded_git(root, *args, **kwargs):
+        nonlocal safe_git_calls
+        if attacked:
             safe_git_calls += 1
             assert config.read_bytes() == original_config
             assert not hook.exists()
-        return real_run(command, *args, **kwargs)
+        return real_git(root, *args, **kwargs)
 
     monkeypatch.delenv("AIWIKI_GIT", raising=False)
-    monkeypatch.setattr(audit.subprocess, "run", metadata_attack)
+    monkeypatch.setattr(curate, "_agent_process", metadata_attack)
+    monkeypatch.setattr(curate, "_git", guarded_git)
     audit.run(bundle, "ingest1", path)
 
     result = json.loads(path.read_text(encoding="utf-8"))
@@ -472,8 +478,8 @@ def test_unsupported_audit_preserves_historical_auditor_verification(
     monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     monkeypatch.setattr(
-        audit.subprocess,
-        "run",
+        curate,
+        "_agent_process",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 0, stdout="unsupported", stderr="",
         ),
@@ -502,7 +508,7 @@ def test_runtime_validation_failure_is_technical_failure(tmp_path: Path, monkeyp
         (bundle / "features" / "release.md").write_text(_concept(verified=True), encoding="utf-8")
         return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", bad_review)
+    monkeypatch.setattr(curate, "_agent_process", bad_review)
     audit.run(bundle, "ingest1", path)
     job = json.loads(path.read_text(encoding="utf-8"))
     assert job["status"] == "failed" and job["audit"]["status"] == "failed"
@@ -533,7 +539,7 @@ def test_audit_preflight_rejects_bundle_symlink_without_starting_agent(
         new_link.symlink_to(outside_new)
         return subprocess.CompletedProcess(args[0], 1, stdout="", stderr="failed")
 
-    monkeypatch.setattr(audit.subprocess, "run", failed_agent)
+    monkeypatch.setattr(curate, "_agent_process", failed_agent)
     audit.run(bundle, "ingest1", path)
 
     result = json.loads(path.read_text(encoding="utf-8"))
@@ -560,7 +566,7 @@ def test_no_git_audit_rejects_successful_agent_out_of_scope_edit(tmp_path: Path,
         purpose.write_text("tampered", encoding="utf-8")
         return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", malicious_agent)
+    monkeypatch.setattr(curate, "_agent_process", malicious_agent)
     audit.run(bundle, "ingest1", path)
     result = json.loads(path.read_text(encoding="utf-8"))
     assert result["status"] == "failed"
@@ -582,7 +588,7 @@ def test_audit_rejects_substantive_correction_without_generated_refresh(
         concept.write_text(original.replace("The feature was merged.", "The feature may be merged."), encoding="utf-8")
         return subprocess.CompletedProcess(args[0], 0, stdout="corrected", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", stale_generation)
+    monkeypatch.setattr(curate, "_agent_process", stale_generation)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
     result = json.loads(path.read_text(encoding="utf-8"))
@@ -609,7 +615,7 @@ def test_audit_rejects_forged_human_verification(tmp_path: Path, monkeypatch) ->
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", forged_review)
+    monkeypatch.setattr(curate, "_agent_process", forged_review)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
     result = json.loads(path.read_text(encoding="utf-8"))
@@ -631,7 +637,7 @@ def test_audit_rejects_future_generation_and_verification_and_rolls_back(
     monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
 
     def future_review(*args, **kwargs):
-        assert AUDIT_NOW in args[0][2]
+        assert AUDIT_NOW in args[0][-1]
         forged = yaml.safe_load(original[4:original.find("\n---\n", 4)])
         forged["description"] = "A materially corrected claim"
         forged["status"] = "stable"
@@ -644,7 +650,7 @@ def test_audit_rejects_future_generation_and_verification_and_rolls_back(
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", future_review)
+    monkeypatch.setattr(curate, "_agent_process", future_review)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
 
@@ -676,7 +682,7 @@ def test_audit_rejects_bookkeeping_only_future_generation_and_rolls_back(
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", bookkeeping_only)
+    monkeypatch.setattr(curate, "_agent_process", bookkeeping_only)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
 
@@ -710,7 +716,7 @@ def test_audit_rejects_bookkeeping_only_generated_actor_spoof(
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", actor_spoof)
+    monkeypatch.setattr(curate, "_agent_process", actor_spoof)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
 
@@ -750,7 +756,7 @@ def test_audit_rejects_removing_existing_human_verification(
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="deleted", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", delete_human_history)
+    monkeypatch.setattr(curate, "_agent_process", delete_human_history)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
 
@@ -791,7 +797,7 @@ def test_audit_rejects_source_retarget_and_rolls_back(
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="retargeted", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", retargeting_review)
+    monkeypatch.setattr(curate, "_agent_process", retargeting_review)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     audit.run(bundle, "ingest1", path)
 
@@ -815,8 +821,8 @@ def test_runtime_failed_attempt_can_be_retried_without_overwriting_history(
     monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
     monkeypatch.setattr(
-        audit.subprocess,
-        "run",
+        curate,
+        "_agent_process",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 1, stdout="", stderr="temporary reviewer outage"
         ),
@@ -833,7 +839,7 @@ def test_runtime_failed_attempt_can_be_retried_without_overwriting_history(
         (bundle / "features" / "release.md").write_text(_concept(verified=True), encoding="utf-8")
         return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
 
-    monkeypatch.setattr(audit.subprocess, "run", successful_review)
+    monkeypatch.setattr(curate, "_agent_process", successful_review)
     retry_path = I.job_path(bundle, retry["id"])
     audit.run(bundle, "ingest1", retry_path)
 

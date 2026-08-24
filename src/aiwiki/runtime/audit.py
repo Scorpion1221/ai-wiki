@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -56,7 +57,8 @@ AUDIT_PROMPT = (
     "source-id footnotes only. Never write "
     "`timestamp`, string-only sources, `last_verified_at`, a `# Citations` section, or statuses "
     "`reviewed`/`canonical`/`stale`.\n\n"
-    "Do not create, delete, rename, or edit any other file. Do not run git, index generation, logging, "
+    "Do not create, delete, rename, or edit any other file. You may use local read-only shell commands "
+    "to inspect evidence, but do not run git, network requests, skills, index generation, logging, "
     "source scanning, or validation; the service does deterministic validation and owns commit/push. "
     "End with a concise report of verified, unverified, and corrected concept paths."
 )
@@ -104,7 +106,7 @@ def concept_files(bundle: Path, parent: dict) -> list[str]:
 
 
 def _find_source(bundle: Path, parent: dict) -> str | None:
-    """Find the immutable source after curation moved it out of ``sources/inbox``."""
+    """Find the immutable source after the service moved it out of ``sources/inbox``."""
     source = parent.get("source")
     if isinstance(source, str):
         direct = (bundle / source).resolve()
@@ -375,6 +377,7 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
     job = _read_json(job_path)
     job["status"] = "running"
     job["started"] = curate._now()
+    job["agent"] = {**curate._agent_metadata(), "role": "adversarial-auditor"}
     _save(job_path, job)
 
     root: Path | None = None
@@ -387,6 +390,7 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
     git_metadata_before: dict | None = None
     agent_tree_before: dict[str, bytes] | None = None
     agent_links_before: dict[str, str] | None = None
+    agent_output_dir: Path | None = None
 
     def protect_git_metadata() -> tuple[list[str], bool]:
         """Restore Agent-mutated Git controls before any subsequent Git command."""
@@ -601,15 +605,30 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
             concepts="\n".join(f"- {rel}" for rel in concepts),
             now=trusted_now_text,
         )
-        proc = subprocess.run(
-            curate._claude_command(bundle, prompt),
-            cwd=str(bundle),
-            capture_output=True,
-            text=True,
+        agent_output_dir = Path(tempfile.mkdtemp(prefix="ai-wiki-audit-agent-"))
+        output_path = agent_output_dir / "last-message.txt"
+
+        def heartbeat(elapsed: float) -> None:
+            agent = job.setdefault("agent", curate._agent_metadata())
+            agent["heartbeat_at"] = curate._now()
+            agent["elapsed_s"] = round(elapsed, 1)
+            job["phase"] = "auditing"
+            _save(job_path, job)
+
+        proc = curate._run_agent(
+            curate._codex_command(
+                bundle,
+                prompt,
+                output_path=output_path,
+                image_paths=curate._image_attachments(bundle / source),
+            ),
+            cwd=bundle,
             timeout=TIMEOUT_S,
+            heartbeat=heartbeat,
         )
         job["returncode"] = proc.returncode
-        job["summary"] = (proc.stdout or "").strip()[-4000:]
+        job["summary"] = curate._agent_summary(proc, output_path)
+        job["agent"]["finished_at"] = curate._now()
         metadata_errors, metadata_safe = protect_git_metadata()
         state_paths, state_safe = protect_agent_state()
         if metadata_errors or state_paths:
@@ -788,3 +807,5 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
     finally:
         job["finished"] = curate._now()
         _save(job_path, job)
+        if agent_output_dir is not None:
+            shutil.rmtree(agent_output_dir, ignore_errors=True)
