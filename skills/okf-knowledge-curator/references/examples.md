@@ -11,7 +11,7 @@ title: Chrome Extension for Canvas
 description: The extension integrates solving and study workflows into Canvas.
 tags: [plugin, chrome-extension, canvas]
 status: draft
-generated: {by: ai-wiki-curator/0.2.0, at: 2026-08-13T08:00:00Z}
+generated: {by: process:ai-wiki-curator, at: 2026-08-13T08:00:00Z}
 stale_after: 2026-09-12
 sources:
   - id: canvas-prd
@@ -39,7 +39,7 @@ title: Revenue per download
 description: Settled USD revenue divided by attributed downloads for the same window.
 tags: [metric, revenue]
 status: stable
-generated: {by: ai-wiki-curator/0.2.0, at: 2026-08-13T08:00:00Z}
+generated: {by: process:ai-wiki-curator, at: 2026-08-13T08:00:00Z}
 verified: {by: process:finance-contract-audit, at: 2026-08-13T08:05:00Z}
 stale_after: 2026-09-12
 sources:
