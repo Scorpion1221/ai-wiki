@@ -51,6 +51,10 @@ AUDIT_PROMPT = (
     "- If material claims remain unsupported, keep/set `status: draft` and do not add a new verification "
     "event by `" + AUDITOR + "`. Preserve every existing verification event as history. Leaving a concept "
     "draft/unverified is a valid audit result.\n"
+    "- Source provenance is FROZEN during audit: never add, remove, reorder, retarget, or edit any "
+    "`sources` entry or its metadata. The service discards accidental source-provenance edits.\n"
+    "- Never leave or set `status: stable` unless this same pass appends a current `" + AUDITOR + "` "
+    "verification event for that generated revision. Otherwise the result must be `draft`.\n"
     "- If you change ANY frontmatter or body content other than `status` and `verified`—including a "
     "wording cleanup—refresh `generated` to `{{by: " + AUDITOR + ", at: {now}}}` and append the separate "
     "verification event only after the corrected claims are supported. Use structured sources and "
@@ -270,6 +274,59 @@ def _provenance_policy_errors(
     if parent_source not in cited:
         errors.append(f"{rel}: audit must retain parent source citation {parent_source!r}")
     return errors
+
+
+def _serialize_document(frontmatter: dict, body: str) -> str:
+    """Serialize a repaired Agent document without changing its body semantics."""
+    dumped = yaml.safe_dump(
+        frontmatter,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+        width=4096,
+    )
+    output = f"---\n{dumped}---\n{body}"
+    return output if output.endswith("\n") else output + "\n"
+
+
+def _substantive_parts(frontmatter: dict, body: str) -> tuple[str, str]:
+    semantic = dict(frontmatter)
+    for key in ("generated", "verified", "status"):
+        semantic.pop(key, None)
+    return yaml.safe_dump(semantic, sort_keys=True, allow_unicode=True), body.rstrip("\n")
+
+
+def _repair_audit_output(path: Path, before_text: str) -> list[str]:
+    """Repair only reviewer-owned bookkeeping slips before content validation.
+
+    The reviewer decides claims, but never owns provenance and may not represent an
+    unverified revision as stable. These narrow repairs turn common model slips into an
+    auditable ``needs_attention`` result instead of an infrastructure failure.
+    """
+    before_end = before_text.find("\n---\n", 4)
+    before_fm = yaml.safe_load(before_text[4:before_end]) or {}
+    before_body = before_text[before_end + 5 :]
+    after_fm, body = parse_doc(path)
+    repairs: list[str] = []
+    sources_repaired = after_fm.get("sources") != before_fm.get("sources")
+    if sources_repaired:
+        after_fm["sources"] = before_fm.get("sources")
+        repairs.append("restored immutable sources provenance")
+    has_current_auditor = any(
+        event.get("by") == AUDITOR for event in current_verified(after_fm)
+    )
+    if after_fm.get("status") == "stable" and not has_current_auditor:
+        after_fm["status"] = "draft"
+        repairs.append("downgraded stable without current audit verification to draft")
+    if (
+        sources_repaired and after_fm.get("generated") != before_fm.get("generated")
+        and _substantive_parts(after_fm, body) == _substantive_parts(before_fm, before_body)
+    ):
+        after_fm["generated"] = before_fm.get("generated")
+        repairs.append("restored generated after discarded non-substantive edits")
+    if repairs:
+        path.write_text(_serialize_document(after_fm, body), encoding="utf-8")
+    return repairs
 
 
 def _repo_paths(root: Path, bundle: Path, concepts: list[str]) -> set[str]:
@@ -687,6 +744,14 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
                 _set_failure(job, "audit modified files outside its ingest scope")
                 job["out_of_scope_files"] = sorted(set(outside) | set(new_symlinks))
                 return
+
+        deterministic_repairs = {}
+        for rel in concepts:
+            repairs = _repair_audit_output(bundle / rel, before[rel])
+            if repairs:
+                deterministic_repairs[rel] = repairs
+        if deterministic_repairs:
+            job["deterministic_repairs"] = deterministic_repairs
 
         errors = validate_bundle(bundle)
         for rel in concepts:

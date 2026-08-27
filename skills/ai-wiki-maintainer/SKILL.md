@@ -99,6 +99,7 @@ Capture `parent_job`, `validation`, `commit`, `changed_files`, and:
 - `audit.unverified_concepts`
 - `audit.corrected_concepts`
 - `agent.runtime`, `agent.model`, `agent.reasoning_effort`, and the final heartbeat
+- `deterministic_repairs` when present (restored provenance/generation or status downgrade)
 
 Do not translate `needs_attention` into “audit failed,” and do not translate `passed` into a
 claim that every fact in the whole bundle was reviewed—the scope is the parent ingest job.

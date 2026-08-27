@@ -97,6 +97,10 @@ audit is either `passed` or `needs_attention`. The latter is a valid, non-retrya
 that leaves insufficiently supported concepts unverified. Only technical/validation/Git
 failures produce a failed audit job. If ingest changed no concept files, audit returns an
 immediate idempotent `passed` job with `reason: no_concepts_to_audit` and no audit commit.
+The service also repairs reviewer bookkeeping slips deterministically: it restores the
+pre-audit `sources` provenance, removes a generation refresh when no substantive change
+survives, and downgrades `stable` without current audit verification to `draft`; the job
+records these under `deterministic_repairs`.
 Repeating `audit` reuses an audit attempt while it is `queued`, `running`, or successfully
 `done`. A `failed` attempt remains available for diagnosis, but a subsequent call creates
 and queues a new attempt; callers must bound technical retries.

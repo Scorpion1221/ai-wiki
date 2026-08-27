@@ -40,6 +40,8 @@ under a subdirectory concept and is usually wrong. A correct relative alternativ
 example `../sources/<file>` from a one-level concept directory.
 A shared `usage_window: {from, to}` may frame source `usage_count`, or an entry may override
 it. These are credibility signals, not a stored credibility score.
+Omit either field when the source does not provide it. Quote free-form YAML scalars that
+contain punctuation and prefer block-style lists for aliases containing prose.
 
 ## Optional trust and freshness
 

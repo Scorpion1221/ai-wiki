@@ -23,6 +23,8 @@ def test_ingest_prompt_names_every_required_profile_field() -> None:
     for field in ("type", "title", "description", "tags", "status", "generated", "sources"):
         assert f"`{field}`" in curate.INGEST_PROMPT
     assert "`tags` as a non-empty list of non-empty strings" in curate.INGEST_PROMPT
+    assert "`usage_window` must be a mapping" in curate.INGEST_PROMPT
+    assert "quote scalars containing" in curate.INGEST_PROMPT
 
 
 def test_ingest_prompt_treats_backlinks_as_substantive_edits() -> None:

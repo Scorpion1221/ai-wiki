@@ -74,6 +74,12 @@ Unknown useful extensions such as `confidence`, `owner`, `contested`, `contradic
 and `source_sha256` may be preserved, but never replace the standard trust and freshness
 signals.
 
+Keep frontmatter mechanically safe: quote free-form YAML scalars containing punctuation
+such as `:`, `#`, `[`, `]`, `{`, or `}`, and prefer block lists for aliases containing
+prose. Omit optional credibility metadata unless the source states it. When present,
+`last_modified` is exactly `YYYY-MM-DD`; `usage_window` is a mapping with `from` and `to`
+`YYYY-MM-DD` values, never a prose/string window.
+
 Do not emit or preserve the superseded v0.1 contract: `timestamp`, string-valued
 `sources`, `last_verified_at`, statuses `reviewed`/`canonical`/`stale`, or a top-level
 `# Citations` section. Strict validation intentionally rejects them.

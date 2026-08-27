@@ -18,6 +18,8 @@ def test_audit_prompt_matches_generation_and_verification_policy() -> None:
     assert "change only `status` and `verified`" in audit.AUDIT_PROMPT
     assert "change ANY frontmatter or body content" in audit.AUDIT_PROMPT
     assert "refresh `generated`" in audit.AUDIT_PROMPT
+    assert "Source provenance is FROZEN" in audit.AUDIT_PROMPT
+    assert "Never leave or set `status: stable`" in audit.AUDIT_PROMPT
 
 AUTH = {"Authorization": "Bearer testtok"}
 AUDIT_NOW = "2026-08-13T01:00:00Z"
@@ -621,8 +623,86 @@ def test_audit_rejects_forged_human_verification(tmp_path: Path, monkeypatch) ->
     result = json.loads(path.read_text(encoding="utf-8"))
     assert result["status"] == "failed"
     assert any("unauthorized verifier 'human:owner'" in error for error in result["validation"]["errors"])
-    assert any("stable audit result requires" in error for error in result["validation"]["errors"])
+    assert result["deterministic_repairs"] == {
+        "features/release.md": [
+            "downgraded stable without current audit verification to draft"
+        ]
+    }
     assert concept.read_text(encoding="utf-8") == original
+
+
+def test_audit_downgrades_unverified_stable_to_needs_attention(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    original = concept.read_text(encoding="utf-8")
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+
+    def unsupported_stable(*args, **kwargs):
+        frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+        frontmatter["status"] = "stable"
+        concept.write_text(
+            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
+            + "---\n# Summary\n\nThe feature was merged.\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args[0], 0, stdout="unsupported", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", unsupported_stable)
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done"
+    assert result["audit"]["status"] == "needs_attention"
+    assert result["audit"]["unverified_concepts"] == ["features/release.md"]
+    assert result["deterministic_repairs"] == {
+        "features/release.md": [
+            "downgraded stable without current audit verification to draft"
+        ]
+    }
+
+
+def test_audit_restores_generation_when_only_provenance_edit_survived(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    original = concept.read_text(encoding="utf-8")
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
+
+    def provenance_only(*args, **kwargs):
+        frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+        frontmatter["status"] = "stable"
+        frontmatter["generated"] = {"by": audit.AUDITOR, "at": AUDIT_NOW}
+        frontmatter["verified"] = [{"by": audit.AUDITOR, "at": AUDIT_NOW}]
+        frontmatter["sources"][0]["author"] = "process:guessed"
+        concept.write_text(
+            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
+            + "---\n# Summary\n\nThe feature was merged.\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args[0], 0, stdout="verified", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", provenance_only)
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done"
+    assert result["audit"]["status"] == "passed"
+    assert result["deterministic_repairs"] == {
+        "features/release.md": [
+            "restored immutable sources provenance",
+            "restored generated after discarded non-substantive edits",
+        ]
+    }
 
 
 def test_audit_rejects_future_generation_and_verification_and_rolls_back(
@@ -645,7 +725,7 @@ def test_audit_rejects_future_generation_and_verification_and_rolls_back(
         forged["verified"] = [{"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}]
         concept.write_text(
             "---\n" + yaml.safe_dump(forged, sort_keys=False)
-            + "---\n# Summary\n\nThe feature may have been merged.\n",
+            + "---\n# Summary\n\nThe feature was merged.\n",
             encoding="utf-8",
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
@@ -773,7 +853,7 @@ def test_audit_rejects_removing_existing_human_verification(
     "resource",
     ["https://example.test/untrusted", "/sources/missing.md.source"],
 )
-def test_audit_rejects_source_retarget_and_rolls_back(
+def test_audit_restores_source_retarget_before_commit(
     tmp_path: Path, monkeypatch, resource: str,
 ) -> None:
     bundle = _bundle(tmp_path)
@@ -792,7 +872,7 @@ def test_audit_rejects_source_retarget_and_rolls_back(
         forged["sources"] = [{"id": "retargeted", "resource": resource}]
         concept.write_text(
             "---\n" + yaml.safe_dump(forged, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
+            + "---\n# Summary\n\nThe feature may have been merged.\n",
             encoding="utf-8",
         )
         return subprocess.CompletedProcess(args[0], 0, stdout="retargeted", stderr="")
@@ -802,13 +882,16 @@ def test_audit_rejects_source_retarget_and_rolls_back(
     audit.run(bundle, "ingest1", path)
 
     result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    errors = result["validation"]["errors"]
-    assert any("audit must not change sources provenance" in error for error in errors)
-    assert any("must retain parent source citation" in error for error in errors)
-    if resource.startswith("/"):
-        assert any("does not resolve to a local file" in error for error in errors)
-    assert concept.read_text(encoding="utf-8") == original
+    assert result["status"] == "done"
+    assert result["audit"]["status"] == "passed"
+    assert result["deterministic_repairs"] == {
+        "features/release.md": ["restored immutable sources provenance"]
+    }
+    repaired_text = concept.read_text(encoding="utf-8")
+    repaired = yaml.safe_load(repaired_text[4:repaired_text.find("\n---\n", 4)])
+    assert repaired["sources"] == [
+        {"id": "release-source", "resource": "/sources/release.md.source"}
+    ]
 
 
 def test_runtime_failed_attempt_can_be_retried_without_overwriting_history(
