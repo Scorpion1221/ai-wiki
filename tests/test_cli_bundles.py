@@ -239,7 +239,21 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
         if route == "/ls":
             return {"items": [{"path": "x.md", "kind": "concept", "title": "X", **metadata}]}
         if route == "/search":
-            return {"results": [{"path": "x.md", "title": "X", "score": 8, **metadata}], "total": 1}
+            return {
+                "results": [{
+                    "path": "x.md",
+                    "title": "X",
+                    "score": 8,
+                    "match": {
+                        "phrase": True,
+                        "coverage": 1.0,
+                        "fields": ["title", "body"],
+                        "terms": ["x"],
+                    },
+                    **metadata,
+                }],
+                "total": 1,
+            }
         raise AssertionError(route)
 
     monkeypatch.setattr(cli, "_api", fake_api)
@@ -255,6 +269,8 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
     search_out = capsys.readouterr().out
     assert "verification_current,generated_at,verified_at,current_verified_at" in search_out
     assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_out
+    assert "score,phrase,coverage,fields,terms,context" in search_out
+    assert '8,true,1.0,"title|body","x"' in search_out
 
 
 def test_grep_limit_reports_total_and_escape_hatch(monkeypatch, capsys) -> None:

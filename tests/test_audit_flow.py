@@ -19,7 +19,8 @@ def test_audit_prompt_matches_generation_and_verification_policy() -> None:
     assert "change ANY frontmatter or body content" in audit.AUDIT_PROMPT
     assert "refresh `generated`" in audit.AUDIT_PROMPT
     assert "Source provenance is FROZEN" in audit.AUDIT_PROMPT
-    assert "Never leave or set `status: stable`" in audit.AUDIT_PROMPT
+    assert "Never leave a scoped concept as `draft`" in audit.AUDIT_PROMPT
+    assert "completed but unverified knowledge record" in audit.AUDIT_PROMPT
 
 AUTH = {"Authorization": "Bearer testtok"}
 AUDIT_NOW = "2026-08-13T01:00:00Z"
@@ -459,6 +460,10 @@ def test_runtime_needs_attention_is_a_successful_job(tmp_path: Path, monkeypatch
     assert job["audit"]["status"] == "needs_attention"
     assert job["audit"]["unverified_concepts"] == ["features/release.md"]
     assert job["validation"]["status"] == "passed"
+    concept = tmp_path / "kb" / "features" / "release.md"
+    frontmatter = yaml.safe_load(concept.read_text(encoding="utf-8").split("---", 2)[1])
+    assert frontmatter["status"] == "stable"
+    assert "verified" not in frontmatter
 
 
 def test_unsupported_audit_preserves_historical_auditor_verification(
@@ -494,6 +499,7 @@ def test_unsupported_audit_preserves_historical_auditor_verification(
     assert result["audit"]["status"] == "needs_attention"
     after_text = concept.read_text(encoding="utf-8")
     after = yaml.safe_load(after_text[4:after_text.find("\n---\n", 4)])
+    assert after["status"] == "stable"
     assert after["verified"] == [historical]
 
 
@@ -623,15 +629,11 @@ def test_audit_rejects_forged_human_verification(tmp_path: Path, monkeypatch) ->
     result = json.loads(path.read_text(encoding="utf-8"))
     assert result["status"] == "failed"
     assert any("unauthorized verifier 'human:owner'" in error for error in result["validation"]["errors"])
-    assert result["deterministic_repairs"] == {
-        "features/release.md": [
-            "downgraded stable without current audit verification to draft"
-        ]
-    }
+    assert "deterministic_repairs" not in result
     assert concept.read_text(encoding="utf-8") == original
 
 
-def test_audit_downgrades_unverified_stable_to_needs_attention(
+def test_audit_keeps_unverified_stable_as_completed_needs_attention(
     tmp_path: Path, monkeypatch,
 ) -> None:
     bundle = _bundle(tmp_path)
@@ -659,11 +661,40 @@ def test_audit_downgrades_unverified_stable_to_needs_attention(
     assert result["status"] == "done"
     assert result["audit"]["status"] == "needs_attention"
     assert result["audit"]["unverified_concepts"] == ["features/release.md"]
+    assert "deterministic_repairs" not in result
+    assert yaml.safe_load(concept.read_text(encoding="utf-8").split("---", 2)[1])["status"] == "stable"
+
+
+def test_audit_promotes_leftover_draft_to_stable_without_faking_verification(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(
+        curate,
+        "_agent_process",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="bounded but unverified", stderr="",
+        ),
+    )
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    frontmatter = yaml.safe_load(concept.read_text(encoding="utf-8").split("---", 2)[1])
+    assert result["status"] == "done"
+    assert result["audit"]["status"] == "needs_attention"
     assert result["deterministic_repairs"] == {
         "features/release.md": [
-            "downgraded stable without current audit verification to draft"
+            "promoted completed audit draft to stable without adding verification"
         ]
     }
+    assert frontmatter["status"] == "stable"
+    assert "verified" not in frontmatter
 
 
 def test_audit_restores_generation_when_only_provenance_edit_survived(

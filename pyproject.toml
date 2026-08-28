@@ -1,6 +1,6 @@
 [project]
 name = "ai-wiki"
-version = "0.2.2"
+version = "0.2.3"
 description = "Hosted, agent-maintained OKF knowledge service (engine + CLI + API)."
 readme = "README.md"
 requires-python = ">=3.11"

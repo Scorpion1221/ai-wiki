@@ -109,6 +109,57 @@ def test_entries_and_search_expose_metadata_and_rank_relevance_first(tmp_path: P
     } <= item.keys() for item in entries)
 
 
+def test_search_prioritizes_phrase_and_full_coverage_over_common_token_frequency(
+    tmp_path: Path,
+) -> None:
+    _concept(tmp_path, "complete")
+    _concept(tmp_path, "noisy")
+    complete = tmp_path / "topics" / "complete.md"
+    complete.write_text(
+        complete.read_text(encoding="utf-8").replace("needle", "Named remove-AI result action"),
+        encoding="utf-8",
+    )
+    noisy = tmp_path / "topics" / "noisy.md"
+    noisy.write_text(
+        noisy.read_text(encoding="utf-8").replace(
+            "needle", " ".join(["AI"] * 100) + " removed obsolete copy",
+        ),
+        encoding="utf-8",
+    )
+
+    results = B.search(tmp_path, "remove_ai", top_k=None)
+
+    assert [result["path"] for result in results[:2]] == [
+        "topics/complete.md",
+        "topics/noisy.md",
+    ]
+    assert results[0]["match"] == {
+        "phrase": True,
+        "coverage": 1.0,
+        "fields": ["body"],
+        "terms": ["remove", "ai"],
+    }
+    assert results[1]["match"]["coverage"] == 0.5
+    assert results[1]["match"]["phrase"] is False
+
+
+def test_search_uses_latin_word_boundaries_and_exposes_match_reason(tmp_path: Path) -> None:
+    _concept(tmp_path, "cache-details")
+    concept = tmp_path / "topics" / "cache-details.md"
+    concept.write_text(
+        concept.read_text(encoding="utf-8")
+        .replace("title: cache-details", "title: Cache details")
+        .replace("needle", "Operational details remain documented"),
+        encoding="utf-8",
+    )
+
+    assert B.search(tmp_path, "ai", top_k=None) == []
+    hit = B.search(tmp_path, "cache", top_k=None)[0]
+    assert hit["match"]["coverage"] == 1.0
+    assert hit["match"]["fields"] == ["path", "title"]
+    assert hit["match"]["terms"] == ["cache"]
+
+
 def test_absolute_bundle_links_and_log_prefixed_concepts_are_read(tmp_path: Path) -> None:
     _concept(tmp_path, "one")
     _concept(tmp_path, "two")

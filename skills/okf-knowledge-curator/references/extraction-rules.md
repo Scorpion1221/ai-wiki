@@ -37,7 +37,8 @@ For each concept:
 3. Give cited sources stable ids and join claims with Markdown footnotes.
 4. Add links only to existing related concepts.
 5. Use `stale_after` for dynamic facts; do not store staleness as status.
-6. Keep new/uncertain material `draft` and omit `verified`.
+6. Keep new/uncertain material transiently `draft` and omit `verified`; the independent
+   audit finalizes retained records without faking verification.
 
 ## Skip or keep raw
 
@@ -48,7 +49,7 @@ For each concept:
 
 ## Lifecycle and extensions
 
-- `draft`: incomplete, uncertain, or not consumption-ready.
+- `draft`: transient curation state awaiting audit.
 - `stable`: consumption-ready at the stated boundary.
 - `deprecated`: retained history, not current.
 

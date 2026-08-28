@@ -54,14 +54,18 @@ ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
 ```
 
 Search and list results expose `status`, `trust`, `freshness`, `generated_at`, `verified_at`,
-and `verification_current`. Search ranks text relevance first and uses trust/freshness to
-break close ties. This keeps relevant evidence discoverable even when it is weak or
-historical; apply the trust/freshness gate after retrieval rather than silently hiding it.
-Never treat ranking as permission to skip that gate.
+and `verification_current`. Search also explains its lexical match with `phrase`, `coverage`,
+`fields`, and `terms`. It normalizes punctuation/separators, preserves Latin word boundaries
+and CJK bigrams, searches every concept regardless of directory depth, and ranks exact phrase
+plus full query coverage ahead of repeated partial tokens. Trust/freshness only break close
+textual ties; apply the evidence gate after retrieval rather than silently hiding weak or
+historical evidence.
 
-For vague, indirect, or bilingual questions, try 2–3 meaningfully different queries
-(original wording, Chinese/English switch, and a paraphrase). Do not fan out mechanically
-when the user's exact term already has one obvious home.
+Run one well-formed search first. Read the top candidates when `phrase: true` or
+`coverage: 1.0` makes the match clear. Rewrite the query at most once when results are empty,
+coverage is partial, or matches are scattered across weak fields; use the user's alternative
+wording, a concise paraphrase, or the other language. Do not mechanically fan out several
+queries. Exact identifiers still belong to `grep --fixed`.
 
 ### 3. Trace relationships, then read the concept
 
@@ -97,7 +101,7 @@ Use this order for **current facts**:
 1. `stable + fresh + human-reviewed`
 2. `stable + fresh + machine-confirmed`
 3. `stable + fresh + unverified` — usable only with an explicit verification caveat
-4. `draft` — process/context only; never state as settled fact
+4. `draft` — transient curation state before audit; process/context only
 5. `stale` or `deprecated` — historical context only, not a current answer
 
 `freshness: unspecified` is not proof of freshness. State the latest `generated_at` and

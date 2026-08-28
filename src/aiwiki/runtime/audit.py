@@ -48,13 +48,15 @@ AUDIT_PROMPT = (
     "duplicate it). If the concept was already fully supported, do not reformat or rewrite it: change "
     "only `status` and `verified`. You MAY promote a "
     "complete concept from `draft` to `stable`; never use a legacy status.\n"
-    "- If material claims remain unsupported, keep/set `status: draft` and do not add a new verification "
-    "event by `" + AUDITOR + "`. Preserve every existing verification event as history. Leaving a concept "
-    "draft/unverified is a valid audit result.\n"
+    "- If evidence is incomplete or contradictory, remove unsupported claims or qualify them as explicit "
+    "uncertainty, set `status: stable`, and do not add a new verification event by `" + AUDITOR + "`. "
+    "Preserve every existing verification event as history. This is a completed but unverified knowledge "
+    "record, not a draft.\n"
     "- Source provenance is FROZEN during audit: never add, remove, reorder, retarget, or edit any "
     "`sources` entry or its metadata. The service discards accidental source-provenance edits.\n"
-    "- Never leave or set `status: stable` unless this same pass appends a current `" + AUDITOR + "` "
-    "verification event for that generated revision. Otherwise the result must be `draft`.\n"
+    "- Never leave a scoped concept as `draft`: draft is only the transient state between curation and "
+    "this audit. `stable` means the bounded record is durable; `verified` separately records whether its "
+    "current revision is evidence-confirmed.\n"
     "- If you change ANY frontmatter or body content other than `status` and `verified`—including a "
     "wording cleanup—refresh `generated` to `{{by: " + AUDITOR + ", at: {now}}}` and append the separate "
     "verification event only after the corrected claims are supported. Use structured sources and "
@@ -188,7 +190,7 @@ def _verification_policy_errors(
     before_text: str,
     trusted_now: datetime,
 ) -> list[str]:
-    """Audit may append only its own verifier; stable requires current audit proof."""
+    """Audit may append only its own verifier and must preserve verification history."""
     before_fm = yaml.safe_load(before_text[4:before_text.find("\n---\n", 4)]) or {}
     after_fm, _body = parse_doc(path)
     before_events = {
@@ -223,14 +225,6 @@ def _verification_policy_errors(
             errors.append(f"{path.name}: audit verification timestamp must not be in the future")
         elif at < earliest:
             errors.append(f"{path.name}: audit verification timestamp is outside the trusted audit window")
-    has_current_auditor = any(
-        event.get("by") == AUDITOR
-        and (at := _instant(event.get("at"))) is not None
-        and at <= trusted_now
-        for event in current_verified(after_fm)
-    )
-    if after_fm.get("status") == "stable" and not has_current_auditor:
-        errors.append(f"{path.name}: stable audit result requires a current {AUDITOR} verification")
     return errors
 
 
@@ -299,9 +293,10 @@ def _substantive_parts(frontmatter: dict, body: str) -> tuple[str, str]:
 def _repair_audit_output(path: Path, before_text: str) -> list[str]:
     """Repair only reviewer-owned bookkeeping slips before content validation.
 
-    The reviewer decides claims, but never owns provenance and may not represent an
-    unverified revision as stable. These narrow repairs turn common model slips into an
-    auditable ``needs_attention`` result instead of an infrastructure failure.
+    The reviewer decides claims but never owns provenance. A completed review may leave a
+    record unverified, but it may not leave the transient curation status ``draft``. These
+    narrow repairs turn common model slips into an auditable terminal result instead of an
+    infrastructure failure.
     """
     before_end = before_text.find("\n---\n", 4)
     before_fm = yaml.safe_load(before_text[4:before_end]) or {}
@@ -312,12 +307,9 @@ def _repair_audit_output(path: Path, before_text: str) -> list[str]:
     if sources_repaired:
         after_fm["sources"] = before_fm.get("sources")
         repairs.append("restored immutable sources provenance")
-    has_current_auditor = any(
-        event.get("by") == AUDITOR for event in current_verified(after_fm)
-    )
-    if after_fm.get("status") == "stable" and not has_current_auditor:
-        after_fm["status"] = "draft"
-        repairs.append("downgraded stable without current audit verification to draft")
+    if after_fm.get("status") == "draft":
+        after_fm["status"] = "stable"
+        repairs.append("promoted completed audit draft to stable without adding verification")
     if (
         sources_repaired and after_fm.get("generated") != before_fm.get("generated")
         and _substantive_parts(after_fm, body) == _substantive_parts(before_fm, before_body)

@@ -226,6 +226,28 @@ def _ls_summary(item: dict) -> str:
     return f"{prefix} — {detail}" if detail else prefix
 
 
+def _search_row(result: dict) -> dict:
+    match = result.get("match") if isinstance(result.get("match"), dict) else {}
+    return {
+        "path": result.get("path"),
+        "title": result.get("title"),
+        "status": result.get("status"),
+        "trust": result.get("trust"),
+        "freshness": result.get("freshness"),
+        "verification_current": result.get("verification_current"),
+        "generated_at": result.get("generated_at"),
+        "verified_at": result.get("verified_at"),
+        "current_verified_at": result.get("current_verified_at"),
+        "score": result.get("score"),
+        "phrase": bool(match.get("phrase")),
+        "coverage": match.get("coverage"),
+        "fields": "|".join(map(str, match.get("fields") or [])),
+        "terms": "|".join(map(str, match.get("terms") or [])),
+        "context": " — ".join(value for value in (
+            (result.get("description") or "")[:150], result.get("snippet") or "") if value),
+    }
+
+
 def _count_lines(shown: int, total: int | None = None) -> list[str]:
     values = {"shown": shown}
     if total is not None:
@@ -523,26 +545,14 @@ def main(argv=None) -> int:
         if a.json:
             print(json.dumps(results, ensure_ascii=False, indent=2))
         else:
-            rows = ({
-                "path": result.get("path"),
-                "title": result.get("title"),
-                "status": result.get("status"),
-                "trust": result.get("trust"),
-                "freshness": result.get("freshness"),
-                "verification_current": result.get("verification_current"),
-                "generated_at": result.get("generated_at"),
-                "verified_at": result.get("verified_at"),
-                "current_verified_at": result.get("current_verified_at"),
-                "score": result.get("score"),
-                "context": " — ".join(value for value in (
-                    (result.get("description") or "")[:150], result.get("snippet") or "") if value),
-            } for result in results)
+            rows = (_search_row(result) for result in results)
             total = d.get("total")
             groups = [_count_lines(len(results), total),
                       table_lines(
                           "results", rows,
                           ("path", "title", "status", "trust", "freshness", "verification_current",
-                           "generated_at", "verified_at", "current_verified_at", "score", "context"),
+                           "generated_at", "verified_at", "current_verified_at", "score", "phrase",
+                           "coverage", "fields", "terms", "context"),
                       )]
             if isinstance(total, int) and len(results) < total:
                 groups.append(table_lines("help", ({

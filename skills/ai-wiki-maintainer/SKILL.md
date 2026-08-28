@@ -16,6 +16,9 @@ ingest → poll ingest → audit → poll audit → report → checkpoint
 ```
 
 The AI Wiki worker owns concept edits, deterministic validation, commits, and pushes.
+The Maintainer owns orchestration only: it collects source changes, drives jobs to terminal
+structured states, enforces the gates below, advances checkpoints, and reports evidence. It
+does not perform a second free-form content judgment after the independent audit.
 
 ## Runtime preflight
 
@@ -108,8 +111,16 @@ Interpret the result precisely:
   retry by invoking `ai-wiki audit <ingest-job-id>` only within the bounded retry policy.
 - job `status: done` + `audit.status: passed`: all affected concepts were verified.
 - job `status: done` + `audit.status: needs_attention`: audit completed successfully, but
-  one or more concepts remain unverified due to insufficient or contradictory evidence.
-  This is an acceptable business result, not a retryable infrastructure failure.
+  one or more concepts remain unverified due to insufficient or contradictory evidence. The
+  auditor must have removed or explicitly bounded unsupported claims. This is an acceptable
+  business result, not a retryable infrastructure failure.
+
+Every concept in a completed audit is durable: it must be `stable` or `deprecated`, never
+`draft`. `passed` means the current revision has an audit verification event;
+`needs_attention` means the durable record remains unverified. Stable therefore means
+“consumption-ready at its stated evidence boundary,” not “released/live/experiment won.”
+Treat a completed audit that still exposes `draft` as a technical contract violation: do
+not advance the checkpoint and report it for service repair rather than editing the bundle.
 
 Capture `parent_job`, `validation`, `commit`, `changed_files`, and:
 
@@ -117,7 +128,7 @@ Capture `parent_job`, `validation`, `commit`, `changed_files`, and:
 - `audit.unverified_concepts`
 - `audit.corrected_concepts`
 - `agent.runtime`, `agent.model`, `agent.reasoning_effort`, and the final heartbeat
-- `deterministic_repairs` when present (restored provenance/generation or status downgrade)
+- `deterministic_repairs` when present (restored provenance/generation or transient draft promotion)
 
 Do not translate `needs_attention` into “audit failed,” and do not translate `passed` into a
 claim that every fact in the whole bundle was reviewed—the scope is the parent ingest job.
@@ -158,6 +169,8 @@ past a failed source unless the cursor format records that source separately.
 - Do not run `git commit`, `git push`, or merge conflict resolution for the bundle.
 - Do not manufacture `verified`, change `status`, or extend `stale_after` from the orchestrator.
 - Do not advance checkpoints from optimistic prose; use structured job state only.
+- Do not reinterpret or rewrite the auditor's bounded claims; use `passed` versus
+  `needs_attention` and the concept metadata as the decision surface.
 
 ## Run report
 

@@ -95,7 +95,9 @@ The redirect runs before analytics initialization.[^waio-68]
 ```
 
 Do not use positional citations (`[1]`) or rely on footnote prose as the source key. A
-claim without adequate evidence stays narrowly worded and `draft`, or is omitted.
+claim without adequate evidence stays narrowly worded and transiently `draft`, or is
+omitted. The independent audit later finalizes every retained concept as `stable` or
+`deprecated` without manufacturing verification.
 
 ## Generated is not verified
 
@@ -136,7 +138,7 @@ confirmation of a new claim.
 
 ## Lifecycle and freshness
 
-- `draft`: incomplete, uncertain, or not ready as settled knowledge.
+- `draft`: transient curation state awaiting the independent audit.
 - `stable`: ready for consumption at its stated evidence boundary.
 - `deprecated`: historical/superseded; retain for links and history.
 - `stale_after`: optional absolute date; stale when `today >= stale_after`.
@@ -158,7 +160,9 @@ merge; production QA proves availability; mature measurements prove effects.
    contains neither `sources/inbox/` nor service/Git state.
 3. Analyze candidates, connections, contradictions, and create/update plan before writing.
 4. Search existing concepts and prefer aggregation/update over one-page-per-source mirroring.
-5. New concepts start `status: draft` and have no `verified` field.
+5. New concepts start transiently as `status: draft` and have no `verified` field. The
+   independent audit must remove unsupported claims or bound uncertainty, then finish with
+   `stable`/`deprecated`; only fully supported current revisions receive `verified`.
 6. On genuine conflict, preserve both claims and sources; set reciprocal `contested: true`
    and `contradictions`, and add/update an `OpenQuestion`.
 7. Add precise footnotes and existing related-concept links only.
@@ -171,7 +175,8 @@ merge; production QA proves availability; mature measurements prove effects.
 2. Re-read both the service snapshot and concept; preserve still-supported provenance and facts.
 3. Update prose and `generated`; do not touch `verified` as a substitute for audit.
 4. Preserve identity, existing provenance/history, and supported claims; cite the current snapshot.
-5. If evidence is insufficient, keep/demote to `draft`; if superseded, use `deprecated`.
+5. If evidence is insufficient, keep/demote to transient `draft` for the audit to qualify;
+   if superseded, use `deprecated`.
 6. Report changed concept paths. The service applies update invariants and deterministic closeout.
 
 ## Deterministic close-out commands (service/manual maintenance only)

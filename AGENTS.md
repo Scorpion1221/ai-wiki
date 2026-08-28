@@ -54,14 +54,17 @@ Structured results expose `status`, derived `trust` and `freshness`, `generated_
 `verified_at`, and `verification_current`. Trust follows OKF §5.3 across all verification
 history; `verification_current` separately says whether an event confirms the current
 generated revision. For current-fact decisions, treat `verification_current: false` like
-unverified regardless of the historical trust tier. Search orders by lexical relevance first and uses trust/freshness only
-as a tie-break; apply this current-fact gate after retrieval even when a weak hit ranks highly:
+unverified regardless of the historical trust tier. Search returns explainable `phrase`,
+`coverage`, `fields`, and `terms`; exact phrases and full query coverage rank ahead of
+repeated partial tokens. Trust/freshness remain tie-breakers. Run one search first and
+rewrite it at most once only when results are empty or coverage is partial; apply this
+current-fact gate after retrieval even when a weak hit ranks highly:
 
 ```text
 stable + fresh + human-reviewed
 stable + fresh + machine-confirmed
 stable + fresh + unverified       (explicit caveat)
-draft                              (process/context only)
+draft                              (transient pre-audit process/context only)
 stale or deprecated               (history only)
 ```
 
@@ -99,7 +102,7 @@ Ingest completion is not verification. Interpret the audit terminal result:
 
 - `passed`: all concepts affected by that ingest were verified;
 - `needs_attention`: review completed, but some concepts remain unverified; do not retry
-  without new evidence;
+  without new evidence. Completed concepts are stable but unverified, never long-lived draft;
 - `passed` + `reason: no_concepts_to_audit`: ingest changed no concept files, so audit
   completed immediately without a reviewer or audit commit;
 - job `failed`: technical, validation, or Git failure.

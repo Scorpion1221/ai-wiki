@@ -63,7 +63,9 @@ conflicts reciprocally with `contested` and `contradictions`.
 
 ## Update policy
 
-- New concepts are `draft` and unverified.
+- New concepts are transiently `draft` and unverified until the independent audit.
+- A completed audit leaves every retained concept `stable` or `deprecated`. Fully supported
+  current revisions receive `verified`; bounded uncertainty remains stable but unverified.
 - Newer evidence may supersede older facts; preserve history with `deprecated` when useful.
 - Update `generated` on meaningful edits, but never imply verification.
 - For payments/revenue/renewal/LTV, experiment winners, and live/released claims, require

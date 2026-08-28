@@ -92,14 +92,21 @@ okf-render-viz <bundle> [out.html]  # generate a local HTML knowledge-graph snap
 
 Engine CLIs are exposed as `okf-validate`, `okf-scan-sources`, `okf-lint`, etc.
 
+Search is deterministic and explainable: it normalizes separators, applies Latin word
+boundaries plus CJK bigrams, searches path/title/aliases/tags/description/body across every
+concept, and returns `match.phrase`, `match.coverage`, `match.fields`, and `match.terms`.
+Exact phrases and complete query coverage outrank repeated partial tokens.
+
 An ingest is not verification. New/changed concepts are audited separately; a completed
 audit is either `passed` or `needs_attention`. The latter is a valid, non-retryable outcome
-that leaves insufficiently supported concepts unverified. Only technical/validation/Git
+that leaves an explicitly bounded durable concept unverified. A completed audit never leaves
+a concept in the transient `draft` state: `passed` is stable and currently verified;
+`needs_attention` is stable/deprecated but unverified. Only technical/validation/Git
 failures produce a failed audit job. If ingest changed no concept files, audit returns an
 immediate idempotent `passed` job with `reason: no_concepts_to_audit` and no audit commit.
 The service also repairs reviewer bookkeeping slips deterministically: it restores the
 pre-audit `sources` provenance, removes a generation refresh when no substantive change
-survives, and downgrades `stable` without current audit verification to `draft`; the job
+survives, and promotes a leftover transient `draft` without adding verification; the job
 records these under `deterministic_repairs`.
 Repeating `audit` reuses an audit attempt while it is `queued`, `running`, or successfully
 `done`. A `failed` attempt remains available for diagnosis, but a subsequent call creates

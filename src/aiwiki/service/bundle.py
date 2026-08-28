@@ -5,8 +5,10 @@ is sandboxed to the bundle root (safe-path gate).
 """
 from __future__ import annotations
 
+import math
 import re
 import subprocess
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -404,59 +406,153 @@ def grep(root: Path, pattern: str, subdir: str | None = None, fixed: bool = Fals
     return hits
 
 
-def _tokens(q: str) -> set[str]:
-    toks = {w for w in re.findall(r"[a-z0-9]+", q.lower()) if len(w) >= 2}
-    for run in re.findall(rf"[{_CJK}]+", q):
+def _normalize_search_text(value: object) -> str:
+    """Normalize lexical separators without inventing domain-specific synonyms."""
+    text = unicodedata.normalize("NFKC", str(value)).lower()
+    text = re.sub(rf"[^a-z0-9{_CJK}]+", " ", text)
+    return " ".join(text.split())
+
+
+def _tokens(q: str) -> tuple[str, ...]:
+    """Return ordered unique Latin tokens and CJK bigrams for explainable matching."""
+    normalized = _normalize_search_text(q)
+    toks = [w for w in re.findall(r"[a-z0-9]+", normalized) if len(w) >= 2]
+    for run in re.findall(rf"[{_CJK}]+", normalized):
         if len(run) == 1:
-            toks.add(run)
+            toks.append(run)
         for i in range(len(run) - 1):
-            toks.add(run[i:i + 2])  # CJK bigrams — whitespace tokenization fails on Chinese
-    return toks
+            toks.append(run[i:i + 2])  # CJK bigrams — whitespace tokenization fails on Chinese
+    return tuple(dict.fromkeys(toks))
 
 
-def _snippet(body: str, terms: set[str], width: int = 160) -> str:
+def _term_count(text: str, term: str) -> int:
+    """Count Latin terms on word boundaries; CJK bigrams remain substring matches."""
+    if re.fullmatch(r"[a-z0-9]+", term):
+        return len(re.findall(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text))
+    return text.count(term)
+
+
+def _field_length(text: str) -> int:
+    latin = len(re.findall(r"[a-z0-9]+", text))
+    cjk = sum(max(1, len(run) - 1) for run in re.findall(rf"[{_CJK}]+", text))
+    return max(1, latin + cjk)
+
+
+def _snippet(body: str, phrase: str, terms: tuple[str, ...], width: int = 160) -> str:
     """Best-matching body line — lets the caller judge relevance without a cat."""
-    best, best_hits = "", 0
+    best, best_rank = "", (-1, -1, -1)
     for line in body.splitlines():
         stripped = line.strip().lstrip("#").strip()
         if not stripped:
             continue
-        low = stripped.lower()
-        hits = sum(low.count(t) for t in terms)
-        if hits > best_hits:
-            best, best_hits = stripped, hits
+        low = _normalize_search_text(stripped)
+        matched = sum(1 for term in terms if _term_count(low, term))
+        hits = sum(_term_count(low, term) for term in terms)
+        rank = (1 if len(terms) > 1 and phrase and phrase in low else 0, matched, hits)
+        if rank > best_rank:
+            best, best_rank = stripped, rank
     return best[:width]
 
 
 def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
-    """Lexical, CJK-aware. (title|aliases)*8 + (tags|description)*4 + body*1,
-    OKF trust/freshness as a tie-breaker. Results carry description + best-line snippet
-    so the caller can prune candidates without cat-ing each one."""
+    """Explainable multi-field BM25-style retrieval with phrase/coverage priority.
+
+    Directory depth is irrelevant: every valid concept is searched.  The scoring is
+    domain-agnostic and keeps exact phrases and full query coverage ahead of documents
+    that merely repeat a common partial token.  Trust/freshness remains a tie-breaker,
+    never a recall filter.
+    """
+    phrase = _normalize_search_text(query)
     terms = _tokens(query)
     if not terms:
         return []
-    scored = []
+
+    records = []
+    weights = {
+        "path": 4.0,
+        "title": 4.0,
+        "aliases": 4.0,
+        "tags": 2.0,
+        "description": 2.0,
+        "body": 1.0,
+    }
     for _path, rel, fm, body, _text in _concept_records(root):
-        title = str(fm.get("title") or "").lower()
-        aliases = " ".join(map(str, fm.get("aliases") or [])).lower()
-        tags = " ".join(map(str, fm.get("tags") or [])).lower()
-        desc = str(fm.get("description") or "").lower()
-        low = body.lower()
-        score = sum(8 * (title.count(t) + aliases.count(t))
-                    + 4 * (tags.count(t) + desc.count(t))
-                    + low.count(t) for t in terms)
-        if score:
-            meta = concept_metadata(fm)
-            knowledge_rank = _knowledge_rank(meta)
-            scored.append((score, knowledge_rank, meta["generated_at"], {
-                "path": rel, "title": fm.get("title"), "type": fm.get("type"),
-                "tags": fm.get("tags") or [], "score": score,
-                "description": fm.get("description"),
-                "snippet": _snippet(body, terms),
-                **meta,
-            }))
-    # Relevance finds the requested concept; trust/freshness gate close matches.
-    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+        fields = {
+            "path": _normalize_search_text(rel.removesuffix(".md")),
+            "title": _normalize_search_text(fm.get("title") or ""),
+            "aliases": _normalize_search_text(" ".join(map(str, fm.get("aliases") or []))),
+            "tags": _normalize_search_text(" ".join(map(str, fm.get("tags") or []))),
+            "description": _normalize_search_text(fm.get("description") or ""),
+            "body": _normalize_search_text(body),
+        }
+        records.append((rel, fm, body, fields))
+    if not records:
+        return []
+
+    averages = {
+        field: sum(_field_length(fields[field]) for *_prefix, fields in records) / len(records)
+        for field in weights
+    }
+    document_frequency = {
+        term: sum(
+            1 for *_prefix, fields in records
+            if any(_term_count(text, term) for text in fields.values())
+        )
+        for term in terms
+    }
+
+    scored = []
+    total_documents = len(records)
+    for rel, fm, body, fields in records:
+        matched_terms = tuple(
+            term for term in terms if any(_term_count(text, term) for text in fields.values())
+        )
+        if not matched_terms:
+            continue
+        matched_fields = tuple(
+            field for field, text in fields.items()
+            if any(_term_count(text, term) for term in terms)
+        )
+        coverage = len(matched_terms) / len(terms)
+        phrase_fields = tuple(
+            field for field, text in fields.items()
+            if len(terms) > 1 and phrase and phrase in text
+        )
+
+        lexical_score = 0.0
+        for term in terms:
+            df = document_frequency[term]
+            idf = math.log(1 + (total_documents - df + 0.5) / (df + 0.5))
+            weighted_tf = 0.0
+            for field, text in fields.items():
+                count = _term_count(text, term)
+                if not count:
+                    continue
+                length_norm = 0.25 + 0.75 * (_field_length(text) / averages[field])
+                weighted_tf += weights[field] * count / max(length_norm, 0.1)
+            if weighted_tf:
+                lexical_score += idf * (weighted_tf * 2.2) / (weighted_tf + 1.2)
+
+        phrase_score = sum(weights[field] * 2.0 for field in phrase_fields)
+        score = round(lexical_score + phrase_score, 4)
+        meta = concept_metadata(fm)
+        knowledge_rank = _knowledge_rank(meta)
+        match = {
+            "phrase": bool(phrase_fields),
+            "coverage": round(coverage, 3),
+            "fields": list(matched_fields),
+            "terms": list(matched_terms),
+        }
+        scored.append((bool(phrase_fields), coverage, score, knowledge_rank, meta["generated_at"], {
+            "path": rel, "title": fm.get("title"), "type": fm.get("type"),
+            "tags": fm.get("tags") or [], "score": score,
+            "match": match,
+            "description": fm.get("description"),
+            "snippet": _snippet(body, phrase, terms),
+            **meta,
+        }))
+    # Phrase and coverage secure recall; score ranks equally complete matches.
+    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]), reverse=True)
     results = [d for *_, d in scored]
     return results if top_k is None else results[:top_k]
 
