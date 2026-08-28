@@ -17,6 +17,24 @@ ingest → poll ingest → audit → poll audit → report → checkpoint
 
 The AI Wiki worker owns concept edits, deterministic validation, commits, and pushes.
 
+## Runtime preflight
+
+Before scanning or ingesting, run `ai-wiki --version`, `ai-wiki health --json`, and
+`ai-wiki audit --help`. Require the local CLI version to equal the writer's reported
+`service_version`, require `okf_version: "0.2"`, and require the `audit` command. Do not
+hard-code a release number in an agent or automation prompt; the reachable writer is the
+compatibility source of truth.
+
+If the checks fail, run:
+
+```sh
+uv tool install --force git+https://github.com/Scorpion1221/ai-wiki
+hash -r
+```
+
+Then repeat all three checks. If installation or verification still fails, fail closed:
+do not scan, ingest, audit, or advance a checkpoint.
+
 ## One-source workflow
 
 ### 1. Submit
