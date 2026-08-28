@@ -121,6 +121,10 @@ Every concept in a completed audit is durable: it must be `stable` or `deprecate
 “consumption-ready at its stated evidence boundary,” not “released/live/experiment won.”
 Treat a completed audit that still exposes `draft` as a technical contract violation: do
 not advance the checkpoint and report it for service repair rather than editing the bundle.
+After a non-empty audit reaches `done`, deduplicate its verified/unverified/corrected paths
+and run `ai-wiki cat <path> --json` once per affected concept. Require every returned
+`metadata.status` to be `stable` or `deprecated`; for every `verified_concepts` path also
+require `metadata.verification_current: true`.
 
 Capture `parent_job`, `validation`, `commit`, `changed_files`, and:
 
