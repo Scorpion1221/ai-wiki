@@ -112,6 +112,14 @@ Repeating `audit` reuses an audit attempt while it is `queued`, `running`, or su
 `done`. A `failed` attempt remains available for diagnosis, but a subsequent call creates
 and queues a new attempt; callers must bound technical retries.
 
+Maintenance checkpoints use the durable audit Job as their receipt: `done`, successful
+validation, `passed`/`needs_attention`, and the successful Git result when applicable.
+The worker already enforces concept status and verification before committing. Do not
+repeat that gate against live `cat`/`health` results: read mirrors can lag, and later ingests
+can change the same concept. Report mirror visibility separately as a warning; it must not
+block completed source checkpoints or trigger duplicate curation. This does not relax the
+read-side evidence gates for answering current-fact questions.
+
 Pasted/raw Markdown evidence is stored as `sources/*.md.source`, not `*.md`, so it cannot
 be mistaken for an OKF concept. `SCHEMA.md` and `purpose.md` remain discoverable structural
 documents with `type: Contract` frontmatter.

@@ -292,6 +292,84 @@ def test_runtime_passed_when_all_scoped_concepts_are_machine_verified(tmp_path: 
     assert "index.md" in job["closeout"]["indexes"]
 
 
+@pytest.mark.parametrize("verify", [True, False], ids=["passed", "needs_attention"])
+def test_durable_audit_receipt_survives_stale_missing_and_busy_reads(
+    tmp_path: Path, monkeypatch, verify: bool,
+) -> None:
+    """Checkpoint the audited commit, never the mirror or a subsequent working tree."""
+    from aiwiki.engine.document import concept_metadata
+    from aiwiki.engine.validate import parse_doc
+
+    bundle = _git_bundle(tmp_path)
+    mirror = _bundle(tmp_path / "mirror")
+    (mirror / "index.md").write_text('---\nokf_version: "0.2"\n---\n', encoding="utf-8")
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    assert curate._git(bundle, "remote", "add", "origin", str(remote)).returncode == 0
+    assert curate._git(bundle, "push", "-u", "origin", "main").returncode == 0
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    monkeypatch.delenv("AIWIKI_GIT", raising=False)
+    monkeypatch.setattr(curate, "_now", lambda: AUDIT_NOW)
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+
+    def fake_agent(command, **kwargs):
+        if verify:
+            (bundle / "features/release.md").write_text(_concept(verified=True), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="reviewed", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", fake_agent)
+    audit.run(bundle, "ingest1", I.job_path(bundle, job["id"]))
+    receipt = I.read_job(bundle, job["id"])
+    assert receipt["status"] == "done"
+    assert receipt["validation"]["status"] == "passed"
+    assert receipt["audit"]["status"] == ("passed" if verify else "needs_attention")
+    assert receipt["git"]["committed"] is True and receipt["git"]["pushed"] is True
+    assert receipt["commit"] == receipt["git"]["commit"]
+    assert curate._git(remote, "rev-parse", "refs/heads/main").stdout.strip() == receipt["commit"]
+    metadata = concept_metadata(parse_doc(bundle / "features/release.md")[0])
+    assert metadata["status"] == "stable"
+    assert metadata["verification_current"] is verify
+
+    client, _submitted = _client(bundle, monkeypatch)
+    from aiwiki.service import app as appmod
+    monkeypatch.setattr(appmod, "_registry", lambda: {"writer": bundle, "reader": mirror})
+    params = {"path": "features/release.md", "bundle": "reader"}
+    stale = client.get("/cat", params=params, headers=AUTH)
+    assert stale.json()["metadata"]["status"] == "draft"
+    (mirror / "features/release.md").unlink()
+    assert client.get("/cat", params=params, headers=AUTH).status_code == 404
+
+    # Even the writer's latest tree is not the immutable revision this receipt describes.
+    (bundle / "features/release.md").write_text(_concept(), encoding="utf-8")
+    before = I.job_path(bundle, job["id"]).read_bytes()
+    with appmod.worker.serialized_mutation():
+        assert client.get("/cat", params=params, headers=AUTH).status_code == 503
+        for _ in range(2):
+            result = client.get(f"/jobs/{job['id']}", params={"bundle": "writer"}, headers=AUTH)
+            assert result.status_code == 200
+            assert result.json() == receipt
+    assert I.job_path(bundle, job["id"]).read_bytes() == before
+
+
+def test_audit_push_failure_is_not_a_successful_receipt(tmp_path: Path, monkeypatch) -> None:
+    bundle = _git_bundle(tmp_path)
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    monkeypatch.delenv("AIWIKI_GIT", raising=False)
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+    monkeypatch.setattr(
+        curate, "_agent_process",
+        lambda command, **kw: subprocess.CompletedProcess(command, 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(curate, "_has_remote", lambda _root: True)
+    monkeypatch.setattr(curate, "_commit_and_push", lambda *args: {"committed": True, "pushed": False})
+
+    audit.run(bundle, "ingest1", I.job_path(bundle, job["id"]))
+
+    result = I.read_job(bundle, job["id"])
+    assert result["status"] == "failed"
+    assert result["error"] == "audit git commit/push failed"
+
+
 def test_audit_closeout_runs_after_agent_scope_gate_and_logs_scoped_concepts(
     tmp_path: Path, monkeypatch,
 ) -> None:

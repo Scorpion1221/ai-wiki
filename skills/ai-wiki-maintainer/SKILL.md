@@ -119,12 +119,22 @@ Every concept in a completed audit is durable: it must be `stable` or `deprecate
 `draft`. `passed` means the current revision has an audit verification event;
 `needs_attention` means the durable record remains unverified. Stable therefore means
 “consumption-ready at its stated evidence boundary,” not “released/live/experiment won.”
-Treat a completed audit that still exposes `draft` as a technical contract violation: do
-not advance the checkpoint and report it for service repair rather than editing the bundle.
-After a non-empty audit reaches `done`, deduplicate its verified/unverified/corrected paths
-and run `ai-wiki cat <path> --json` once per affected concept. Require every returned
-`metadata.status` to be `stable` or `deprecated`; for every `verified_concepts` path also
-require `metadata.verification_current: true`.
+The worker enforces these invariants before completing the audit. Use the durable
+`ai-wiki jobs <audit-job-id> --json` result as the checkpoint receipt: require `status: done`,
+`validation.status: passed`, and `audit.status: passed` or `needs_attention`. Record its
+`parent_job`, scoped concept lists, and Git result. When a commit was made, require
+`git.committed: true` and matching `commit`/`git.commit`; a deployment with a remote must
+also report `git.pushed: true`. Preserve the documented no-concept/no-change exceptions.
+
+**Do not gate a completed audit on `cat`, `health`, or search results from the read mirror.**
+The receipt describes the audited commit, not the reader's current working tree. A mirror
+may still show the pre-audit `draft`, return 404 for a new concept, or be temporarily
+unavailable; a later ingest can also legitimately change a previously audited concept.
+None of these observations invalidates a successful receipt. Record mirror visibility as
+`pending`/`unavailable` with a warning, advance the completed source checkpoint, and do not
+re-ingest or re-audit it. Mirror publication is a separate read-side health concern, not a
+second content review. Ordinary answers must still apply the query skill's evidence gates
+to the content actually returned; a job receipt is not a bypass for current-fact answers.
 
 Capture `parent_job`, `validation`, `commit`, `changed_files`, and:
 
@@ -147,7 +157,7 @@ Never advance on:
 
 - ingest or audit `failed`;
 - ingest `needs-conversion`;
-- timeout, transport/auth/API error;
+- timeout or unresolved transport/auth/API error when retrieving the required job receipt;
 - missing validation/commit metadata where the job promises it;
 - a parent ingest that has not reached `done`.
 
@@ -163,6 +173,11 @@ past a failed source unless the cursor format records that source separately.
 - Retry an audit `failed` technical attempt with a bounded count: invoke `ai-wiki audit` again,
   record the new attempt id, and preserve the same parent ingest/source identity.
 - Do not retry `needs_attention` without new evidence.
+- On a transient job-read timeout, connection error, HTTP 429, or 5xx, retry the same
+  read at most three times with 5/15/30-second backoff (respect `Retry-After`). Do not
+  restart ingest/audit because a status read failed. Authentication/permission/invalid
+  request errors require repair, not blind retries. Only exhausted required job reads
+  block that source; optional mirror reads never do.
 - A no-op run creates no Git commit and is still successful when its jobs are terminal.
 - A `no_concepts_to_audit` result is an immediate `passed` no-op and may advance that
   source checkpoint; do not wait for a worker or require an audit commit.
@@ -189,5 +204,9 @@ audit commit + verified/unverified/corrected concepts
 checkpoint old → new (or exact reason not advanced)
 ```
 
-At run end, also report the writer bundle revision and, when readable, the mirror revision.
-A writer commit is not proof that the mirror has pulled it; call out any revision lag.
+At run end, report the writer audit commit and, optionally, one mirror health observation.
+Do not label a public `health` response as writer health unless the endpoint is known to
+serve the writer. Different revision strings alone do not prove lag: the reader may already
+be ahead. If visibility is unknown, report `pending/unknown` rather than declaring failure.
+A writer commit is not proof of mirror publication, but mirror publication is not required
+to checkpoint a successfully audited source.

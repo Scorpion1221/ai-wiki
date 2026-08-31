@@ -111,7 +111,12 @@ Advance an automation checkpoint only after audit job `done` (`passed` or
 `needs_attention`), never after failure, timeout, or API error. The worker owns validation,
 commit and push. A real Git conflict aborts and retries from fresh remote state rather
 than running an LLM conflict resolver. A public read-only mirror may lag the writer, so
-compare reported bundle Git revisions rather than assuming a push is already visible.
+record mirror visibility separately rather than assuming a push is already visible.
+The durable audit Job (done + passed validation + passed/needs_attention + successful Git
+result when applicable) is the maintenance checkpoint receipt. Do not re-check that receipt
+against live `cat` results: mirror lag, a missing new page, or a subsequent ingest must not
+turn a completed audit into a failed maintenance run. Mirror visibility is a warning, not a
+checkpoint gate; query-side evidence gates still apply to answers from returned content.
 
 ## 5. Skill source of truth
 

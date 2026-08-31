@@ -132,6 +132,11 @@ expired and, if useful, report only the narrower source-backed statement.
 
 ## Submit sources only when asked
 
+For maintenance, use the durable audit Job as the completion receipt, not a second read of
+the concept from a potentially lagging mirror. Follow `ai-wiki-maintainer` for checkpoint
+gates. Mirror visibility warnings do not invalidate completed audits; the evidence gates
+above still apply whenever answering from the content actually returned.
+
 ```sh
 ai-wiki ingest notes.md
 ai-wiki ingest report.pdf chart.png
