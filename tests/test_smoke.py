@@ -87,3 +87,13 @@ def test_service_reads_and_searches(bundle: Path, monkeypatch) -> None:
     assert search["total"] == 1
     # path traversal is rejected
     assert c.get("/cat", params={"path": "../../etc/passwd"}, headers=AUTH).status_code == 400
+
+
+def test_log_returns_newest_prefix_total_and_definitive_zero(bundle: Path, monkeypatch) -> None:
+    _write(bundle / "log.md", "newest\nnew detail\nolder\noldest\n")
+    c = _client(bundle, monkeypatch)
+
+    result = c.get("/log", params={"tail": 2}, headers=AUTH).json()
+    assert result == {"lines": ["newest", "new detail"], "total": 4}
+    assert c.get("/log", params={"tail": 0}, headers=AUTH).json() == {"lines": [], "total": 4}
+    assert c.get("/log", params={"tail": -1}, headers=AUTH).status_code == 422

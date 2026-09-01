@@ -79,10 +79,11 @@ ai-wiki                    # live bundle overview + directories + next commands
 ai-wiki bundle list        # bundles hosted on the server (active/default state)
 ai-wiki bundle use <name>  # switch the active bundle (or `bundle create <name>`)
 ai-wiki health
-ai-wiki ls                 # list a level, like shell ls
+ai-wiki ls                 # list a level; TOON separates concepts from structural entries
 ai-wiki cat <path>         # raw Markdown preview; add --full only if truncated
 ai-wiki cat <path> --json  # path + content + derived OKF metadata
 ai-wiki search "<query>"
+ai-wiki log --tail 30      # newest change-ledger lines first
 ai-wiki ingest notes.md    # submit a source for curation (needs `codex` + AIWIKI_CURATE!=off)
 ai-wiki jobs <ingest-job-id>
 ai-wiki audit <ingest-job-id>  # adversarial review of a completed ingest; returns an audit job
@@ -96,6 +97,9 @@ Search is deterministic and explainable: it normalizes separators, applies Latin
 boundaries plus CJK bigrams, searches path/title/aliases/tags/description/body across every
 concept, and returns `match.phrase`, `match.coverage`, `match.fields`, and `match.terms`.
 Exact phrases and complete query coverage outrank repeated partial tokens.
+TOON list output keeps concept evidence fields off directories and structural files. JSON
+search/grep/log output includes `shown`, `total`, and `truncated` so callers cannot mistake a
+bounded response for a complete result set.
 
 An ingest is not verification. New/changed concepts are audited separately; a completed
 audit is either `passed` or `needs_attention`. The latter is a valid, non-retryable outcome

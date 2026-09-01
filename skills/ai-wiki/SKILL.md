@@ -53,8 +53,10 @@ ai-wiki grep "<regex>"                   # regex across concepts
 ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
 ```
 
-Search and list results expose `status`, `trust`, `freshness`, `generated_at`, `verified_at`,
-and `verification_current`. Search also explains its lexical match with `phrase`, `coverage`,
+TOON list output separates semantic `concepts` from structural `entries`; only concepts expose
+`status`, `trust`, `freshness`, `generated_at`, `verified_at`, and `verification_current`.
+`ls --json` returns the complete raw entry array. Search results expose the same concept
+evidence fields and explain their lexical match with `phrase`, `coverage`,
 `fields`, and `terms`. It normalizes punctuation/separators, preserves Latin word boundaries
 and CJK bigrams, searches every concept regardless of directory depth, and ranks exact phrase
 plus full query coverage ahead of repeated partial tokens. Trust/freshness only break close
@@ -66,6 +68,9 @@ Run one well-formed search first. Read the top candidates when `phrase: true` or
 coverage is partial, or matches are scattered across weak fields; use the user's alternative
 wording, a concise paraphrase, or the other language. Do not mechanically fan out several
 queries. Exact identifiers still belong to `grep --fixed`.
+
+JSON `search`/`grep`/`log` output includes the result rows plus `shown`, `total`, and
+`truncated`. Check those counts before treating bounded output as complete.
 
 ### 3. Trace relationships, then read the concept
 

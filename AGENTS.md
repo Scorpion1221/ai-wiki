@@ -44,11 +44,16 @@ ai-wiki grep "<pattern>" [--fixed]   # regex/literal; --limit 0 for all
 ai-wiki cat <dir>/<name>.md           # preview; --full only if truncated
 ai-wiki cat <dir>/<name>.md --json    # {path, content, metadata} for mechanical gates
 ai-wiki links <dir>/<name>.md         # outbound + inbound relationships
-ai-wiki log                           # change ledger
+ai-wiki log                           # newest change-ledger lines first
 ```
 
 Orient through `SCHEMA.md`/`purpose.md`, then drill or search. Follow one relationship hop
 when it can change the answer, especially experiment ↔ metric ↔ decision/risk.
+
+TOON `ls` output separates semantic `concepts` from structural `entries`, so directories and
+root documents do not pretend to have status/trust fields. `ls --json` remains the complete
+raw entry array. JSON `search`/`grep`/`log` output is an envelope containing the rows plus
+`shown`, `total`, and `truncated`; inspect those counts before treating a result as complete.
 
 Structured results expose `status`, derived `trust` and `freshness`, `generated_at`,
 `verified_at`, and `verification_current`. Trust follows OKF §5.3 across all verification

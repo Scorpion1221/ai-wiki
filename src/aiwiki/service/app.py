@@ -279,7 +279,8 @@ def links(path: str = Query(...), bundle: str | None = None,
 
 
 @app.get("/log")
-def log(tail: int = 30, bundle: str | None = None, authorization: str | None = Header(default=None)):
+def log(tail: int = Query(30, ge=0), bundle: str | None = None,
+        authorization: str | None = Header(default=None)):
     _auth(authorization)
     with _read_window():
         _name, BUNDLE = _resolve(bundle)
@@ -289,7 +290,8 @@ def log(tail: int = 30, bundle: str | None = None, authorization: str | None = H
             if f.is_file() and not B.has_symlink_component(BUNDLE, f)
             else []
         )
-        return {"lines": lines[-tail:]}
+        # append_log prepends new dated sections, so the start of the file is the newest.
+        return {"lines": lines[:tail] if tail else [], "total": len(lines)}
 
 
 class IngestBody(BaseModel):

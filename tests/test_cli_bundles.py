@@ -262,7 +262,8 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
 
     assert cli.main(["ls"]) == 0
     ls_out = capsys.readouterr().out
-    assert "verification_current,generated_at,verified_at,current_verified_at" in ls_out
+    assert "concepts[1]{path,status,trust,freshness,verification_current" in ls_out
+    assert "generated_at,verified_at,current_verified_at,summary" in ls_out
     assert '"machine-confirmed","fresh",true' in ls_out
 
     assert cli.main(["search", "x"]) == 0
@@ -271,6 +272,64 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
     assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_out
     assert "score,phrase,coverage,fields,terms,context" in search_out
     assert '8,true,1.0,"title|body","x"' in search_out
+
+
+def test_ls_separates_structural_entries_from_concepts_without_null_columns(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *args, **kwargs: {"items": [
+        {
+            "path": "features/x.md", "kind": "concept", "type": "Feature", "title": "X",
+            "status": "stable", "trust": "machine-confirmed", "freshness": "fresh",
+            "verification_current": True, "generated_at": "2026-09-01T00:00:00Z",
+            "verified_at": "2026-09-01T00:01:00Z", "current_verified_at": "2026-09-01T00:01:00Z",
+        },
+        {"path": "features/", "kind": "dir", "concepts": 1, "description": "Product features"},
+        {"path": "SCHEMA.md", "kind": "doc", "description": "read first"},
+    ]})
+
+    assert cli.main(["ls"]) == 0
+
+    out = capsys.readouterr().out
+    assert "concepts[1]{path,status,trust,freshness,verification_current" in out
+    assert "entries[2]{path,kind,summary}:" in out
+    assert '"features/","dir","1 concepts — Product features"' in out
+    assert '"SCHEMA.md","doc","document — read first"' in out
+    assert "null" not in out
+
+
+def test_json_search_and_grep_preserve_truncation_counts(monkeypatch, capsys) -> None:
+    def fake_api(route, **_kwargs):
+        if route == "/search":
+            return {"results": [{"path": "x.md"}], "total": 4}
+        if route == "/grep":
+            return {"hits": [{"path": "x.md", "line": i, "text": "hit"} for i in range(3)]}
+        raise AssertionError(route)
+
+    monkeypatch.setattr(cli, "_api", fake_api)
+    assert cli.main(["search", "x", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "results": [{"path": "x.md"}], "shown": 1, "total": 4, "truncated": True,
+    }
+
+    assert cli.main(["grep", "x", "--limit", "2", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["shown"] == 2 and result["total"] == 3 and result["truncated"] is True
+    assert len(result["hits"]) == 2
+
+
+def test_log_surfaces_server_total_and_full_escape_hatch(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *args, **kwargs: {
+        "lines": ["newest", "next"], "total": 7,
+    })
+
+    assert cli.main(["log", "--tail", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "shown: 2" in out and "total: 7" in out and "truncated: true" in out
+    assert '"ai-wiki log --tail 7","show all 7 lines"' in out
+
+    assert cli.main(["log", "--tail", "2", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "lines": ["newest", "next"], "shown": 2, "total": 7, "truncated": True,
+    }
 
 
 def test_grep_limit_reports_total_and_escape_hatch(monkeypatch, capsys) -> None:

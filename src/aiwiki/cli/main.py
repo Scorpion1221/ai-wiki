@@ -391,7 +391,7 @@ def main(argv=None) -> int:
     p_ls.add_argument("dir", nargs="?")
     p_ls.add_argument("-R", "--recursive", action="store_true", help="recurse, flat (like ls -R)")
     p_ls.add_argument("-a", "--all", action="store_true", help="include dotfiles (like ls -a)")
-    p_ls.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    p_ls.add_argument("--json", action="store_true", help="emit the complete entry array as JSON")
     p_cat = sub.add_parser(
         "cat", help="print a concept; large files are previewed by default", command_path="ai-wiki cat",
         epilog=_examples("ai-wiki cat metrics/subscription-rate.md", "ai-wiki cat SCHEMA.md --full"), **common,
@@ -413,7 +413,7 @@ def main(argv=None) -> int:
     p_grep.add_argument("--fixed", action="store_true", help="literal search (escape regex metacharacters)")
     p_grep.add_argument("--limit", type=_limit, default=_DEFAULT_GREP_LIMIT,
                         help=f"maximum hits to print; 0 means all (default: {_DEFAULT_GREP_LIMIT})")
-    p_grep.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    p_grep.add_argument("--json", action="store_true", help="emit hits and truncation counts as JSON")
     p_search = sub.add_parser(
         "search", help="ranked lexical search (CJK-aware)", command_path="ai-wiki search",
         epilog=_examples("ai-wiki search \"subscription rate\"", "ai-wiki search \"订阅率\" --top-k 20"),
@@ -421,7 +421,7 @@ def main(argv=None) -> int:
     )
     p_search.add_argument("query")
     p_search.add_argument("--top-k", type=_positive, default=10, help="maximum results (default: 10)")
-    p_search.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    p_search.add_argument("--json", action="store_true", help="emit results and truncation counts as JSON")
     p_links = sub.add_parser(
         "links", help="link graph of a concept: outbound + inbound (backlinks)", command_path="ai-wiki links",
         epilog=_examples("ai-wiki links metrics/subscription-rate.md"), **common,
@@ -433,7 +433,7 @@ def main(argv=None) -> int:
         epilog=_examples("ai-wiki log", "ai-wiki log --tail 100"), **common,
     )
     p_log.add_argument("--tail", type=_limit, default=30, help="number of lines; 0 returns none (default: 30)")
-    p_log.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    p_log.add_argument("--json", action="store_true", help="emit lines and truncation counts as JSON")
     p_ing = sub.add_parser(
         "ingest", help="submit source(s) for curation into the active bundle", command_path="ai-wiki ingest",
         epilog=_examples(
@@ -496,22 +496,37 @@ def main(argv=None) -> int:
         if a.json:
             print(json.dumps(items, ensure_ascii=False, indent=2))
         else:
-            rows = ({
-                "path": item.get("path"), "kind": item.get("kind"),
-                "status": item.get("status"), "trust": item.get("trust"),
-                "freshness": item.get("freshness"),
-                "verification_current": item.get("verification_current"),
-                "generated_at": item.get("generated_at"),
-                "verified_at": item.get("verified_at"),
-                "current_verified_at": item.get("current_verified_at"),
-                "summary": _ls_summary(item),
-            }
-                    for item in items)
-            emit(_count_lines(len(items), len(items)), table_lines(
-                "items", rows,
-                ("path", "kind", "status", "trust", "freshness", "verification_current",
-                 "generated_at", "verified_at", "current_verified_at", "summary"),
-            ))
+            concepts = [item for item in items if item.get("kind") == "concept"]
+            entries = [item for item in items if item.get("kind") != "concept"]
+            groups = [_count_lines(len(items), len(items))]
+            if concepts:
+                groups.append(table_lines(
+                    "concepts",
+                    ({
+                        "path": item.get("path"),
+                        "status": item.get("status"),
+                        "trust": item.get("trust"),
+                        "freshness": item.get("freshness"),
+                        "verification_current": item.get("verification_current"),
+                        "generated_at": item.get("generated_at"),
+                        "verified_at": item.get("verified_at"),
+                        "current_verified_at": item.get("current_verified_at"),
+                        "summary": _ls_summary(item),
+                    } for item in concepts),
+                    ("path", "status", "trust", "freshness", "verification_current",
+                     "generated_at", "verified_at", "current_verified_at", "summary"),
+                ))
+            if entries:
+                groups.append(table_lines(
+                    "entries",
+                    ({
+                        "path": item.get("path"),
+                        "kind": item.get("kind"),
+                        "summary": _ls_summary(item),
+                    } for item in entries),
+                    ("path", "kind", "summary"),
+                ))
+            emit(*groups)
     elif a.cmd == "cat":
         document = _api("/cat", bundle=bsel, path=a.path)
         content = document["content"]
@@ -530,7 +545,12 @@ def main(argv=None) -> int:
                     fixed=("true" if a.fixed else None)).get("hits") or []
         shown = hits if a.limit == 0 else hits[:a.limit]
         if a.json:
-            print(json.dumps(shown, ensure_ascii=False, indent=2))
+            print(json.dumps({
+                "hits": shown,
+                "shown": len(shown),
+                "total": len(hits),
+                "truncated": len(shown) < len(hits),
+            }, ensure_ascii=False, indent=2))
         else:
             groups = [_count_lines(len(shown), len(hits)), table_lines("hits", shown, ("path", "line", "text"))]
             if len(shown) < len(hits):
@@ -542,11 +562,16 @@ def main(argv=None) -> int:
     elif a.cmd == "search":
         d = _api("/search", bundle=bsel, q=a.query, top_k=a.top_k)
         results = d.get("results") or []
+        total = d.get("total") if isinstance(d.get("total"), int) else len(results)
         if a.json:
-            print(json.dumps(results, ensure_ascii=False, indent=2))
+            print(json.dumps({
+                "results": results,
+                "shown": len(results),
+                "total": total,
+                "truncated": len(results) < total,
+            }, ensure_ascii=False, indent=2))
         else:
             rows = (_search_row(result) for result in results)
-            total = d.get("total")
             groups = [_count_lines(len(results), total),
                       table_lines(
                           "results", rows,
@@ -571,12 +596,27 @@ def main(argv=None) -> int:
                 table_lines("inbound", d.get("inbound") or [], ("path", "title", "type")),
             )
     elif a.cmd == "log":
-        lines = _api("/log", bundle=bsel, tail=a.tail).get("lines") or []
+        d = _api("/log", bundle=bsel, tail=a.tail)
+        lines = d.get("lines") or []
+        total = d.get("total") if isinstance(d.get("total"), int) else len(lines)
         if a.json:
-            print(json.dumps(lines, ensure_ascii=False, indent=2))
+            print(json.dumps({
+                "lines": lines,
+                "shown": len(lines),
+                "total": total,
+                "truncated": len(lines) < total,
+            }, ensure_ascii=False, indent=2))
         else:
-            emit(_count_lines(len(lines), len(lines)),
-                 table_lines("lines", ({"text": line} for line in lines), ("text",)))
+            groups = [
+                _count_lines(len(lines), total),
+                table_lines("lines", ({"text": line} for line in lines), ("text",)),
+            ]
+            if len(lines) < total:
+                groups.append(table_lines("help", ({
+                    "command": f"ai-wiki log --tail {total}",
+                    "purpose": f"show all {total} lines",
+                },), ("command", "purpose")))
+            emit(*groups)
     elif a.cmd == "ingest":
         if not a.files and sys.stdin.isatty():
             _fail("no input provided: pass a file or pipe text on stdin",
