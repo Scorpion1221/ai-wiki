@@ -38,7 +38,8 @@ python3 "$SKILL_DIR/scripts/scan_reference_repos.py" \
   --registered-json "$run_dir/registered-repos.json" \
   --checkpoint-json "$run_dir/checkpoint.json" \
   --cache-dir "$run_dir/repo-cache" \
-  --output "$run_dir/repo-scan.json"
+  --output "$run_dir/repo-scan.json" \
+  --quiet
 ```
 
 The caller may repeat `--required-remote <url>` for a control/context repository that must

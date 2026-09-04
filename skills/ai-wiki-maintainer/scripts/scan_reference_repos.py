@@ -299,10 +299,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--priority-prefix", action="append", default=[], help="path prefix highlighted in output")
     parser.add_argument("--cache-dir", type=Path, required=True, help="bare object cache outside reference root")
     parser.add_argument("--output", type=Path, help="write the JSON report here as well as stdout")
+    parser.add_argument("--quiet", action="store_true", help="write only --output; suppress JSON on stdout")
     parser.add_argument("--offline", action="store_true", help="use local refs; registered-only repos will fail")
     parser.add_argument("--max-paths", type=int, default=DEFAULT_MAX_PATHS)
     parser.add_argument("--max-commits", type=int, default=DEFAULT_MAX_COMMITS)
     args = parser.parse_args(argv)
+    if args.quiet and not args.output:
+        parser.error("--quiet requires --output")
 
     root = args.root.resolve()
     cache_root = args.cache_dir.resolve()
@@ -462,7 +465,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
-    sys.stdout.write(rendered)
+    if not args.quiet:
+        sys.stdout.write(rendered)
     incomplete = counts["failed"] or report["counts"]["registered_missing"] or report["counts"]["required_missing"]
     return 2 if incomplete else 0
 

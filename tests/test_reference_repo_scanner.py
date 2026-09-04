@@ -176,3 +176,27 @@ def test_scanner_deduplicates_ssh_and_https_remote_forms(tmp_path: Path) -> None
     report = json.loads(result.stdout)
     assert report["counts"]["registered"] == 1
     assert report["counts"]["unique"] == 1
+
+
+def test_scanner_quiet_writes_report_without_stdout(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, _, _ = make_remote(tmp_path, "quiet", {"README.md": "one\n"})
+    (root / "quiet").symlink_to(work, target_is_directory=True)
+    output = tmp_path / "report.json"
+
+    result = scan(
+        tmp_path,
+        "--root",
+        str(root),
+        "--cache-dir",
+        str(tmp_path / "cache"),
+        "--offline",
+        "--output",
+        str(output),
+        "--quiet",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert json.loads(output.read_text(encoding="utf-8"))["counts"]["scanned"] == 1
