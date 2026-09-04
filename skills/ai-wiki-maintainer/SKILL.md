@@ -20,6 +20,51 @@ The Maintainer owns orchestration only: it collects source changes, drives jobs 
 structured states, enforces the gates below, advances checkpoints, and reports evidence. It
 does not perform a second free-form content judgment after the independent audit.
 
+## Reference repository coverage
+
+Do not improvise repository discovery with `find ... -name .git`: it misses symlinked
+directories and does not prove that every registered repository was scanned. Cache the
+workspace repository registry once, then use the bundled deterministic scanner:
+
+```sh
+multica repo list --output json > "$run_dir/registered-repos.json"
+SKILL_DIR="${AI_WIKI_MAINTAINER_SKILL_DIR:-$HOME/.agents/skills/ai-wiki-maintainer}"
+python3 "$SKILL_DIR/scripts/scan_reference_repos.py" \
+  --root "$reference_root" \
+  --registered-json "$run_dir/registered-repos.json" \
+  --checkpoint-json "$run_dir/checkpoint.json" \
+  --cache-dir "$run_dir/repo-cache" \
+  --output "$run_dir/repo-scan.json"
+```
+
+The caller may repeat `--required-remote <url>` for a control/context repository that must
+be scanned even when it is absent from the registry and reference root. It may repeat
+`--priority-prefix <path>` to highlight durable paths such as task records, memory, or
+solution documents. Use `--branch-override <url>=<branch>` when such a repository's durable
+branch is not the default `main`-then-`master` selection. Keep those workspace-specific URLs,
+branches, and prefixes in the automation, not in this generic Skill.
+
+The scanner unions physical repositories, explicit symlink targets, registered repositories,
+and required remotes; deduplicates HTTPS/SSH forms by normalized remote identity; compares a
+v3 or v4 checkpoint; and fetches missing objects only into `--cache-dir`. It never writes to
+the reference root. A nonzero exit, `failed > 0`, `registered_missing > 0`, or
+`required_missing > 0` is a coverage failure: do not advance the repository checkpoint.
+Report all five counts: registered, discovered, unique, scanned, and missing/failed.
+
+Use the emitted v4 `checkpoint_candidate` only after every durable source selected from the
+delta has completed ingest and audit. v4 keys repositories by remote identity rather than
+basename, avoiding collisions. A v3 checkpoint is migrated by matching normalized remote
+URLs. Never mark a newly discovered required repository as covered merely by recording its
+current SHA: `baseline_required: true` means inspect and either ingest its durable current
+context or explicitly record why it contains no Wiki-worthy knowledge before checkpointing.
+
+For context/control repositories, changed task logs are discovery signals, not pages to
+mirror. Shortlist changed task roots, then prefer their current summary/status/PRD, durable
+task documents, shared memory, and reusable solution documents. Read low-level progress,
+review, test, or run artifacts only when needed as evidence for a shortlisted fact. Preserve
+the evidence boundary: a completed or archived task can prove recorded work or a merge, but
+not production release, successful experiment, or business impact without matching evidence.
+
 ## Runtime preflight
 
 Before scanning or ingesting, run `ai-wiki --version`, `ai-wiki health --json`, and
