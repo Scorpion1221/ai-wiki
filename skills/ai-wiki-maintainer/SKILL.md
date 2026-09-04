@@ -28,7 +28,11 @@ workspace repository registry once, then use the bundled deterministic scanner:
 
 ```sh
 multica repo list --output json > "$run_dir/registered-repos.json"
-SKILL_DIR="${AI_WIKI_MAINTAINER_SKILL_DIR:-$HOME/.agents/skills/ai-wiki-maintainer}"
+SKILL_DIR="${AI_WIKI_MAINTAINER_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/ai-wiki-maintainer}"
+if [ ! -f "$SKILL_DIR/scripts/scan_reference_repos.py" ]; then
+  SKILL_DIR="$HOME/.agents/skills/ai-wiki-maintainer"
+fi
+test -f "$SKILL_DIR/scripts/scan_reference_repos.py"
 python3 "$SKILL_DIR/scripts/scan_reference_repos.py" \
   --root "$reference_root" \
   --registered-json "$run_dir/registered-repos.json" \
