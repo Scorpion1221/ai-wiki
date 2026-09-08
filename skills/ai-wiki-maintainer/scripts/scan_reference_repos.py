@@ -311,8 +311,15 @@ def main(argv: list[str] | None = None) -> int:
     cache_root = args.cache_dir.resolve()
     if cache_root == root or root in cache_root.parents:
         parser.error("--cache-dir must be outside --root")
+    if args.output:
+        output = args.output.resolve()
+        if output == root or root in output.parents:
+            parser.error("--output must be outside --root")
 
     local_paths, symlinks = discover_repositories(root)
+    for option, path in (("--cache-dir", cache_root), ("--output", output if args.output else None)):
+        if path is not None and any(path == repo or repo in path.parents for repo in local_paths):
+            parser.error(f"{option} must be outside discovered reference repositories")
     checkpoint_by_remote, old_checkpoint = checkpoint_repositories(load_json(args.checkpoint_json))
     registry = registry_urls(load_json(args.registered_json))
 
