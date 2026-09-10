@@ -205,6 +205,43 @@ def read_job(bundle: Path, job_id: str) -> dict | None:
     return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
 
 
+def pending_audits(bundle: Path, *, older_than_hours: float = 24, limit: int = 20) -> dict:
+    """Discover orphaned successful ingests, excluding active or completed audits."""
+    jobs = []
+    for path in (bundle / ".okf" / "jobs").glob("*.json"):
+        try:
+            jobs.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    reviewed = {
+        j.get("parent_job") for j in jobs
+        if j.get("kind") == "audit" and j.get("status") in _REUSABLE_AUDIT_STATUSES
+    }
+    failed_audits = {}
+    for job in sorted(jobs, key=lambda j: (j.get("created", ""), j.get("id", ""))):
+        if job.get("kind") == "audit" and job.get("status") == "failed":
+            failed_audits.setdefault(job.get("parent_job"), []).append(job)
+    cutoff = datetime.now(UTC).timestamp() - older_than_hours * 3600
+    pending = []
+    unscoped = 0
+    for job in jobs:
+        if (job.get("kind", "ingest") != "ingest" or job.get("status") != "done"
+                or job.get("validation", {}).get("status") != "passed" or job.get("id") in reviewed):
+            continue
+        try:
+            finished = datetime.fromisoformat(job.get("finished", job.get("created", "")).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if finished.tzinfo is not None and finished.timestamp() <= cutoff:
+            if not isinstance(job.get("concept_files"), list):
+                unscoped += 1  # legacy receipt: do not falsely declare a no-concept audit
+                continue
+            pending.append({**job, "failed_audit_attempts": failed_audits.get(job["id"], [])})
+    pending.sort(key=lambda j: (j.get("finished", j.get("created", "")), j["id"]))
+    return {"jobs": pending[:limit], "shown": min(limit, len(pending)),
+            "total": len(pending), "truncated": len(pending) > limit, "unscoped": unscoped}
+
+
 def active_jobs(bundle: Path) -> list[str]:
     """IDs of queued/running jobs that make bundle deletion unsafe."""
     jobs = bundle / ".okf" / "jobs"

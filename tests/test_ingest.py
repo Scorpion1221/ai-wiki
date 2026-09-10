@@ -232,3 +232,29 @@ def test_sweep_and_delete_share_lifecycle_lock(bundle: Path, monkeypatch) -> Non
     assert not bundle.exists() and submitted == []
     assert worker.sweep_once([bundle]) == 0
     assert not bundle.exists()
+
+
+def test_pending_audits_excludes_active_and_completed_reviews(bundle, monkeypatch):
+    import json
+    jobs = bundle / ".okf/jobs"
+    jobs.mkdir(parents=True)
+    for name in ("orphan", "running", "passed", "attention", "failed", "fresh"):
+        I.save_job(bundle, {"id": name, "kind": "ingest", "status": "done", "created": "2020-01-01T00:00:00Z",
+                            "finished": I._now() if name == "fresh" else "2020-01-01T00:00:00Z",
+                            "validation": {"status": "passed"}, "concept_files": []})
+    I.save_job(bundle, {"id": "legacy", "status": "done", "created": "2020-01-01T00:00:00Z",
+                        "validation": {"status": "passed"}})
+    assert I.pending_audits(bundle)["unscoped"] == 1
+    for name, status in (("running", "running"), ("passed", "done"), ("attention", "done"), ("failed", "failed")):
+        I.save_job(bundle, {"id": "audit-" + name, "kind": "audit", "parent_job": name, "status": status})
+    (jobs / "broken.json").write_text("{")
+    expected = {"orphan", "failed"}
+    assert {j["id"] for j in I.pending_audits(bundle)["jobs"]} == expected
+    assert I.pending_audits(bundle, limit=1)["truncated"] is True
+    appmod, client = _client(bundle, monkeypatch)
+    response = client.get("/jobs/pending-audit", headers=AUTH)
+    assert response.status_code == 200
+    assert {j["id"] for j in response.json()["jobs"]} == expected
+    assert client.get("/jobs/pending-audit").status_code == 401
+    assert client.get("/jobs/pending-audit?older_than_hours=-1", headers=AUTH).status_code == 422
+    assert json.loads(client.get("/jobs/orphan", headers=AUTH).content)["id"] == "orphan"

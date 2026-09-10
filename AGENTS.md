@@ -95,6 +95,7 @@ ai-wiki ingest notes.md
 ai-wiki ingest a.md config.json chart.png
 cat notes.md | ai-wiki ingest - --title "<stable source identity>"
 ai-wiki jobs <ingest-job-id>
+ai-wiki jobs --pending-audit --json  # ingests older than 24h missing an audit
 ai-wiki audit <ingest-job-id>            # only after ingest status is done
 ai-wiki jobs <audit-job-id>
 ```
@@ -117,6 +118,8 @@ Advance an automation checkpoint only after audit job `done` (`passed` or
 commit and push. A real Git conflict aborts and retries from fresh remote state rather
 than running an LLM conflict resolver. A public read-only mirror may lag the writer, so
 record mirror visibility separately rather than assuming a push is already visible.
+Curator verification-history edits are deterministically discarded/restored by the worker; only
+an audit can confirm a new generation. Repairs are recorded in the Job receipt.
 The durable audit Job (done + passed validation + passed/needs_attention + successful Git
 result when applicable) is the maintenance checkpoint receipt. Do not re-check that receipt
 against live `cat` results: mirror lag, a missing new page, or a subsequent ingest must not

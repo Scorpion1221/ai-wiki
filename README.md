@@ -171,3 +171,15 @@ The CLI is non-interactive: usage/API failures are structured on stdout with exi
 | `AIWIKI_AGENT_REASONING_EFFORT` | explicit reasoning effort (default `high`) |
 
 Requires Python ≥ 3.11. Licensed under Apache-2.0 (see LICENSE / NOTICE).
+
+## Maintenance recovery
+
+`ai-wiki ingest --json` returns machine-readable submission IDs. `ai-wiki jobs
+--pending-audit --json` discovers successful ingests older than 24 hours without an active
+or completed audit. Use the Maintainer Skill's `scripts/run_sources.py` with a persistent
+state directory to resume source manifests, preserve independent progress, and close audit
+gaps. No OKF schema change or platform-specific orchestration service is required.
+
+Verification history is worker-owned: curator edits to `verified` are discarded/restored
+before validation and recorded as `deterministic_repairs`. Generation/source/scope checks
+still run; restoring historical verification never verifies changed knowledge.

@@ -347,6 +347,19 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
     return {**job, "deduplicated": False}
 
 
+@app.get("/jobs/pending-audit")
+def list_pending_audits(
+    bundle: str | None = None,
+    older_than_hours: float = Query(default=24, ge=0, le=87600),
+    limit: int = Query(default=20, ge=1, le=100),
+    authorization: str | None = Header(default=None),
+):
+    """Read-only discovery of completed ingests still missing a terminal audit."""
+    _auth(authorization)
+    _name, BUNDLE = _resolve(bundle)
+    return I.pending_audits(BUNDLE, older_than_hours=older_than_hours, limit=limit)
+
+
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str, bundle: str | None = None, authorization: str | None = Header(default=None)):
     _auth(authorization)

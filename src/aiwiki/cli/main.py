@@ -444,6 +444,7 @@ def main(argv=None) -> int:
     )
     p_ing.add_argument("files", nargs="*", help="markdown file(s); omit or '-' to read stdin")
     p_ing.add_argument("--title", help="title for the source (requires exactly one input)")
+    p_ing.add_argument("--json", action="store_true", help="emit submission receipts as JSON")
     p_audit = sub.add_parser(
         "audit", help="adversarially review a completed ingest job", command_path="ai-wiki audit",
         epilog=_examples("ai-wiki audit <ingest-job-id>"), **common,
@@ -454,7 +455,9 @@ def main(argv=None) -> int:
         "jobs", help="check an ingest or audit job by id", command_path="ai-wiki jobs",
         epilog=_examples("ai-wiki jobs <job-id>"), **common,
     )
-    p_jobs.add_argument("job_id")
+    p_jobs.add_argument("job_id", nargs="?")
+    p_jobs.add_argument("--pending-audit", action="store_true", help="list successful ingests missing an audit")
+    p_jobs.add_argument("--older-than-hours", type=_limit, default=24, help="minimum pending age (default: 24)")
     p_jobs.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
 
     ap.command_path = _command_path(args)
@@ -645,6 +648,9 @@ def main(argv=None) -> int:
                 job.get("curation") or job.get("status")
             )
             submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state})
+        if a.json:
+            print(json.dumps({"submissions": submitted}, ensure_ascii=False, indent=2))
+            return 0
         emit(
             _count_lines(len(submitted), len(submitted)),
             table_lines("submissions", submitted, ("input", "source", "job", "state")),
@@ -664,7 +670,10 @@ def main(argv=None) -> int:
                 },), ("command", "purpose")),
             )
     elif a.cmd == "jobs":
-        job = _api(f"/jobs/{a.job_id}", bundle=bsel)
+        if bool(a.job_id) == a.pending_audit:
+            _fail("provide a job ID or --pending-audit, not both", help_command="ai-wiki jobs --help", code=2)
+        job = (_api("/jobs/pending-audit", bundle=bsel, older_than_hours=a.older_than_hours) if a.pending_audit
+               else _api(f"/jobs/{a.job_id}", bundle=bsel))
         if a.json:
             print(json.dumps(job, ensure_ascii=False, indent=2))
         else:

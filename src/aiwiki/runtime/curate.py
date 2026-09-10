@@ -32,7 +32,7 @@ from pathlib import Path
 import yaml
 
 from ..engine import append_log, scan_sources
-from ..engine.document import current_verified, normalize_verified
+from ..engine.document import current_verified, normalize_verified, parse_document
 from ..engine.gen_indexes import generate_indexes
 from ..engine.render_viz import generate_visualization
 from ..engine.scan_sources import _source_resource_rel
@@ -925,6 +925,39 @@ def _concept_snapshot(bundle: Path) -> dict[str, _ConceptState]:
     return snapshot
 
 
+def _restore_curation_verification(bundle: Path, before: dict[str, bytes]) -> dict[str, list[str]]:
+    """Keep verification service-owned; never grant the curator a verification event.
+
+    Call only after the isolated workspace passes its scope gate. Malformed documents
+    are left to validation, and generation/source/content rules remain unchanged.
+    """
+    repairs = {}
+    for path in sorted(bundle.rglob("*.md")):
+        if not should_check(path, bundle):
+            continue
+        rel = path.relative_to(bundle).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8")
+            prior = parse_document(before[rel].decode("utf-8")).frontmatter if rel in before else {}
+            current = parse_document(text).frontmatter
+        except (OSError, ValueError):
+            continue
+        if ("verified" in current) == ("verified" in prior) and current.get("verified") == prior.get("verified"):
+            continue
+        if "verified" in prior:
+            current["verified"] = prior["verified"]
+        else:
+            current.pop("verified", None)
+        # Retain the original body bytes, including its whitespace. Only serialize
+        # frontmatter when a protected-field repair is actually needed.
+        lines = text.splitlines(keepends=True)
+        end = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
+        frontmatter = yaml.safe_dump(current, sort_keys=False, allow_unicode=True, width=4096)
+        path.write_text("---\n" + frontmatter + "---\n" + "".join(lines[end + 1:]), encoding="utf-8")
+        repairs[rel] = ["restored service-owned verification history without adding verification"]
+    return repairs
+
+
 def _curation_policy_errors(
     bundle: Path,
     before: dict[str, _ConceptState],
@@ -1431,6 +1464,10 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
                             source_snapshot,
                             None,
                         )
+                        if not (metadata_errors or host_errors or scope_errors) and proc.returncode == 0:
+                            repairs = _restore_curation_verification(agent_bundle, workspace_tree_before)
+                            if repairs:
+                                job["deterministic_repairs"] = repairs
                         workspace_errors = (
                             _source_policy_errors(agent_bundle, sources_before, expected_sha)
                             + _curation_policy_errors(

@@ -950,8 +950,13 @@ def test_agent_cannot_copy_current_source_without_citing_it(
     assert not (bundle / "sources" / "new.md.source").exists()
 
 
-def test_agent_cannot_delete_existing_verification_history(
-    tmp_path: Path, monkeypatch,
+@pytest.mark.parametrize("replacement", [
+    None,
+    {"by": "human:impostor", "at": "2026-08-13T00:00:30Z"},
+    {"by": "human:owner", "at": "2026-08-13T00:02:00Z"},
+])
+def test_service_restores_existing_verification_history(
+    tmp_path: Path, monkeypatch, replacement,
 ) -> None:
     bundle = tmp_path / "bundle"
     inbox = bundle / "sources" / "inbox" / "new.md.source"
@@ -977,6 +982,7 @@ def test_agent_cannot_delete_existing_verification_history(
             _policy_concept(
                 generated_at="2026-08-13T00:01:00Z",
                 body="updated",
+                verified=replacement,
             ).replace("/sources/s.md.source", "/sources/new.md.source"),
             encoding="utf-8",
         )
@@ -986,12 +992,15 @@ def test_agent_cannot_delete_existing_verification_history(
     curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
 
     job = json.loads(job_path.read_text(encoding="utf-8"))
-    assert job["status"] == "failed"
-    assert "features/x.md: curation must preserve verification history unchanged" in (
-        job["validation"]["errors"]
-    )
-    assert concept.read_text(encoding="utf-8") == original
-    assert inbox.read_bytes() == b"current evidence"
+    assert job["status"] == "done"
+    assert job["deterministic_repairs"] == {
+        "features/x.md": ["restored service-owned verification history without adding verification"],
+    }
+    frontmatter, body = curate.parse_doc(concept)
+    assert frontmatter["verified"] == verification
+    assert "updated" in body
+    assert current_verified(frontmatter) == []
+    assert not inbox.exists()
 
 
 def test_git_metadata_snapshot_restores_worktree_git_file(tmp_path: Path) -> None:
@@ -1531,3 +1540,29 @@ def test_exclude_inbox_handles_bundle_at_repository_root(tmp_path: Path) -> None
     assert "/sources/inbox/" in exclude.read_text(encoding="utf-8").splitlines()
     assert "/.okf/" in exclude.read_text(encoding="utf-8").splitlines()
     assert "/./sources/inbox/" not in exclude.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_curation_repair_removes_forged_verification_without_changing_body(tmp_path, existing):
+    concept = tmp_path / "features" / "x.md"
+    concept.parent.mkdir()
+    original = _policy_concept()
+    before = {"features/x.md": original.encode()} if existing else {}
+    changed = _policy_concept(verified={"by": "human:fake", "at": "2026-08-13T00:01:00Z"})
+    changed += "\n  whitespace stays  \n\n"
+    concept.write_text(changed)
+    assert curate._restore_curation_verification(tmp_path, before)
+    assert "verified" not in curate.parse_doc(concept)[0]
+    assert concept.read_text().split("---\n", 2)[2] == changed.split("---\n", 2)[2]
+    assert curate._restore_curation_verification(tmp_path, before) == {}
+
+
+def test_curation_repair_does_not_make_old_verification_current(tmp_path):
+    concept = tmp_path / "features" / "x.md"
+    concept.parent.mkdir()
+    original = _policy_concept(verified={"by": "human:owner", "at": "2026-08-13T00:02:00Z"})
+    concept.write_text(original)
+    before = curate._concept_snapshot(tmp_path)
+    concept.write_text(_policy_concept(body="new content", generated_at="2026-08-13T00:01:00Z"))
+    curate._restore_curation_verification(tmp_path, {"features/x.md": original.encode()})
+    assert any("retained verification current" in e for e in curate._curation_policy_errors(tmp_path, before))

@@ -70,11 +70,61 @@ review, test, or run artifacts only when needed as evidence for a shortlisted fa
 the evidence boundary: a completed or archived task can prove recorded work or a merge, but
 not production release, successful experiment, or business impact without matching evidence.
 
+## Bounded collection and durable execution
+
+When the caller enables subagents, delegate independent repository/topic reading in small
+parallel batches (at most three). Subagents are read-only: return candidate knowledge,
+original evidence locations and immutable revisions, and unresolved boundaries. The parent
+waits for results, deduplicates, and alone drives writes/checkpoints. Keep model names and
+platform-specific dispatch in the caller's prompt; unsupported runtimes fall back to serial.
+
+Use `scripts/run_sources.py` rather than improvising per-job polling/retry loops. After the
+preflight below, freeze one manifest (paths absolute; same source identity keeps its version
+order):
+
+```json
+{"sources":[{"identity":"<remote/topic or stable external source>","path":"/absolute/evidence.md"}]}
+```
+
+```sh
+python3 "$SKILL_DIR/scripts/run_sources.py" \
+  --manifest "$run_dir/sources.json" --bundle "$bundle" \
+  --state-dir "$durable_state_dir" --audit-pending
+```
+
+`durable_state_dir` is a persistent directory outside the bundle and Reference Repo, reused
+across daily issues on the same endpoint/bundle. Do not put it in `/tmp` or recreate it per
+run. The helper freezes source bytes, records every job receipt atomically, and uses an OS
+lock to reject overlapping runners. Archive `state.json` with each run report so recovery on
+a different host can explicitly migrate the state and its frozen `sources/` together.
+
+- A failed source stays pending; independent sources continue. A newer version of the same
+  source waits. Completed sources never re-ingest/re-audit or depend on mirror visibility.
+- Transient terminal failures can retry once, only after confirmed rollback. Validation,
+  permission/auth, and disk failures require repair; attempt counts survive later runs.
+- An uncertain POST is recorded before submission; do not repeat it blindly. Reconcile the
+  existing job and import its ID. Manifest entries may include `ingest_job` and `audit_job`
+  to reuse known work or explicitly resume after a verified repair. The helper verifies the
+  source hash and parent. Preserve old attempts; do not clear state to reset retry limits.
+- Exit 1 means pending work, not loss of completed work. Read per-source state and keep the
+  shared cursor at its last safe boundary. Next run resumes these entries before new work.
+- `--audit-pending` also discovers up to 20 successful ingests older than 24 hours without
+  an active/completed audit. It closes orphan drafts through the existing audit path, never
+  by changing status from the orchestrator. Report discovery truncation/backlog and `unscoped` legacy receipts separately; never mark an
+  unknown legacy scope as a successful no-concept audit.
+- Only notify for new failures, exhausted retries, overdue backlog, or recovery. Repeated
+  unchanged failure signatures remain in the report, not fresh daily alerts.
+
+Check dynamic facts with elapsed `stale_after` during collection, prioritizing prices,
+release claims and experiment results. Obtain new evidence before extending freshness;
+never bulk-renew dates or aim for 100% verified/fresh. Historical decisions and durable
+methods do not need daily renewal. Historical backfill is separate from the daily cursor.
+
 ## Runtime preflight
 
 Before scanning or ingesting, run `ai-wiki --version`, `ai-wiki health --json`, and
 `ai-wiki audit --help`. Require the local CLI version to equal the writer's reported
-`service_version`, require `okf_version: "0.2"`, and require the `audit` command. Do not
+`service_version`, require `okf_version: "0.2"`, and require the `audit` command and `ai-wiki ingest --help` to expose `--json`. Do not
 hard-code a release number in an agent or automation prompt; the reachable writer is the
 compatibility source of truth.
 
@@ -85,7 +135,7 @@ uv tool install --force git+https://github.com/Scorpion1221/ai-wiki
 hash -r
 ```
 
-Then repeat all three checks. If installation or verification still fails, fail closed:
+Then repeat all checks. If installation or verification still fails, fail closed:
 do not scan, ingest, audit, or advance a checkpoint.
 
 ## One-source workflow
@@ -192,7 +242,7 @@ Capture `parent_job`, `validation`, `commit`, `changed_files`, and:
 - `audit.unverified_concepts`
 - `audit.corrected_concepts`
 - `agent.runtime`, `agent.model`, `agent.reasoning_effort`, and the final heartbeat
-- `deterministic_repairs` when present (restored provenance/generation or transient draft promotion)
+- `deterministic_repairs` on both ingest and audit (protected verification history, provenance/generation, or draft promotion)
 
 Do not translate `needs_attention` into “audit failed,” and do not translate `passed` into a
 claim that every fact in the whole bundle was reviewed—the scope is the parent ingest job.

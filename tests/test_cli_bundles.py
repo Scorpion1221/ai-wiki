@@ -361,3 +361,27 @@ def test_audit_posts_under_jobs_and_reuses_jobs_polling(monkeypatch, capsys) -> 
     assert calls == [("/jobs/ingest1/audit", {}, {"bundle": "kb"})]
     out = capsys.readouterr().out
     assert "audit1" in out and "ai-wiki jobs audit1" in out
+
+
+def test_ingest_json_submission_receipt(monkeypatch, tmp_path, capsys):
+    source = tmp_path / "evidence.md"
+    source.write_text("source")
+    monkeypatch.setattr(cli, "_active", lambda *_: "kb")
+    monkeypatch.setattr(cli, "_post", lambda *args, **kwargs: {
+        "id": "existing", "source": "sources/evidence.md.source", "status": "done", "deduplicated": True,
+    })
+    assert cli.main(["ingest", str(source), "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["submissions"] == [{
+        "input": str(source), "job": "existing", "source": "sources/evidence.md.source", "state": "no-op:done",
+    }]
+
+
+def test_jobs_pending_audit_discovery(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(cli, "_active", lambda *_: "kb")
+    monkeypatch.setattr(cli, "_api", lambda route, **kw: calls.append((route, kw)) or
+                        {"jobs": [], "shown": 0, "total": 0, "truncated": False})
+    assert cli.main(["jobs", "--pending-audit", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["total"] == 0
+    assert calls == [("/jobs/pending-audit", {"bundle": "kb", "older_than_hours": 24})]
