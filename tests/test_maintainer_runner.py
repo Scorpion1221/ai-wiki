@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.util
 import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "skills/ai-wiki-maintainer/scripts/run_sources.py"
-spec = importlib.util.spec_from_file_location("maintainer_runner", SCRIPT)
-runner = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(runner)
+from aiwiki.cli import main as cli_main
+from aiwiki.cli import maintain as runner
 
 
 def done(job_id, parent=None, sha=None, result="passed"):
@@ -125,14 +122,26 @@ def test_same_source_versions_stay_ordered_and_old_pending_survives_manifest(set
     assert "earlier version" in state["sources"][1]["error"]
 
 
-def test_transient_failure_gets_one_retry_across_restarts(setup):
+def test_transient_failure_retries_after_cooldown_across_restarts(setup, monkeypatch):
     service, state, path, add = setup
+    now = [10000]
+    monkeypatch.setattr(runner.time, "time", lambda: now[0])
     add("repo", b"source")
     service.fail[b"source"] = "curation timed out after 900s"
     runner.run_sources(state, path, "kb", poll=0)
-    assert len(service.submitted) == 2
+    assert len(service.submitted) == 1
+    runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0)
+    assert len(service.submitted) == 1
+    now[0] += 300
     runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0)
     assert len(service.submitted) == 2
+    # A later recovery is not permanently blocked by two historical attempts.
+    now[0] += 300
+    service.fail.clear()
+    restored = json.loads(path.read_text())
+    assert runner.run_sources(restored, path, "kb", poll=0)["done"] == 1
+    assert len(restored["sources"][0]["ingest"]) == 3
+    assert service.submitted == [b"source"] * 3 and len(service.audited) == 1
 
 
 @pytest.mark.parametrize("error", ["login required", "disk full", "permission denied", "validation failed"])
@@ -254,10 +263,10 @@ def test_pending_audit_sweep_closes_missing_audit_without_reingesting(tmp_path, 
     manifest = tmp_path / "manifest.json"
     manifest.write_text('{"sources": []}')
     state_dir = tmp_path / "state"
-    args = ["--manifest", str(manifest), "--state-dir", str(state_dir), "--bundle", "kb", "--audit-pending"]
-    assert runner.main(args) == 0
+    args = ["-b", "kb", "maintain", "--manifest", str(manifest), "--state-dir", str(state_dir), "--audit-pending"]
+    assert cli_main.main(args) == 0
     assert service.submitted == [] and service.audited == ["orphan"]
-    assert runner.main(args) == 0
+    assert cli_main.main(args) == 0
     assert service.audited == ["orphan"]
     state = json.loads((state_dir / "state.json").read_text())
     assert state["pending_audit_discovery"]["unscoped"] == 7
@@ -272,7 +281,7 @@ def test_state_rejects_changed_server_before_submission(tmp_path, monkeypatch):
     manifest = tmp_path / "manifest.json"
     manifest.write_text('{"sources": []}')
     with pytest.raises(ValueError, match="different endpoint"):
-        runner.main(["--manifest", str(manifest), "--state-dir", str(state_dir), "--bundle", "kb"])
+        runner.run(manifest=manifest, state_dir=state_dir, bundle="kb")
 
 
 def test_known_rejected_submission_does_not_leave_unknown_intent(setup, monkeypatch):
@@ -282,3 +291,162 @@ def test_known_rejected_submission_does_not_leave_unknown_intent(setup, monkeypa
         runner.Pending("server rejected the request (status 409)", rejected=True)))
     runner.run_sources(state, path, "kb", poll=0)
     assert "submitting" not in state["sources"][0]
+
+
+def test_capacity_stops_batch_preserves_sources_and_recovers_without_replay(setup, monkeypatch):
+    service, state, path, add = setup
+    now = [10000]
+    monkeypatch.setattr(runner.time, "time", lambda: now[0])
+    add("already-done", b"done")
+    runner.run_sources(state, path, "kb", poll=0)
+    for i in range(3):
+        add(f"repo-{i}", str(i).encode())
+    service.fail[b"0"] = "You've hit your usage limit. Try again at Sep 16th, 2026 7:31 PM."
+    result = runner.run_sources(state, path, "kb", poll=0)
+    assert (result["done"], result["pending"]) == (1, 3)
+    assert result["writer_retry"]["kind"] == "capacity"
+    assert service.submitted == [b"done", b"0"]
+    assert all(Path(e["path"]).exists() for e in state["sources"])
+    runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0)
+    assert service.submitted == [b"done", b"0"]
+    now[0] += 3600
+    service.fail.clear()
+    restored = json.loads(path.read_text())
+    result = runner.run_sources(restored, path, "kb", poll=0)
+    assert result["done"] == 4 and result["pending"] == 0 and "writer_retry" not in result
+    assert service.submitted == [b"done", b"0", b"0", b"1", b"2"]
+    assert [j["status"] for j in restored["sources"][1]["ingest"]] == ["failed", "done"]
+    assert len(service.audited) == 4
+
+
+def test_retry_now_skips_capacity_cooldown_but_only_probes_once(setup):
+    service, state, path, add = setup
+    add("repo", b"source")
+    add("later", b"later")
+    service.fail[b"source"] = "HTTP 429: Too many requests"
+    runner.run_sources(state, path, "kb", poll=0)
+    runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0, retry_now=True)
+    assert service.submitted == [b"source", b"source"]
+    service.fail.clear()
+    assert runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0, retry_now=True)["done"] == 2
+    assert service.submitted == [b"source", b"source", b"source", b"later"]
+
+
+@pytest.mark.parametrize("error", ["login required", "disk full", "permission denied", "validation failed",
+                                   "unrecognized model output", "invalid source 5fc6667503e429f"])
+def test_retry_now_cannot_bypass_hard_failures(setup, error):
+    service, state, path, add = setup
+    add("repo", b"source")
+    service.fail[b"source"] = error
+    runner.run_sources(state, path, "kb", poll=0)
+    runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0, retry_now=True)
+    assert len(service.submitted) == 1 and not service.audited
+
+
+@pytest.mark.parametrize("kind", ["ingest", "audit"])
+def test_retry_now_requires_confirmed_rollback_and_correct_receipt(setup, kind):
+    service, state, path, add = setup
+    entry = add("repo", b"source")
+    ingest = done("original", sha=entry["sha256"])
+    entry["ingest"] = [ingest]
+    failed = ingest if kind == "ingest" else done("audit", parent="original")
+    if kind == "audit":
+        entry["audit"] = [failed]
+    failed.update(status="failed", phase="recovery_pending", error="connection reset")
+    failed["validation"] = {"status": "not_run"}
+    assert runner.run_sources(state, path, "kb", poll=0, retry_now=True)["pending"] == 1
+    assert not service.submitted and not service.audited
+    failed["phase"] = "rolled_back"
+    if kind == "ingest":
+        failed["sha256"] = "wrong"
+    else:
+        failed["parent_job"] = "wrong"
+    assert runner.run_sources(state, path, "kb", poll=0, retry_now=True)["pending"] == 1
+    assert not service.submitted and not service.audited
+
+
+def test_audit_capacity_recovery_does_not_repeat_ingest(setup):
+    service, state, path, add = setup
+    entry = add("repo", b"source")
+    entry["ingest"] = [done("original", sha=entry["sha256"])]
+    failed = done("old-audit", parent="original")
+    failed.update(status="failed", phase="rolled_back", error="You've hit your usage limit.",
+                  validation={"status": "not_run"})
+    entry["audit"] = [failed]
+    add("later", b"later")
+    assert runner.run_sources(state, path, "kb", poll=0)["pending"] == 2
+    assert not service.submitted and not service.audited
+    restored = json.loads(path.read_text())
+    assert runner.run_sources(restored, path, "kb", poll=0, retry_now=True)["done"] == 2
+    assert service.submitted == [b"later"] and service.audited[0] == "original"
+    assert restored["sources"][0]["audit"][0] == failed
+
+
+def test_old_quota_failures_automatically_resume_from_existing_v1_state(setup):
+    service, state, path, add = setup
+    for i in range(10):
+        entry = add(f"repo-{i}", str(i).encode())
+        old = {"id": f"old-{i}", "kind": "ingest", "sha256": entry["sha256"],
+               "status": "failed", "phase": "rolled_back", "validation": {"status": "not_run"},
+               "error": "You've hit your usage limit. Try again at Sep 16th, 2026 7:31 PM.",
+               "finished": "2000-01-01T00:00:00Z"}
+        entry["ingest"] = [old]
+    result = runner.run_sources(state, path, "kb", poll=0)
+    assert result["done"] == 10 and result["pending"] == 0
+    assert len(service.submitted) == 10 and len(service.audited) == 10
+    assert all([j["status"] for j in e["ingest"]] == ["failed", "done"] for e in state["sources"])
+
+
+def test_new_evidence_is_frozen_during_cooldown_and_resume_needs_no_manifest(setup):
+    service, state, path, add = setup
+    add("repo", b"source")
+    service.fail[b"source"] = "You've hit your usage limit."
+    runner.run_sources(state, path, "kb", poll=0)
+    source = path.parent / "extra.md"
+    source.write_text("extra")
+    manifest = path.parent / "manifest.json"
+    manifest.write_text(json.dumps({"sources": [{"identity": "extra", "path": str(source)}]}))
+    result = runner.run(manifest=manifest, state_dir=path.parent, bundle="kb", poll=0)
+    assert result["pending"] == 2 and len(service.submitted) == 1
+    source.unlink()
+    service.fail.clear()
+    assert runner.run(manifest=None, state_dir=path.parent, bundle="kb", poll=0, retry_now=True)["done"] == 2
+    assert service.submitted == [b"source", b"source", b"extra"]
+
+
+def test_same_source_new_version_waits_for_transient_recovery(setup):
+    service, state, path, add = setup
+    add("repo", b"old")
+    add("repo", b"new")
+    add("independent", b"other")
+    service.fail[b"old"] = "status 503: service unavailable"
+    result = runner.run_sources(state, path, "kb", poll=0)
+    assert result["done"] == 1 and service.submitted == [b"old", b"other"]
+    service.fail.clear()
+    result = runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0, retry_now=True)
+    assert result["done"] == 3 and service.submitted == [b"old", b"other", b"old", b"new"]
+
+
+def test_cli_maintain_formats_and_missing_state_error(setup, monkeypatch, capsys):
+    service, state, path, add = setup
+    add("repo", b"source")
+    runner.save(path, state)
+    args = ["-b", "kb", "maintain", "--state-dir", str(path.parent), "--poll-seconds", "0"]
+    assert cli_main.main(args) == 0
+    out = capsys.readouterr().out
+    assert "done: 1" in out and "sources[1]{identity,status,action,retry_at}" in out
+    assert cli_main.main([*args, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["done"] == 1
+    assert len(service.submitted) == 1 and len(service.audited) == 1
+    assert cli_main.main(["-b", "kb", "maintain", "--state-dir", str(path.parent / "empty"), "--json"]) == 1
+    assert "no saved state" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_state_lock_prevents_overlapping_recovery(setup):
+    service, state, path, add = setup
+    runner.save(path, state)
+    with (path.parent / "runner.lock").open("a") as lock:
+        runner.fcntl.flock(lock, runner.fcntl.LOCK_EX | runner.fcntl.LOCK_NB)
+        with pytest.raises(runner.Pending, match="another runner"):
+            runner.run(manifest=None, state_dir=path.parent, bundle="kb", retry_now=True)
+    assert not service.submitted and not service.audited

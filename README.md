@@ -176,9 +176,26 @@ Requires Python ≥ 3.11. Licensed under Apache-2.0 (see LICENSE / NOTICE).
 
 `ai-wiki ingest --json` returns machine-readable submission IDs. `ai-wiki jobs
 --pending-audit --json` discovers successful ingests older than 24 hours without an active
-or completed audit. Use the Maintainer Skill's `scripts/run_sources.py` with a persistent
-state directory to resume source manifests, preserve independent progress, and close audit
-gaps. No OKF schema change or platform-specific orchestration service is required.
+or completed audit. Use the CLI with a persistent state directory:
+
+```sh
+ai-wiki -b my-kb maintain --manifest sources.json --state-dir ~/.ai-wiki/maintenance/my-kb --audit-pending
+# Later scheduled runs resume failed work automatically; omit the manifest for recovery only.
+ai-wiki -b my-kb maintain --state-dir ~/.ai-wiki/maintenance/my-kb
+# Capacity restored early: skip the cooldown once, never the safety gates.
+ai-wiki -b my-kb maintain --state-dir ~/.ai-wiki/maintenance/my-kb --retry-now --json
+```
+
+The manifest is `{"sources":[{"identity":"<stable source identity>","path":"/absolute/evidence.md"}]}`.
+Capacity/rate-limit failures stop the batch and persist a one-hour cooldown; transient
+timeout/network/5xx failures persist a five-minute cooldown. Each invocation makes at most
+one new attempt per stage per source, only after confirmed rollback. Later invocations
+resume eligible attempts without replaying completed work; no background scheduler is added.
+Validation, auth/permission, disk, unknown, or unresolved-rollback failures require repair.
+`--retry-now` cannot override those gates. JSON includes `writer_retry` and source `retry_at`;
+exit 1 means work remains pending, not that successful work was lost. Existing v1 state and
+exact source bytes are reused; the Skill script is now only a CLI forwarding entry point.
+No OKF schema change or platform-specific orchestration service is required.
 
 Verification history is worker-owned: curator edits to `verified` are discarded/restored
 before validation and recorded as `deterministic_repairs`. Generation/source/scope checks

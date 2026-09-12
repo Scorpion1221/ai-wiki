@@ -98,7 +98,14 @@ ai-wiki jobs <ingest-job-id>
 ai-wiki jobs --pending-audit --json  # ingests older than 24h missing an audit
 ai-wiki audit <ingest-job-id>            # only after ingest status is done
 ai-wiki jobs <audit-job-id>
+ai-wiki -b my-kb maintain --manifest sources.json --state-dir ~/.ai-wiki/maintenance/my-kb --audit-pending
 ```
+
+`maintain` owns durable source/job state and safe retries; later scheduled invocations resume
+rolled-back capacity failures after one hour and transient failures after five minutes.
+Capacity exhaustion stops the batch, not just one source. Omit `--manifest` for recovery only;
+`--retry-now` skips cooldown once after recovery, never validation/auth/disk/rollback gates.
+The CLI adds no scheduler. Reuse the same state directory and preserve all attempt receipts.
 
 Files are stored verbatim. Supported text/code/image sources are curated; PDF and other
 opaque formats remain `needs-conversion` rather than being guessed. Identical submissions and

@@ -459,6 +459,24 @@ def main(argv=None) -> int:
     p_jobs.add_argument("--pending-audit", action="store_true", help="list successful ingests missing an audit")
     p_jobs.add_argument("--older-than-hours", type=_limit, default=24, help="minimum pending age (default: 24)")
     p_jobs.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    p_maintain = sub.add_parser(
+        "maintain", help="resume a durable source manifest through ingest and audit",
+        command_path="ai-wiki maintain",
+        epilog=_examples(
+            "ai-wiki -b my-kb maintain --manifest sources.json --state-dir ~/.ai-wiki/maintenance/my-kb",
+            "ai-wiki -b my-kb maintain --state-dir ~/.ai-wiki/maintenance/my-kb --retry-now",
+        ), **common,
+    )
+    p_maintain.add_argument("--manifest", type=Path, help="add sources; omit to resume saved work only")
+    p_maintain.add_argument("--state-dir", required=True, type=Path, help="persistent, single-writer state directory")
+    p_maintain.add_argument("--audit-pending", action="store_true",
+                            help="also discover orphaned ingests older than 24h")
+    p_maintain.add_argument("--retry-now", action="store_true",
+                            help="skip recoverable-failure cooldown once; never bypass validation or rollback gates")
+    p_maintain.add_argument("--poll-seconds", type=_limit, default=15, help="job poll interval (default: 15)")
+    p_maintain.add_argument("--wait-seconds", type=_positive, default=3600,
+                            help="maximum wait per stage; timeout preserves job ID (default: 3600)")
+    p_maintain.add_argument("--json", action="store_true", help="emit complete recovery details as JSON")
 
     ap.command_path = _command_path(args)
     a = ap.parse_args(args)
@@ -470,7 +488,31 @@ def main(argv=None) -> int:
 
     bsel = _active(a.bundle)  # bundle to target on the server (None → server default)
 
-    if a.cmd == "health":
+    if a.cmd == "maintain":
+        from aiwiki.cli import maintain
+
+        # Resolve a default to a concrete name before binding durable state to it.
+        bsel = bsel or _api("/health").get("bundle")
+        if not bsel:
+            _fail("maintenance needs a bundle", help_command="ai-wiki bundle use <name>", code=2)
+        try:
+            result = maintain.run(manifest=a.manifest.expanduser() if a.manifest else None,
+                                  state_dir=a.state_dir.expanduser(), bundle=bsel,
+                                  audit_pending=a.audit_pending, retry_now=a.retry_now,
+                                  poll=a.poll_seconds, wait=a.wait_seconds)
+        except (maintain.Pending, ValueError, OSError, KeyError, TypeError) as exc:
+            if a.json:
+                print(json.dumps({"error": str(exc), "help": "ai-wiki maintain --help"}, ensure_ascii=False))
+                return 1
+            _fail(str(exc), help_command="ai-wiki maintain --help")
+        if a.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            emit(object_lines("count", {k: result[k] for k in ("done", "pending")}),
+                 object_lines("writer_retry", result["writer_retry"]) if result.get("writer_retry") else [],
+                 table_lines("sources", result["sources"], ("identity", "status", "action", "retry_at")))
+        return 1 if result["pending"] else 0
+    elif a.cmd == "health":
         d = _api("/health", bundle=bsel)
         if a.json:
             print(json.dumps(d, ensure_ascii=False, indent=2))

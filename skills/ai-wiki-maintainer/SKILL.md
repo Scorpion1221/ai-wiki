@@ -78,7 +78,7 @@ original evidence locations and immutable revisions, and unresolved boundaries. 
 waits for results, deduplicates, and alone drives writes/checkpoints. Keep model names and
 platform-specific dispatch in the caller's prompt; unsupported runtimes fall back to serial.
 
-Use `scripts/run_sources.py` rather than improvising per-job polling/retry loops. After the
+Use `ai-wiki maintain` rather than improvising per-job polling/retry loops. After the
 preflight below, freeze one manifest (paths absolute; same source identity keeps its version
 order):
 
@@ -87,32 +87,39 @@ order):
 ```
 
 ```sh
-python3 "$SKILL_DIR/scripts/run_sources.py" \
-  --manifest "$run_dir/sources.json" --bundle "$bundle" \
+ai-wiki -b "$bundle" maintain --manifest "$run_dir/sources.json" \
   --state-dir "$durable_state_dir" --audit-pending
 ```
 
 `durable_state_dir` is a persistent directory outside the bundle and Reference Repo, reused
 across daily issues on the same endpoint/bundle. Do not put it in `/tmp` or recreate it per
-run. The helper freezes source bytes, records every job receipt atomically, and uses an OS
+run. The CLI freezes source bytes, records every job receipt atomically, and uses an OS
 lock to reject overlapping runners. Archive `state.json` with each run report so recovery on
 a different host can explicitly migrate the state and its frozen `sources/` together.
 
-- A failed source stays pending; independent sources continue. A newer version of the same
+- A failed source stays pending; independent sources continue unless writer capacity is
+  exhausted. A newer version of the same
   source waits. Completed sources never re-ingest/re-audit or depend on mirror visibility.
-- Transient terminal failures can retry once, only after confirmed rollback. Validation,
-  permission/auth, and disk failures require repair; attempt counts survive later runs.
+- Rolled-back capacity/rate-limit failures cool down for one hour and stop the batch;
+  transient timeout/network/5xx failures cool down for five minutes. The next invocation
+  automatically retries eligible work, with at most one new attempt per stage per invocation.
+  It does not sleep until the cooldown or create its own scheduler. Validation, unknown,
+  permission/auth, disk, and unconfirmed rollback failures require repair, not blind retries.
+- Omit `--manifest` to resume saved work only. If capacity is known to have recovered early,
+  add `--retry-now` to skip the cooldown once; it cannot bypass hard-error/rollback gates.
+  Inspect `writer_retry.after` / each source's `retry_at` in `--json` output. Preserve all
+  previous attempts; old failed receipts are never rewritten as successful ones.
 - An uncertain POST is recorded before submission; do not repeat it blindly. Reconcile the
   existing job and import its ID. Manifest entries may include `ingest_job` and `audit_job`
   to reuse known work or explicitly resume after a verified repair. The helper verifies the
-  source hash and parent. Preserve old attempts; do not clear state to reset retry limits.
+  source hash and parent. Do not clear state to reset recovery history.
 - Exit 1 means pending work, not loss of completed work. Read per-source state and keep the
   shared cursor at its last safe boundary. Next run resumes these entries before new work.
 - `--audit-pending` also discovers up to 20 successful ingests older than 24 hours without
   an active/completed audit. It closes orphan drafts through the existing audit path, never
   by changing status from the orchestrator. Report discovery truncation/backlog and `unscoped` legacy receipts separately; never mark an
   unknown legacy scope as a successful no-concept audit.
-- Only notify for new failures, exhausted retries, overdue backlog, or recovery. Repeated
+- Only notify for new failures, required repairs, overdue backlog, or recovery. Repeated
   unchanged failure signatures remain in the report, not fresh daily alerts.
 
 Check dynamic facts with elapsed `stale_after` during collection, prioritizing prices,
@@ -123,7 +130,7 @@ methods do not need daily renewal. Historical backfill is separate from the dail
 ## Runtime preflight
 
 Before scanning or ingesting, run `ai-wiki --version`, `ai-wiki health --json`, and
-`ai-wiki audit --help`. Require the local CLI version to equal the writer's reported
+`ai-wiki audit --help` and `ai-wiki maintain --help`. Require the local CLI version to equal the writer's reported
 `service_version`, require `okf_version: "0.2"`, and require the `audit` command and `ai-wiki ingest --help` to expose `--json`. Do not
 hard-code a release number in an agent or automation prompt; the reachable writer is the
 compatibility source of truth.
@@ -181,7 +188,7 @@ Audit is keyed to a completed ingest job and its changed concepts. Repeating the
 idempotent while an audit attempt is `queued`, `running`, or successfully `done`: it returns
 that job with `deduplicated: true` and must not create a second review or commit. A technical
 `failed` attempt remains durable for diagnosis, but the next command creates and queues a new
-attempt with a new job id. Record every attempt id and enforce a bounded retry count.
+attempt with a new job id. Record every attempt id; use `maintain` for cooldown-bounded recovery.
 
 If ingest changed only source/index/log artifacts and no concept files, audit completes
 immediately without launching a reviewer:
@@ -270,8 +277,8 @@ past a failed source unless the cursor format records that source separately.
 - Re-submit identical content: accept the deduplicated ingest job; inspect its terminal state.
 - Re-audit the same completed ingest with an audit `queued`, `running`, or `done`: accept the
   deduplicated audit job and inspect its state.
-- Retry an audit `failed` technical attempt with a bounded count: invoke `ai-wiki audit` again,
-  record the new attempt id, and preserve the same parent ingest/source identity.
+- Resume a recoverable audit failure through `ai-wiki maintain`: cooldown and per-invocation
+  attempt limits apply; preserve every attempt id and the same parent ingest/source identity.
 - Do not retry `needs_attention` without new evidence.
 - On a transient job-read timeout, connection error, HTTP 429, or 5xx, retry the same
   read at most three times with 5/15/30-second backoff (respect `Retry-After`). Do not
