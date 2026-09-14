@@ -77,6 +77,16 @@ parallel batches (at most three). Subagents are read-only: return candidate know
 original evidence locations and immutable revisions, and unresolved boundaries. The parent
 waits for results, deduplicates, and alone drives writes/checkpoints. Keep model names and
 platform-specific dispatch in the caller's prompt; unsupported runtimes fall back to serial.
+Check the actual dispatch capability before announcing parallel work. Record child run IDs,
+effective models, and terminal results; a plan or several shell reads is not delegation.
+Do not bypass a platform-managed disablement. If delegation is unavailable or fails, record
+the reason once and collect the unfinished topics serially without blocking maintenance.
+
+Cache raw discovery, issue, and receipt responses in the run directory; inspect compact
+projections in model context rather than repeatedly printing full histories. Reuse cached
+responses for the frozen scan window; refresh only an active job or an explicit readback.
+Let `maintain` own polling. While it is running, inspect compact local state only when
+needed to diagnose progress; do not duplicate its API polling or narrate every heartbeat.
 
 Use `ai-wiki maintain` rather than improvising per-job polling/retry loops. After the
 preflight below, freeze one manifest (paths absolute; same source identity keeps its version
