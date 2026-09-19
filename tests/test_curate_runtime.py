@@ -40,7 +40,9 @@ def test_headless_command_exposes_only_bundle_scoped_content_tools(tmp_path: Pat
     bundle.mkdir()
     output = tmp_path / "last.txt"
     command = curate._codex_command(bundle, "review", output_path=output)
-    assert command[:2] == [curate.AGENT_BIN, "exec"]
+    assert command[0] == curate.AGENT_BIN
+    assert all(index < command.index("exec") for index, arg in enumerate(command)
+               if arg in ("--config", "--disable"))
     assert command[command.index("--model") + 1] == curate.AGENT_MODEL
     assert f'model_reasoning_effort="{curate.AGENT_REASONING_EFFORT}"' in command
     assert 'approval_policy="never"' in command

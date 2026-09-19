@@ -116,19 +116,20 @@ def _load() -> dict:
 
 
 def _normalize(cfg: dict) -> dict:
-    """Coerce any historical config into {endpoint, token, bundle}.
+    """Coerce historical connection config, preserving optional local agent settings.
 
     - new form: {endpoint, token, bundle} — passed through.
     - legacy flat: {endpoint, token} — gets bundle=None.
     - old multi-endpoint: {current, bundles:{name:{endpoint,token}}} — those "bundles" were
       really separate servers; we adopt the active one's endpoint+token as the connection.
     """
+    agent = {"agent": cfg["agent"]} if "agent" in cfg else {}
     if "endpoint" in cfg:
-        return {"endpoint": cfg.get("endpoint"), "token": cfg.get("token"), "bundle": cfg.get("bundle")}
+        return {**agent, "endpoint": cfg.get("endpoint"), "token": cfg.get("token"), "bundle": cfg.get("bundle")}
     if "bundles" in cfg:  # migrate the old multi-endpoint schema
         b = (cfg.get("bundles") or {}).get(cfg.get("current") or "") or {}
-        return {"endpoint": b.get("endpoint"), "token": b.get("token"), "bundle": None}
-    return {"endpoint": None, "token": None, "bundle": None}
+        return {**agent, "endpoint": b.get("endpoint"), "token": b.get("token"), "bundle": None}
+    return {**agent, "endpoint": None, "token": None, "bundle": None}
 
 
 def _save(cfg: dict) -> None:

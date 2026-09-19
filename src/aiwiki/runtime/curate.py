@@ -38,14 +38,16 @@ from ..engine.render_viz import generate_visualization
 from ..engine.scan_sources import _source_resource_rel
 from ..engine.validate import parse_doc, should_check
 from ..engine.validate import validate as validate_bundle
+from .config import load_agent_config
 
 TIMEOUT_S = 900
 GIT_TIMEOUT_S = 120
 AGENT_HEARTBEAT_S = 15
 AGENT_RUNTIME = "codex"
-AGENT_MODEL = os.environ.get("AIWIKI_AGENT_MODEL", "gpt-5.6-sol")
-AGENT_REASONING_EFFORT = os.environ.get("AIWIKI_AGENT_REASONING_EFFORT", "high")
-AGENT_BIN = os.environ.get("AIWIKI_AGENT_BIN", "codex")
+_AGENT_CONFIG = load_agent_config()
+AGENT_MODEL = _AGENT_CONFIG["model"]
+AGENT_REASONING_EFFORT = _AGENT_CONFIG["reasoning_effort"]
+AGENT_BIN = _AGENT_CONFIG["bin"]
 CURATOR_ACTOR = "process:ai-wiki-curator"
 CURATION_CLOCK_SKEW = timedelta(minutes=5)
 
@@ -116,19 +118,27 @@ def _codex_command(
     output_path: Path | None = None,
     image_paths: list[Path] | None = None,
 ) -> list[str]:
-    """Build the fixed, non-interactive Codex command used by curation and audit."""
+    """Build the fixed, non-interactive Codex command used by curation and audit.
+
+    Keep global overrides before `exec`: Codex 0.154.0's subcommand overrides can
+    replace a wrapper's root-level provider overrides instead of appending to them.
+    """
     output = output_path or (bundle.parent / ".codex-last-message.txt")
     command = [
         AGENT_BIN,
-        "exec",
-        "--model", AGENT_MODEL,
-        "--config", f'model_reasoning_effort="{AGENT_REASONING_EFFORT}"',
+        "--config", f"model_reasoning_effort={json.dumps(AGENT_REASONING_EFFORT)}",
         "--config", 'approval_policy="never"',
-        "--sandbox", "workspace-write",
         "--config", "sandbox_workspace_write.network_access=false",
         "--config", "sandbox_workspace_write.writable_roots=[]",
         "--config", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
         "--config", "sandbox_workspace_write.exclude_slash_tmp=true",
+    ]
+    for feature in _DISABLED_CODEX_FEATURES:
+        command.extend(("--disable", feature))
+    command.extend([
+        "exec",
+        "--model", AGENT_MODEL,
+        "--sandbox", "workspace-write",
         "--cd", str(bundle.resolve()),
         "--skip-git-repo-check",
         "--ephemeral",
@@ -136,11 +146,9 @@ def _codex_command(
         "--ignore-rules",
         "--color", "never",
         "--output-last-message", str(output.resolve()),
-    ]
+    ])
     for image_path in image_paths or []:
         command.extend(("--image", str(image_path.resolve())))
-    for feature in _DISABLED_CODEX_FEATURES:
-        command.extend(("--disable", feature))
     command.append(prompt)
     return command
 
@@ -148,6 +156,7 @@ def _codex_command(
 def _agent_metadata() -> dict[str, str]:
     return {
         "runtime": AGENT_RUNTIME,
+        "bin": AGENT_BIN,
         "model": AGENT_MODEL,
         "reasoning_effort": AGENT_REASONING_EFFORT,
     }

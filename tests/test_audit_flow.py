@@ -422,7 +422,9 @@ def test_audit_uses_same_sandboxed_codex_boundary(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(curate, "_agent_process", fake_agent)
     audit.run(bundle, "ingest1", path)
     command = captured[0]
-    assert command[:2] == [curate.AGENT_BIN, "exec"]
+    assert command[0] == curate.AGENT_BIN
+    assert all(index < command.index("exec") for index, arg in enumerate(command)
+               if arg in ("--config", "--disable"))
     assert command[command.index("--model") + 1] == curate.AGENT_MODEL
     assert command[command.index("--sandbox") + 1] == "workspace-write"
     assert "sandbox_workspace_write.network_access=false" in command

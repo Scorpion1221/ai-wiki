@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from aiwiki.cli import main as cli
 
 
@@ -22,6 +24,25 @@ def test_config_set_and_conn(monkeypatch, tmp_path: Path) -> None:
     assert cli._conn() == ("https://h/", "tok")
     assert cli._active() is None              # no active bundle yet → server default
     assert cli._active("override") == "override"
+
+
+@pytest.mark.parametrize("connection", [
+    {}, {"endpoint": "https://h/", "token": "tok"},
+    {"current": "old", "bundles": {"old": {"endpoint": "https://h/", "token": "tok"}}},
+])
+def test_connection_commands_preserve_local_agent_settings(monkeypatch, tmp_path: Path, capsys, connection) -> None:
+    p = _point_config(monkeypatch, tmp_path)
+    agent = {"bin": "/opt/codex-9router", "model": "gpt-6-astra-combos", "reasoning_effort": "xhigh"}
+    p.write_text(json.dumps({**connection, "agent": agent}))
+    assert cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"]) == 0
+    assert json.loads(p.read_text())["agent"] == agent
+    assert cli.main(["bundle", "use", "kb"]) == 0
+    assert json.loads(p.read_text())["agent"] == agent
+    assert p.stat().st_mode & 0o777 == 0o600
+    capsys.readouterr()
+    assert cli.main(["config", "show", "--json"]) == 0
+    # Connection inspection does not expose wrapper configuration or credentials.
+    assert "agent" not in json.loads(capsys.readouterr().out)
 
 
 def test_use_sets_active_and_minus_b_overrides(monkeypatch, tmp_path: Path) -> None:

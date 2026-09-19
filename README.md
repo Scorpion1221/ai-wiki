@@ -155,7 +155,64 @@ check before enabling its Maintainer automation.
 
 The CLI is non-interactive: usage/API failures are structured on stdout with exit code 2/1, and destructive `bundle rm` requires `--yes`. Bare `-v`, `-V`, and `--version` probes return only the version.
 
-## Configuration (env)
+## Configuration
+
+### Optional Codex subscription / API-wrapper selection
+
+Both ingest and audit use the same Codex-compatible executable. On the **worker host**, merge
+an optional `agent` object into `~/.ai-wiki/config.json` (or the file selected by
+`AIWIKI_CONFIG`), preserving the existing connection/token/bundle fields:
+
+```json
+{
+  "agent": {
+    "bin": "codex",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high"
+  }
+}
+```
+
+This is also the default when `agent` is absent: use the worker user's existing Codex login
+(for example, a ChatGPT subscription), without changing its account or config. Authentication
+is delegated to Codex; this selection does not itself log in or guarantee a subscription.
+To use an existing API wrapper instead, replace only the `agent` object:
+
+```json
+{
+  "agent": {
+    "bin": "/root/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh"
+  }
+}
+```
+
+- Precedence per field: `AIWIKI_AGENT_*` environment variable → `agent` field → built-in default.
+  Remove old environment overrides when switching via the file.
+- Settings are loaded at worker startup; an existing service must be restarted separately
+  to pick up changes. Editing a remote client's config does **not** reconfigure the server.
+- The executable is one path or PATH name, **not** a shell command. Put provider flags and
+  credential loading in the wrapper. Set model/effort here explicitly: worker arguments
+  override wrapper defaults. Missing/broken wrappers never fall back to a different account.
+- A missing default config preserves env-only deployments. An explicitly selected missing
+  config, invalid JSON, or invalid/unknown `agent` fields fails startup rather than silently
+  choosing defaults. The only supported fields are `bin`, `model`, and `reasoning_effort`.
+- `ai-wiki config set` and `bundle` selection preserve `agent`. `config show` remains a
+  connection-only view. On a writer, `ai-wiki health --json` exposes the **running server's**
+  `writer_agent` (`runtime`, `bin`, `model`, `reasoning_effort`); jobs record the same settings.
+- Never put provider API keys here. Keep them in the wrapper's external secret file (mode
+  `600`); keep the wrapper mode `700`. AI Wiki does not copy `auth.json`, replace `CODEX_HOME`,
+  or rewrite normal Codex model/provider/auth settings. Codex itself may still record project
+  trust in its config; see the smoke-test isolation notes in the integration guide.
+- Selecting a backend does not grant permission to ingest/audit or enable a schedule.
+  Curation/audit retain the existing isolated workspace, no tool-network access, validation,
+  service-owned Git closeout, and rollback boundaries.
+
+See [Codex integration and read-only SSH testing](docs/codex-integration.md) for the wrapper
+contract, credential boundaries, and a separate read-only client workflow.
+
+### Environment variables
 
 | Var | Meaning |
 |-----|---------|
@@ -166,9 +223,10 @@ The CLI is non-interactive: usage/API failures are structured on stdout with exi
 | `AIWIKI_PORT` | service port (default 8787) |
 | `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`) |
 | `AIWIKI_CURATE` | `auto` (default) or `off` to disable the curation trigger |
-| `AIWIKI_AGENT_BIN` | Codex executable (default `codex`) |
-| `AIWIKI_AGENT_MODEL` | explicit curator/auditor model (default `gpt-5.6-sol`) |
-| `AIWIKI_AGENT_REASONING_EFFORT` | explicit reasoning effort (default `high`) |
+| `AIWIKI_CONFIG` | local client / worker JSON config (default `~/.ai-wiki/config.json`) |
+| `AIWIKI_AGENT_BIN` | override `agent.bin`; Codex executable or compatible wrapper (default `codex`) |
+| `AIWIKI_AGENT_MODEL` | override `agent.model` for curator and auditor (default `gpt-5.6-sol`) |
+| `AIWIKI_AGENT_REASONING_EFFORT` | override `agent.reasoning_effort` (default `high`) |
 
 Requires Python ≥ 3.11. Licensed under Apache-2.0 (see LICENSE / NOTICE).
 
