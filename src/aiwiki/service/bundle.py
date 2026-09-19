@@ -153,7 +153,12 @@ def commit_scaffold(target: Path, name: str) -> dict:
         raise RuntimeError(f"git is unavailable: {exc}") from exc
 
     try:
-        subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True, timeout=10)
+        # `git init -b` requires Git 2.28; supported hosts can still run Git 2.25.
+        subprocess.run(["git", "init", "-q", str(target)], check=True, timeout=10)
+        subprocess.run(
+            ["git", "-C", str(target), "symbolic-ref", "HEAD", "refs/heads/main"],
+            check=True, timeout=10,
+        )
         subprocess.run(
             ["git", "-C", str(target), "config", "user.name", "AI Wiki Worker"],
             check=True, timeout=10,

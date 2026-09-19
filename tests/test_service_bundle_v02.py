@@ -401,6 +401,25 @@ def test_commit_scaffold_initializes_independent_clean_repository(tmp_path: Path
     ).splitlines() == [".gitignore", "SCHEMA.md", "index-meta.yaml", "index.md", "log.md", "purpose.md"]
 
 
+def test_commit_scaffold_supports_git_without_init_branch_flag(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "legacy-git-kb"
+    B.scaffold(target, "legacy-git-kb")
+    real_run = subprocess.run
+
+    def legacy_git(command, **kwargs):
+        if command[:2] == ["git", "init"]:
+            assert "-b" not in command and "--initial-branch" not in command
+            command = ["git", "-c", "init.defaultBranch=legacy-default", *command[1:]]
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(B.subprocess, "run", legacy_git)
+    result = B.commit_scaffold(target, "legacy-git-kb")
+    assert result["initialized"] is True and result["commit"]
+    assert subprocess.check_output(
+        ["git", "-C", str(target), "branch", "--show-current"], text=True,
+    ).strip() == "main"
+
+
 def test_commit_scaffold_isolates_bundle_from_enclosing_repository(tmp_path: Path) -> None:
     root = tmp_path / "bundles"
     root.mkdir()
