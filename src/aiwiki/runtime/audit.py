@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 
 from ..engine import append_log
-from ..engine.document import _instant, current_verified, normalize_verified
+from ..engine.document import OKFDocumentError, _instant, current_verified, normalize_verified
 from ..engine.gen_indexes import generate_indexes
 from ..engine.validate import parse_doc, should_check
 from ..engine.validate import validate as validate_bundle
@@ -63,9 +63,17 @@ AUDIT_PROMPT = (
     "source-id footnotes only. Never write "
     "`timestamp`, string-only sources, `last_verified_at`, a `# Citations` section, or statuses "
     "`reviewed`/`canonical`/`stale`.\n\n"
+    "YAML safety: inspect each file's existing `verified` shape before appending. For a list, "
+    "match the indentation of its existing '-' entries exactly: both indented and indentless "
+    "lists are valid, but mixing them in one list is invalid. Do not batch-insert a fixed "
+    "indentation across files. If `verified` is a single mapping, convert it to a list while "
+    "preserving that event; if absent, create a list. Quote free-text scalars containing YAML "
+    "syntax characters. Before finishing, run a read-only YAML syntax check (e.g. PyYAML "
+    "safe_load on the frontmatter only) for EVERY scoped concept and fix any parse errors. "
+    "This syntax-only check is allowed; do not run the bundle validator or other closeout tools.\n\n"
     "Do not create, delete, rename, or edit any other file. You may use local read-only shell commands "
     "to inspect evidence, but do not run git, network requests, skills, index generation, logging, "
-    "source scanning, or validation; the service does deterministic validation and owns commit/push. "
+    "source scanning, or bundle validation; the service does deterministic validation and owns commit/push. "
     "End with a concise report of verified, unverified, and corrected concept paths."
 )
 
@@ -736,6 +744,23 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
                 _set_failure(job, "audit modified files outside its ingest scope")
                 job["out_of_scope_files"] = sorted(set(outside) | set(new_symlinks))
                 return
+
+        # Parse all scoped output before bookkeeping repairs: malformed YAML must
+        # fail with a file-specific receipt, not escape as validation=not_run.
+        syntax_errors = []
+        for rel in concepts:
+            try:
+                parse_doc(bundle / rel)
+            except OKFDocumentError as exc:
+                syntax_errors.append(f"{rel}: {exc}")
+        if syntax_errors:
+            rollback()
+            _set_failure(
+                job,
+                f"audit output contains invalid YAML in {len(syntax_errors)} concept(s)",
+                validation={"status": "failed", "error_count": len(syntax_errors), "errors": syntax_errors},
+            )
+            return
 
         deterministic_repairs = {}
         for rel in concepts:

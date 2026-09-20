@@ -21,6 +21,9 @@ def test_audit_prompt_matches_generation_and_verification_policy() -> None:
     assert "Source provenance is FROZEN" in audit.AUDIT_PROMPT
     assert "Never leave a scoped concept as `draft`" in audit.AUDIT_PROMPT
     assert "completed but unverified knowledge record" in audit.AUDIT_PROMPT
+    assert "Do not batch-insert a fixed indentation across files" in audit.AUDIT_PROMPT
+    assert "read-only YAML syntax check" in audit.AUDIT_PROMPT
+    assert "for EVERY scoped concept" in audit.AUDIT_PROMPT
 
 AUTH = {"Authorization": "Bearer testtok"}
 AUDIT_NOW = "2026-08-13T01:00:00Z"
@@ -603,6 +606,92 @@ def test_runtime_validation_failure_is_technical_failure(tmp_path: Path, monkeyp
     assert job["validation"]["status"] == "failed"
     assert job["validation"]["errors"] == ["features/release.md: bad"]
     assert (bundle / "features" / "release.md").read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("git_enabled", [False, True])
+def test_audit_mixed_verification_indentation_reports_path_and_rolls_back(
+    tmp_path: Path, monkeypatch, git_enabled: bool,
+) -> None:
+    bundle = _git_bundle(tmp_path) if git_enabled else _bundle(tmp_path)
+    concept = bundle / "features/release.md"
+    # Both indentation styles are legal on their own; this production failure
+    # appended an indentless event to an existing indented verification list.
+    original = concept.read_text(encoding="utf-8").replace(
+        "\n---\n# Summary",
+        "\nverified:\n  - {by: process:ai-wiki-adversarial-audit, at: '2026-08-12T01:00:00Z'}"
+        "\n---\n# Summary",
+    )
+    concept.write_text(original, encoding="utf-8")
+    if git_enabled:
+        curate._git(bundle, "add", ".")
+        curate._git(bundle, "commit", "-m", "retain indented verification history")
+    base_revision = curate._git(bundle, "rev-parse", "HEAD").stdout.strip() if git_enabled else None
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "on" if git_enabled else "off")
+    monkeypatch.setattr(curate, "_now", lambda: AUDIT_NOW)
+    closeout = []
+    monkeypatch.setattr(audit, "_repair_audit_output", lambda *args: closeout.append("repair"))
+    monkeypatch.setattr(audit, "validate_bundle", lambda *args: closeout.append("validate"))
+
+    def malformed_review(*args, **kwargs):
+        malformed = original.replace("status: draft", "status: stable").replace(
+            "\n---\n# Summary",
+            f"\n- {{by: {audit.AUDITOR}, at: '{AUDIT_NOW}'}}\n---\n# Summary",
+        )
+        concept.write_text(malformed, encoding="utf-8")
+        return subprocess.CompletedProcess(args[0], 0, stdout="verified", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", malformed_review)
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "failed" and result["phase"] == "rolled_back"
+    assert result["validation"]["status"] == "failed"
+    assert result["validation"]["error_count"] == 1
+    error = result["validation"]["errors"][0]
+    assert error.startswith("features/release.md: invalid YAML frontmatter:")
+    assert "expected <block end>, but found '-'" in error
+    assert result["audit"]["verified_concepts"] == []
+    assert not result.get("git", {}).get("committed")
+    assert concept.read_text(encoding="utf-8") == original
+    assert closeout == []
+    if git_enabled:
+        assert curate._git(bundle, "rev-parse", "HEAD").stdout.strip() == base_revision
+        assert curate._git(bundle, "status", "--porcelain").stdout == ""
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
+def test_audit_accepts_consistent_verification_indentation(tmp_path: Path, monkeypatch, indent: str) -> None:
+    bundle = _bundle(tmp_path)
+    (bundle / "index.md").write_text('---\nokf_version: "0.2"\n---\n', encoding="utf-8")
+    concept = bundle / "features/release.md"
+    historical = f"{indent}- {{by: {audit.AUDITOR}, at: '2026-08-12T01:00:00Z'}}"
+    original = concept.read_text(encoding="utf-8").replace(
+        "\n---\n# Summary", f"\nverified:\n{historical}\n---\n# Summary",
+    )
+    concept.write_text(original, encoding="utf-8")
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(curate, "_now", lambda: AUDIT_NOW)
+
+    def valid_review(*args, **kwargs):
+        concept.write_text(
+            original.replace("status: draft", "status: stable").replace(
+                "\n---\n# Summary",
+                f"\n{indent}- {{by: {audit.AUDITOR}, at: '{AUDIT_NOW}'}}\n---\n# Summary",
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args[0], 0, stdout="verified", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", valid_review)
+    audit.run(bundle, "ingest1", path)
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    assert result["validation"]["status"] == "passed"
+    assert historical in concept.read_text(encoding="utf-8")
 
 
 def test_audit_preflight_rejects_bundle_symlink_without_starting_agent(
