@@ -993,6 +993,189 @@ def test_audit_restamps_only_new_stale_auditor_verification(
     assert audit._instant(reviewed["verified"][1]["at"]) == audit._instant(clock["now"])
 
 
+ORPHAN_AT = "2026-09-19T20:56:59Z"
+ORPHAN_LINE = f"  - {{by: {audit.AUDITOR}, at: {ORPHAN_AT}}}"
+ORPHAN_AUDIT_START = "2026-09-24T00:10:00Z"
+ORPHAN_AUDIT_FINISH = "2026-09-24T00:20:00Z"
+
+
+def _orphan_concept() -> str:
+    frontmatter = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
+    frontmatter["generated"] = {"by": "process:ai-wiki-curator", "at": "2026-09-23T12:00:00Z"}
+    frontmatter["verified"] = [
+        {"by": audit.AUDITOR, "at": "2026-09-14T11:00:00Z"},
+        {"by": audit.AUDITOR, "at": "2026-09-17T12:00:00Z"},
+    ]
+    text = (
+        "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
+        + f"---\n{ORPHAN_LINE}\n# Summary\n\nThe feature was merged.\n"
+    )
+    # The production history uses unquoted timestamps; PyYAML loads these as
+    # aware datetimes, while the body orphan remains plain Markdown text.
+    return text.replace("at: '2026-09-14T11:00:00Z'", "at: 2026-09-14T11:00:00Z").replace(
+        "at: '2026-09-17T12:00:00Z'", "at: 2026-09-17T12:00:00Z"
+    )
+
+
+@pytest.mark.parametrize("new_at", ["2026-09-24T00:18:00Z", "2026-09-24T00:00:00Z"])
+@pytest.mark.parametrize("quote_history", [False, True])
+def test_audit_discards_lifted_body_orphan_before_validating_current_event(
+    tmp_path: Path, monkeypatch, new_at: str, quote_history: bool,
+) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features/release.md"
+    original = _orphan_concept()
+    concept.write_text(original, encoding="utf-8")
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    clock = {"now": ORPHAN_AUDIT_START}
+    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+
+    def reviewed(*args, **kwargs):
+        frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+        frontmatter["status"] = "stable"
+        frontmatter["generated"] = {"by": audit.AUDITOR, "at": ORPHAN_AUDIT_START}
+        if quote_history:
+            for event in frontmatter["verified"]:
+                event["at"] = event["at"].isoformat().replace("+00:00", "Z")
+        frontmatter["verified"].extend([
+            {"by": audit.AUDITOR, "at": ORPHAN_AT},
+            {"by": audit.AUDITOR, "at": new_at},
+        ])
+        concept.write_text(
+            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
+            + "---\n# Summary\n\nThe feature was merged.\n",
+            encoding="utf-8",
+        )
+        clock["now"] = ORPHAN_AUDIT_FINISH
+        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", reviewed)
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    assert result["audit"]["corrected_concepts"] == ["features/release.md"]
+    expected_repairs = ["discarded body orphan auditor event from verification"]
+    if new_at == "2026-09-24T00:00:00Z":
+        expected_repairs.append("restamped new auditor verification to trusted audit time")
+    assert result["deterministic_repairs"] == {"features/release.md": expected_repairs}
+    frontmatter, body = audit.parse_doc(concept)
+    before_fm = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+    assert all(
+        audit._same_history_event(before, after)
+        for before, after in zip(before_fm["verified"], frontmatter["verified"][:2], strict=True)
+    )
+    assert len(frontmatter["verified"]) == 3
+    assert audit._instant(frontmatter["verified"][-1]["at"]) == audit._instant(
+        ORPHAN_AUDIT_FINISH if new_at == "2026-09-24T00:00:00Z" else new_at
+    )
+    assert ORPHAN_AT not in body
+    assert ORPHAN_AT not in str(frontmatter["verified"])
+    assert frontmatter["generated"] == {"by": audit.AUDITOR, "at": ORPHAN_AUDIT_START}
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "nonprefix", "nonprefix_only_orphan", "body_retained", "other_verifier",
+        "invalid_timestamp", "naive_timestamp", "history_tamper", "multiple_new",
+        "only_orphan", "missing_generation",
+    ],
+)
+def test_audit_orphan_compatibility_fails_closed_and_rolls_back(
+    tmp_path: Path, monkeypatch, attack: str,
+) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features/release.md"
+    original = _orphan_concept()
+    if attack in {"nonprefix", "nonprefix_only_orphan"}:
+        original = original.replace(ORPHAN_LINE, f"# Context\n\n{ORPHAN_LINE}")
+    elif attack == "invalid_timestamp":
+        original = original.replace(ORPHAN_AT, "not-a-timestamp")
+    concept.write_text(original, encoding="utf-8")
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    clock = {"now": ORPHAN_AUDIT_START}
+    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+
+    def unsafe_review(*args, **kwargs):
+        frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+        frontmatter["status"] = "stable"
+        if attack != "missing_generation":
+            frontmatter["generated"] = {"by": audit.AUDITOR, "at": ORPHAN_AUDIT_START}
+        if attack == "history_tamper":
+            frontmatter["verified"][0]["at"] = "2026-09-14T12:00:00Z"
+        orphan_at = "not-a-timestamp" if attack == "invalid_timestamp" else ORPHAN_AT
+        frontmatter["verified"].append({"by": audit.AUDITOR, "at": orphan_at})
+        if attack not in {"only_orphan", "nonprefix_only_orphan"}:
+            actor = "human:forged" if attack == "other_verifier" else audit.AUDITOR
+            current_at = "2026-09-24T00:18:00" if attack == "naive_timestamp" else "2026-09-24T00:18:00Z"
+            frontmatter["verified"].append({"by": actor, "at": current_at})
+        if attack == "multiple_new":
+            frontmatter["verified"].append({"by": audit.AUDITOR, "at": "2026-09-24T00:19:00Z"})
+        body = (
+            f"{ORPHAN_LINE}\n# Summary\n\nThe feature was merged.\n"
+            if attack == "body_retained" else "# Summary\n\nThe feature was merged.\n"
+        )
+        concept.write_text(
+            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n" + body,
+            encoding="utf-8",
+        )
+        clock["now"] = ORPHAN_AUDIT_FINISH
+        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", unsafe_review)
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "failed" and result["phase"] == "rolled_back"
+    assert result["validation"]["status"] == "failed"
+    assert concept.read_text(encoding="utf-8") == original
+    assert not result.get("git", {}).get("committed")
+    if attack == "missing_generation":
+        assert any("substantive audit correction" in error for error in result["validation"]["errors"])
+    elif attack == "other_verifier":
+        assert any("unauthorized verifier" in error for error in result["validation"]["errors"])
+    elif attack == "history_tamper":
+        assert any("preserve existing verification" in error for error in result["validation"]["errors"])
+    elif attack == "invalid_timestamp":
+        assert any("valid timestamp" in error for error in result["validation"]["errors"])
+    else:
+        assert any(
+            "outside the trusted audit window" in error or "at most one new" in error
+            for error in result["validation"]["errors"]
+        )
+
+
+def test_audit_body_orphan_does_not_block_unrelated_stale_event_restamp(tmp_path: Path) -> None:
+    concept = tmp_path / "release.md"
+    original = _orphan_concept()
+    frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+    frontmatter["status"] = "stable"
+    frontmatter["verified"].append(
+        {"by": audit.AUDITOR, "at": "2026-09-24T00:00:00Z"}
+    )
+    concept.write_text(
+        "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
+        + f"---\n{ORPHAN_LINE}\n# Summary\n\nThe feature was merged.\n",
+        encoding="utf-8",
+    )
+    trusted_finish = audit._instant(ORPHAN_AUDIT_FINISH)
+    assert trusted_finish is not None
+
+    assert audit._repair_audit_output(concept, original, trusted_finish) == [
+        "restamped new auditor verification to trusted audit time"
+    ]
+    reviewed, body = audit.parse_doc(concept)
+    assert ORPHAN_LINE in body
+    assert audit._instant(reviewed["verified"][-1]["at"]) == trusted_finish
+
+
 def test_audit_accepts_current_verification_during_long_agent_run(
     tmp_path: Path, monkeypatch,
 ) -> None:

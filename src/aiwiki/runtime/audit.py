@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -195,6 +196,24 @@ def _generation_errors(path: Path, before_text: str, trusted_now: datetime) -> l
     return []
 
 
+def _verification_key(event: dict) -> tuple[str, tuple[str, datetime | str]]:
+    """Compare aware audit instants, not YAML's quoted/unquoted representation."""
+    at = _instant(event.get("at"))
+    timestamp = ("instant", at.astimezone(UTC)) if at is not None else (
+        "raw", str(event.get("at") or "")
+    )
+    return str(event.get("by") or ""), timestamp
+
+
+def _same_history_event(before: dict, after: dict) -> bool:
+    """Keep all historical fields while tolerating equivalent timestamp syntax."""
+    return (
+        before.keys() == after.keys()
+        and _verification_key(before) == _verification_key(after)
+        and all(before[key] == after[key] for key in before if key not in {"by", "at"})
+    )
+
+
 def _verification_policy_errors(
     path: Path,
     before_text: str,
@@ -204,25 +223,23 @@ def _verification_policy_errors(
     before_fm = yaml.safe_load(before_text[4:before_text.find("\n---\n", 4)]) or {}
     after_fm, _body = parse_doc(path)
     before_events = {
-        (str(event.get("by") or ""), str(event.get("at") or ""))
-        for event in normalize_verified(before_fm)
+        _verification_key(event): event for event in normalize_verified(before_fm)
     }
-    after_events = {
-        (str(event.get("by") or ""), str(event.get("at") or ""))
-        for event in normalize_verified(after_fm)
-    }
+    after_events = {_verification_key(event) for event in normalize_verified(after_fm)}
     added = [
         event for event in normalize_verified(after_fm)
-        if (str(event.get("by") or ""), str(event.get("at") or "")) not in before_events
+        if _verification_key(event) not in before_events
     ]
-    removed = sorted(before_events - after_events)
+    removed = sorted(before_events.keys() - after_events, key=str)
     errors = [
         f"{path.name}: audit added unauthorized verifier {event.get('by')!r}"
         for event in added if event.get("by") != AUDITOR
     ]
     errors.extend(
-        f"{path.name}: audit must preserve existing verification {by!r} at {at!r}"
-        for by, at in removed
+        f"{path.name}: audit must preserve existing verification "
+        f"{str(before_events[key].get('by') or '')!r} at "
+        f"{str(before_events[key].get('at') or '')!r}"
+        for key in removed
     )
     earliest = trusted_now - AUDIT_EVENT_WINDOW
     for event in added:
@@ -236,6 +253,22 @@ def _verification_policy_errors(
         elif at < earliest:
             errors.append(f"{path.name}: audit verification timestamp is outside the trusted audit window")
     return errors
+
+
+_BODY_AUDITOR_EVENT = re.compile(
+    r"^  - \{by: " + re.escape(AUDITOR)
+    + r", at: ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)\}$",
+    re.MULTILINE,
+)
+
+
+def _leading_orphan_auditor_event(body: str) -> tuple[str, datetime] | None:
+    """Recognize only the malformed historical event at the very start of a body."""
+    match = _BODY_AUDITOR_EVENT.match(body)
+    if match is None:
+        return None
+    at = _instant(match.group(1))
+    return (match.group(1), at) if at is not None else None
 
 
 def _provenance_policy_errors(
@@ -320,26 +353,66 @@ def _repair_audit_output(path: Path, before_text: str, trusted_finish: datetime)
     if after_fm.get("status") == "draft":
         after_fm["status"] = "stable"
         repairs.append("promoted completed audit draft to stable without adding verification")
-    # The reviewer can select whether a concept is verified, but the service owns the
-    # event time. An old timestamp on its single *new* event is a bookkeeping slip,
-    # not evidence of an old review: this event did not exist before this audit.
-    # Never rewrite history, invalid timestamps, future timestamps, or other actors.
+    # A malformed historical event may have been left in the body by an earlier
+    # ingest. If the reviewer lifted that exact line into `verified`, discard it:
+    # unstructured body text is never verification history. Only a separate new
+    # reviewer event may be restamped below. Never rewrite structured history.
+    before_history = normalize_verified(before_fm)
+    after_history = normalize_verified(after_fm)
+    orphan = _leading_orphan_auditor_event(before_body)
+    if (
+        orphan is not None
+        and orphan[1] < trusted_finish - AUDIT_EVENT_WINDOW
+        and orphan[0] not in body
+        and AUDITOR not in body
+        and len(after_history) == len(before_history) + 2
+        and all(
+            _same_history_event(old, new)
+            for old, new in zip(before_history, after_history, strict=False)
+        )
+    ):
+        appended = after_history[len(before_history):]
+        matches = [
+            index for index, event in enumerate(appended)
+            if set(event) == {"by", "at"}
+            and event.get("by") == AUDITOR
+            and _instant(event.get("at")) == orphan[1]
+        ]
+        if (
+            len(matches) == 1
+            and not any(
+                event.get("by") == AUDITOR and _instant(event.get("at")) == orphan[1]
+                for event in before_history
+            )
+            and appended[1 - matches[0]].get("by") == AUDITOR
+            and (current_at := _instant(appended[1 - matches[0]].get("at"))) is not None
+            and current_at <= trusted_finish
+        ):
+            del after_history[len(before_history) + matches[0]]
+            after_fm["verified"] = after_history
+            repairs.append("discarded body orphan auditor event from verification")
     before_events = {
-        (str(event.get("by") or ""), str(event.get("at") or ""))
-        for event in normalize_verified(before_fm)
+        _verification_key(event)
+        for event in before_history
     }
     after_events = normalize_verified(after_fm)
     after_event_keys = {
-        (str(event.get("by") or ""), str(event.get("at") or ""))
+        _verification_key(event)
         for event in after_events
     }
     added = [
         event for event in after_events
-        if (str(event.get("by") or ""), str(event.get("at") or "")) not in before_events
+        if _verification_key(event) not in before_events
     ]
+    # A single stale new event is a timekeeping slip, unless its actor/time was
+    # already present as an unstructured body line before this audit.
     if before_events <= after_event_keys and len(added) == 1 and added[0].get("by") == AUDITOR:
         event_at = _instant(added[0].get("at"))
-        if event_at is not None and event_at < trusted_finish - AUDIT_EVENT_WINDOW:
+        from_body = event_at is not None and any(
+            _instant(match.group(1)) == event_at
+            for match in _BODY_AUDITOR_EVENT.finditer(before_body)
+        )
+        if event_at is not None and not from_body and event_at < trusted_finish - AUDIT_EVENT_WINDOW:
             added[0]["at"] = trusted_finish.isoformat().replace("+00:00", "Z")
             repairs.append("restamped new auditor verification to trusted audit time")
     if (
