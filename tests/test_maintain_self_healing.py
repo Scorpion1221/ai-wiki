@@ -45,6 +45,7 @@ class Writer:
         self.jobs, self.ingested, self.audited, self.fail = {}, [], [], {}
         self.build = None
         self.health_build = None
+        self.audit_reasons = []
         self.health_calls = 0
 
     def __call__(self, *args, read=False):
@@ -67,6 +68,8 @@ class Writer:
         if command == "audit":
             self.audited.append(rest[0])
             job = done(f"a{len(self.audited)}", parent=rest[0])
+            if self.audit_reasons and (reason := self.audit_reasons.pop(0)):
+                job["audit"].update(status="needs_attention", reason=reason)
             self.jobs[job["id"]] = job
             return copy.deepcopy(job)
         if command == "jobs" and rest[0] == "--pending-audit":
@@ -423,3 +426,22 @@ def test_health_json_reports_client_compatibility_by_major_minor(tmp_path, monke
     assert cli_main.main(["health", "--json"]) == 0
     health = json.loads(capsys.readouterr().out)
     assert health["client_version"] == VERSION and health["compatible"] is compatible
+
+
+@pytest.mark.parametrize("reasons,audits,final", [
+    (["verdict_missing"], 2, "passed"),
+    (["verdict_invalid", "verdict_missing"], 2, "needs_attention"),
+])
+def test_a_missing_reviewer_verdict_earns_exactly_one_fresh_audit(tmp_path, writer, capsys,
+                                                                  reasons, audits, final):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    _state_dir(tmp_path, [_frozen(state_dir, b"a", "a")])
+    writer.audit_reasons = list(reasons)
+    code, result = _maintain(state_dir, capsys=capsys)
+    assert code == 0 and result["done"] == 1
+    assert writer.audited == ["i1"] * audits
+    state = json.loads((state_dir / "state.json").read_text())
+    assert state["sources"][0]["audit"][-1]["audit"]["status"] == final
+    # A later run never re-reviews a completed source.
+    assert _maintain(state_dir, capsys=capsys)[0] == 0 and writer.audited == ["i1"] * audits

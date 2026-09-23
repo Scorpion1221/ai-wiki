@@ -34,6 +34,13 @@ ATTEMPT_CAPS = {"transient": 3, "timeout": 3, "interrupted": 3, "conflict": 3, "
 # Consecutive capacity failures of one stage that may stop the batch. Past this, the entry
 # cools down on its own so a misclassified "capacity" can never starve independent sources.
 CAPACITY_BATCH_STOPS = 3
+# Done audits whose reviewer verdict was missing/invalid; mirrors the writer's per-parent bound.
+MAX_VERDICT_SLIPS = 2
+
+
+def _verdict_slip(job: dict) -> bool:
+    audit = job.get("audit") if isinstance(job.get("audit"), dict) else {}
+    return job.get("status") == "done" and audit.get("reason") in {"verdict_missing", "verdict_invalid"}
 
 
 class Pending(RuntimeError):
@@ -337,6 +344,14 @@ def _process(state: dict, path: Path, bundle: str, entry: dict, newer: dict | No
                     receipt(job, parent=parent)
                 except Pending as exc:
                     raise NeedsRepair(f"{stage} receipt rejected: {exc}") from None
+                if (stage == "audit" and _verdict_slip(job)
+                        and sum(map(_verdict_slip, attempts)) < MAX_VERDICT_SLIPS):
+                    # The reviewer omitted or garbled its verdict: a format slip, not an evidence
+                    # judgment. The writer grants one fresh review per parent, then dedupes, so
+                    # this bound (not the one-attempt-per-invocation rule) keeps it finite.
+                    job = _submit(state, path, bundle, entry, stage, parent)
+                    submitted = True
+                    continue
                 break
             if job.get("status") == "failed":
                 continue
