@@ -45,14 +45,24 @@ python3 "$SKILL_DIR/scripts/scan_reference_repos.py" \
 The caller may repeat `--required-remote <url>` for a control/context repository that must
 be scanned even when it is absent from the registry and reference root. It may repeat
 `--priority-prefix <path>` to highlight durable paths such as task records, memory, or
-solution documents. Use `--branch-override <url>=<branch>` when such a repository's durable
-branch is not the default `main`-then-`master` selection. Keep those workspace-specific URLs,
+solution documents. Use `--branch-override <url>=<branch>` only when its durable branch differs
+from the advertised default or the default is ambiguous. Keep those workspace-specific URLs,
 branches, and prefixes in the automation, not in this generic Skill.
 
 The scanner unions physical repositories, explicit symlink targets, registered repositories,
 and required remotes; deduplicates HTTPS/SSH forms by normalized remote identity; compares a
-v3 or v4 checkpoint; and fetches missing objects only into `--cache-dir`. It never writes to
-the reference root. A nonzero exit, `failed > 0`, `registered_missing > 0`, or
+v3 or v4 checkpoint; and fetches missing objects only into `--cache-dir`. It uses an explicit
+branch override when configured, otherwise the repository's advertised default branch. If
+the remote reports only `HEAD` SHA, a unique branch-tip match identifies that branch; a
+tie can reuse the checkpoint branch only when its tip matches that same SHA, otherwise it
+fails closed. Only when no default or HEAD identity is available does it fall back to the
+prior checkpoint branch, then to a sole unambiguous branch. Multiple branches without a
+resolvable HEAD or checkpoint require an override. Do not ask downstream repositories to
+rename their branches to `main` or `master`.
+Inspect `branch_changed` and `branch_selection` when the selected branch changes; scanning
+one selected branch is not proof of coverage for every branch. An offline `origin/HEAD` may
+be stale, so offline `unchanged` is not proof of the remote's current default. The scanner
+never writes to the reference root. A nonzero exit, `failed > 0`, `registered_missing > 0`, or
 `required_missing > 0` is a coverage failure: do not advance the repository checkpoint.
 Report all five counts: registered, discovered, unique, scanned, and missing/failed.
 
@@ -180,7 +190,10 @@ While `running`, retain `phase` and `agent.runtime/model/reasoning_effort`; conf
 diagnostic evidence, not permission to launch a duplicate ingest.
 
 - `done`: require validation success and record `commit` plus `changed_files`; continue.
-- `failed`: technical failure. Do not audit and do not advance the source checkpoint.
+- `failed`: worker, runtime, or output-validation failure. Do not audit or advance the
+  source checkpoint. The writer may have already attempted one bounded, isolated repair of
+  curator formatting or provenance errors. Inspect the structured `repair` and `validation`
+  fields rather than blindly resubmitting the same evidence.
 - `needs-conversion`: durable intake result for an unsupported source format. Stop polling,
   do not audit or advance the checkpoint, and report that the evidence needs conversion.
   Convert it to a directly readable format, then submit that converted artifact as a new source.

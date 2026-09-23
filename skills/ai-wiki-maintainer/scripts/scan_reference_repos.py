@@ -185,28 +185,108 @@ def local_remote(path: Path) -> str:
     return run_git("config", "--get", "remote.origin.url", cwd=path)
 
 
-def remote_branch_head(remote: str, preferred: str | None = None) -> tuple[str, str]:
-    branches = list(dict.fromkeys([branch for branch in (preferred, "main", "master") if branch]))
-    output = run_git("ls-remote", remote, *(f"refs/heads/{branch}" for branch in branches))
-    refs: dict[str, str] = {}
+def remote_branch_head(
+    remote: str, checkpoint_branch: str | None = None, *, override_branch: str | None = None
+) -> tuple[str, str, str]:
+    def resolve(branch: str) -> str:
+        output = run_git("ls-remote", remote, f"refs/heads/{branch}")
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[1] == f"refs/heads/{branch}":
+                return fields[0]
+        return ""
+
+    if override_branch:
+        sha = resolve(override_branch)
+        if sha:
+            return override_branch, sha, "override"
+        raise ScanError(f"explicit branch {override_branch!r} does not exist on remote")
+
+    output = run_git("ls-remote", "--symref", remote, "HEAD")
+    default_branch: str | None = None
+    head_sha: str | None = None
     for line in output.splitlines():
         fields = line.split()
-        if len(fields) == 2:
-            refs[fields[1]] = fields[0]
-    for branch in branches:
-        sha = refs.get(f"refs/heads/{branch}")
+        if len(fields) == 3 and fields[0] == "ref:" and fields[2] == "HEAD" and fields[1].startswith("refs/heads/"):
+            default_branch = fields[1].removeprefix("refs/heads/")
+        elif len(fields) == 2 and fields[1] == "HEAD":
+            head_sha = fields[0]
+    if default_branch and head_sha:
+        return default_branch, head_sha, "remote_default"
+    if default_branch:
+        sha = resolve(default_branch)
         if sha:
-            return branch, sha
-    raise ScanError("remote has neither main nor master")
+            return default_branch, sha, "remote_default"
+
+    # A bare cache may have an unset HEAD. Its sole branch is still unambiguous;
+    # with a SHA-only HEAD, accept only a uniquely matching branch tip.
+    branches = []
+    for line in run_git("ls-remote", "--heads", remote).splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1].startswith("refs/heads/"):
+            branches.append((fields[1].removeprefix("refs/heads/"), fields[0]))
+    if head_sha:
+        matches = [(branch, sha) for branch, sha in branches if sha == head_sha]
+        if len(matches) == 1:
+            branch, sha = matches[0]
+            return branch, sha, "remote_head_sha"
+        if checkpoint_branch and len(matches) > 1:
+            for branch, sha in matches:
+                if branch == checkpoint_branch:
+                    return branch, sha, "checkpoint_head_tie"
+        raise ScanError("remote HEAD SHA has no unique matching branch; use --branch-override")
+
+    if checkpoint_branch:
+        sha = resolve(checkpoint_branch)
+        if sha:
+            return checkpoint_branch, sha, "checkpoint_fallback"
+    if len(branches) == 1:
+        branch, sha = branches[0]
+        return branch, sha, "sole_branch"
+    raise ScanError("remote default branch unavailable or ambiguous; use --branch-override")
 
 
-def local_branch_head(path: Path, preferred: str | None = None) -> tuple[str, str]:
-    for branch in dict.fromkeys([branch for branch in (preferred, "main", "master") if branch]):
+def local_branch_head(
+    path: Path, checkpoint_branch: str | None = None, *, override_branch: str | None = None
+) -> tuple[str, str, str]:
+    def resolve(branch: str) -> str:
         for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"):
             sha = run_git("rev-parse", "--verify", ref, cwd=path, check=False)
             if sha:
-                return branch, sha
-    raise ScanError("local repository has neither main nor master")
+                return sha
+        return ""
+
+    if override_branch:
+        sha = resolve(override_branch)
+        if sha:
+            return override_branch, sha, "override"
+        raise ScanError(f"explicit branch {override_branch!r} does not exist locally")
+
+    remote_head = run_git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", cwd=path, check=False)
+    if remote_head.startswith("refs/remotes/origin/"):
+        branch = remote_head.removeprefix("refs/remotes/origin/")
+        sha = resolve(branch)
+        if sha:
+            return branch, sha, "local_origin_head"
+
+    if checkpoint_branch:
+        sha = resolve(checkpoint_branch)
+        if sha:
+            return checkpoint_branch, sha, "checkpoint_fallback"
+
+    for prefix in ("refs/remotes/origin", "refs/heads"):
+        output = run_git("for-each-ref", "--format=%(refname) %(objectname)", prefix, cwd=path)
+        branches = []
+        for line in output.splitlines():
+            ref, _, sha = line.partition(" ")
+            if ref.startswith(f"{prefix}/") and ref != "refs/remotes/origin/HEAD" and sha:
+                branches.append((ref.removeprefix(f"{prefix}/"), sha))
+        if len(branches) == 1:
+            branch, sha = branches[0]
+            return branch, sha, "sole_branch"
+        if branches:
+            break
+    raise ScanError("local default branch unavailable or ambiguous; use --branch-override")
 
 
 def has_commit(git_dir: Path, sha: str) -> bool:
@@ -219,7 +299,8 @@ def has_commit(git_dir: Path, sha: str) -> bool:
 
 
 def prepare_object_repo(
-    *, local_path: Path | None, remote: str, branch: str, current: str, previous: str | None, cache: Path
+    *, local_path: Path | None, remote: str, branch: str, current: str,
+    previous: str | None, previous_branch: str | None, cache: Path
 ) -> Path:
     if local_path and has_commit(local_path, current) and (not previous or has_commit(local_path, previous)):
         return local_path
@@ -228,7 +309,13 @@ def prepare_object_repo(
         run_git("init", "--bare", str(cache))
     run_git("fetch", "--quiet", "--no-tags", "--force", remote, f"+refs/heads/{branch}:refs/heads/{branch}", cwd=cache)
     if previous and not has_commit(cache, previous):
-        run_git("fetch", "--quiet", "--no-tags", remote, previous, cwd=cache)
+        if previous_branch and previous_branch != branch:
+            run_git(
+                "fetch", "--quiet", "--no-tags", "--force", remote,
+                f"+refs/heads/{previous_branch}:refs/heads/{previous_branch}", cwd=cache, check=False,
+            )
+        if not has_commit(cache, previous):
+            run_git("fetch", "--quiet", "--no-tags", remote, previous, cwd=cache)
     if not has_commit(cache, current) or (previous and not has_commit(cache, previous)):
         raise ScanError("required commit objects are unavailable")
     return cache
@@ -362,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
         rid = repo_id(identity)
         previous_row = checkpoint_by_remote.get(identity, {})
         previous = previous_row.get("sha")
-        preferred_branch = branch_overrides.get(identity) or previous_row.get("branch")
+        previous_branch = previous_row.get("branch")
+        override_branch = branch_overrides.get(identity)
         local_path = Path(source["local_paths"][0]) if source["local_paths"] else None
         output_remote = display_remote(source["fetch_remote"])
         row: dict[str, Any] = {
@@ -372,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
             "sources": sorted(source["sources"]),
             "local_paths": sorted(source["local_paths"]),
             "previous_sha": previous,
+            "previous_branch": previous_branch,
         }
         try:
             if source.get("identity_error"):
@@ -379,10 +468,19 @@ def main(argv: list[str] | None = None) -> int:
             if args.offline:
                 if not local_path:
                     raise ScanError("registered/required repository has no local checkout in offline mode")
-                branch, current = local_branch_head(local_path, preferred_branch)
+                branch, current, selection = local_branch_head(
+                    local_path, previous_branch, override_branch=override_branch
+                )
             else:
-                branch, current = remote_branch_head(source["fetch_remote"], preferred_branch)
-            row.update({"branch": branch, "current_sha": current})
+                branch, current, selection = remote_branch_head(
+                    source["fetch_remote"], previous_branch, override_branch=override_branch
+                )
+            row.update({
+                "branch": branch,
+                "current_sha": current,
+                "branch_selection": selection,
+                "branch_changed": bool(previous_branch and branch != previous_branch),
+            })
             if current == previous:
                 row.update(
                     {
@@ -405,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
                     branch=branch,
                     current=current,
                     previous=previous,
+                    previous_branch=previous_branch,
                     cache=cache_root / f"{rid}.git",
                 )
                 changes = changed_paths(object_repo, previous, current)

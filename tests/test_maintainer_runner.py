@@ -186,6 +186,49 @@ def test_frozen_source_tampering_is_blocked(setup):
     assert not service.submitted
 
 
+@pytest.mark.parametrize("suffix", [".md", ".json", ""])
+def test_new_frozen_source_uses_short_basename_and_preserves_extension(setup, tmp_path, suffix):
+    service, state, path, _add = setup
+    source = tmp_path / f"upstream{suffix}"
+    source.write_bytes(b"source evidence")
+    sha = hashlib.sha256(b"source evidence").hexdigest()
+
+    runner.add_sources(state, {"sources": [{"identity": "repo", "path": str(source)}]},
+                       path.parent, "kb")
+
+    frozen = Path(state["sources"][0]["path"])
+    assert frozen == path.parent / "sources" / sha / f"evidence{suffix}"
+    assert frozen.read_bytes() == b"source evidence"
+    assert state["sources"][0]["sha256"] == sha
+    assert runner.run_sources(state, path, "kb", poll=0)["done"] == 1
+    assert service.submitted == [b"source evidence"]
+
+
+def test_existing_frozen_path_is_not_migrated_and_identities_stay_separate(setup, tmp_path):
+    service, state, path, _add = setup
+    data = b"same evidence"
+    sha = hashlib.sha256(data).hexdigest()
+    legacy = path.parent / "sources" / f"{sha}.md"
+    legacy.parent.mkdir()
+    legacy.write_bytes(data)
+    state["sources"].append({"identity": "first", "sha256": sha, "path": str(legacy),
+                             "ingest": [], "audit": [], "status": "pending"})
+    source = tmp_path / "new.md"
+    source.write_bytes(data)
+
+    runner.add_sources(state, {"sources": [
+        {"identity": "first", "path": str(source)},
+        {"identity": "second", "path": str(source)},
+    ]}, path.parent, "kb")
+
+    assert len(state["sources"]) == 2
+    assert Path(state["sources"][0]["path"]) == legacy
+    assert Path(state["sources"][1]["path"]) == path.parent / "sources" / sha / "evidence.md"
+    assert [row["identity"] for row in state["sources"]] == ["first", "second"]
+    assert runner.run_sources(state, path, "kb", poll=0)["done"] == 2
+    assert service.submitted == [data, data]
+
+
 def test_import_prior_receipts_and_audit_gap(setup):
     service, state, path, add = setup
     sha = hashlib.sha256(b"source").hexdigest()

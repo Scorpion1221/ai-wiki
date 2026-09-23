@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +38,7 @@ def make_remote(
     git(tmp_path, "init", "--bare", str(remote))
     git(work, "remote", "add", "origin", str(remote))
     git(work, "push", "-u", "origin", branch)
+    git(remote, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
     return work, remote, git(work, "rev-parse", "HEAD")
 
 
@@ -149,6 +153,279 @@ def test_scanner_reports_registered_repo_missing_in_offline_mode(tmp_path: Path)
     assert report["counts"]["failed"] == 1
     assert report["counts"]["registered_missing"] == 1
     assert report["repos"][0]["state"] == "failed"
+
+
+def test_scanner_uses_remote_default_develop_before_main(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, sha = make_remote(tmp_path, "develop-default", {"README.md": "one\n"}, branch="develop")
+    git(work, "branch", "main")
+    git(work, "push", "origin", "main")
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({"repos": [{"remote_url": str(remote), "branch": "main", "sha": sha}]}),
+        encoding="utf-8",
+    )
+
+    result = scan(
+        tmp_path, "--root", str(root), "--required-remote", str(remote),
+        "--checkpoint-json", str(checkpoint),
+        "--cache-dir", str(tmp_path / "cache"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["repos"][0]["branch"] == "develop"
+    assert report["repos"][0]["previous_branch"] == "main"
+    assert report["repos"][0]["branch_changed"] is True
+    assert report["repos"][0]["branch_selection"] == "remote_default"
+    assert report["repos"][0]["state"] == "unchanged"
+    assert report["counts"]["required_missing"] == 0
+
+
+def test_scanner_follows_changed_default_branch_unless_explicitly_overridden(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, sha = make_remote(tmp_path, "preferred", {"README.md": "one\n"}, branch="main")
+    git(work, "switch", "-c", "develop")
+    (work / "README.md").write_text("two\n", encoding="utf-8")
+    git(work, "commit", "-am", "update develop")
+    git(work, "push", "-u", "origin", "develop")
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/develop")
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({"repos": [{"remote_url": str(remote), "branch": "main", "sha": sha}]}),
+        encoding="utf-8",
+    )
+    base_args = [
+        "--root", str(root), "--required-remote", str(remote),
+        "--checkpoint-json", str(checkpoint), "--cache-dir", str(tmp_path / "cache"),
+    ]
+
+    checkpoint_result = scan(tmp_path, *base_args)
+    assert checkpoint_result.returncode == 0, checkpoint_result.stdout + checkpoint_result.stderr
+    switched = json.loads(checkpoint_result.stdout)["repos"][0]
+    assert switched["branch"] == "develop"
+    assert switched["previous_branch"] == "main"
+    assert switched["branch_changed"] is True
+    assert switched["branch_selection"] == "remote_default"
+    assert switched["state"] == "changed"
+    assert switched["change_count"] == 1
+
+    override_result = scan(tmp_path, *base_args, "--branch-override", f"{remote}=main")
+    assert override_result.returncode == 0, override_result.stdout + override_result.stderr
+    overridden = json.loads(override_result.stdout)["repos"][0]
+    assert overridden["branch"] == "main"
+    assert overridden["branch_changed"] is False
+    assert overridden["branch_selection"] == "override"
+
+    missing_result = scan(tmp_path, *base_args, "--branch-override", f"{remote}=missing")
+    assert missing_result.returncode == 2
+    missing = json.loads(missing_result.stdout)
+    assert missing["counts"]["required_missing"] == 1
+    assert "explicit branch 'missing' does not exist" in missing["repos"][0]["error"]
+
+    git(work, "push", "origin", "--delete", "main")
+    stale_checkpoint_result = scan(tmp_path, *base_args)
+    assert stale_checkpoint_result.returncode == 0, stale_checkpoint_result.stdout + stale_checkpoint_result.stderr
+    assert json.loads(stale_checkpoint_result.stdout)["repos"][0]["branch"] == "develop"
+
+
+def test_scanner_fetches_old_branch_ref_before_sha_on_default_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, _ = make_remote(tmp_path, "diverged", {"README.md": "base\n"}, branch="main")
+    git(work, "switch", "-c", "develop")
+    (work / "README.md").write_text("develop\n", encoding="utf-8")
+    git(work, "commit", "-am", "develop change")
+    git(work, "push", "-u", "origin", "develop")
+    git(work, "switch", "main")
+    (work / "README.md").write_text("main\n", encoding="utf-8")
+    git(work, "commit", "-am", "main change")
+    git(work, "push", "origin", "main")
+    previous = git(work, "rev-parse", "HEAD")
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/develop")
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({"repos": [{"remote_url": str(remote), "branch": "main", "sha": previous}]}),
+        encoding="utf-8",
+    )
+
+    # Simulate a server that rejects fetch-by-SHA while still advertising old main.
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "fetch" ]; then for arg do [ "$arg" = "{previous}" ] && exit 88; done; fi\n'
+        f"exec {shlex.quote(real_git)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    result = scan(
+        tmp_path, "--root", str(root), "--required-remote", str(remote),
+        "--checkpoint-json", str(checkpoint), "--cache-dir", str(tmp_path / "cache"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    row = json.loads(result.stdout)["repos"][0]
+    assert row["branch"] == "develop"
+    assert row["branch_changed"] is True
+    assert row["state"] == "changed"
+    assert row["change_count"] == 1
+
+
+def test_scanner_matches_sha_only_remote_head_to_unique_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, previous = make_remote(tmp_path, "sha-only-head", {"README.md": "main\n"}, branch="main")
+    git(work, "switch", "-c", "develop")
+    (work / "README.md").write_text("develop\n", encoding="utf-8")
+    git(work, "commit", "-am", "develop change")
+    git(work, "push", "-u", "origin", "develop")
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/develop")
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({"repos": [{"remote_url": str(remote), "branch": "main", "sha": previous}]}),
+        encoding="utf-8",
+    )
+
+    # Model a server that advertises HEAD's SHA but omits its symref target.
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "ls-remote" ] && [ "$2" = "--symref" ]; then\n'
+        "  shift 2\n"
+        f'  exec {shlex.quote(real_git)} ls-remote "$@"\n'
+        "fi\n"
+        f"exec {shlex.quote(real_git)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    args = [
+        "--root", str(root), "--required-remote", str(remote),
+        "--checkpoint-json", str(checkpoint), "--cache-dir", str(tmp_path / "cache"),
+    ]
+
+    unique_result = scan(tmp_path, *args)
+    assert unique_result.returncode == 0, unique_result.stdout + unique_result.stderr
+    row = json.loads(unique_result.stdout)["repos"][0]
+    assert row["branch"] == "develop"
+    assert row["branch_changed"] is True
+    assert row["branch_selection"] == "remote_head_sha"
+
+    git(work, "branch", "other")
+    git(work, "push", "origin", "other")
+    ambiguous_result = scan(tmp_path, *args)
+    assert ambiguous_result.returncode == 2
+    ambiguous = json.loads(ambiguous_result.stdout)
+    assert ambiguous["counts"]["required_missing"] == 1
+    assert "HEAD SHA has no unique matching branch" in ambiguous["repos"][0]["error"]
+    no_checkpoint_result = scan(
+        tmp_path, "--root", str(root), "--required-remote", str(remote),
+        "--cache-dir", str(tmp_path / "cache"),
+    )
+    assert no_checkpoint_result.returncode == 2
+
+    # Same commit on both tips has identical content; a matching checkpoint
+    # retains branch identity without inventing which branch is the default.
+    current = git(work, "rev-parse", "develop")
+    checkpoint.write_text(
+        json.dumps({"repos": [{"remote_url": str(remote), "branch": "develop", "sha": current}]}),
+        encoding="utf-8",
+    )
+    tied_result = scan(tmp_path, *args)
+    assert tied_result.returncode == 0, tied_result.stdout + tied_result.stderr
+    tied = json.loads(tied_result.stdout)["repos"][0]
+    assert tied["branch"] == "develop"
+    assert tied["branch_selection"] == "checkpoint_head_tie"
+    assert tied["branch_changed"] is False
+    assert tied["state"] == "unchanged"
+
+
+def test_scanner_only_falls_back_to_unique_branch_when_remote_head_is_unavailable(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, _ = make_remote(tmp_path, "headless", {"README.md": "one\n"}, branch="develop")
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/nonexistent")
+    args = ["--root", str(root), "--required-remote", str(remote), "--cache-dir", str(tmp_path / "cache")]
+
+    unique_result = scan(tmp_path, *args)
+    assert unique_result.returncode == 0, unique_result.stdout + unique_result.stderr
+    assert json.loads(unique_result.stdout)["repos"][0]["branch"] == "develop"
+
+    git(work, "branch", "other")
+    git(work, "push", "origin", "other")
+    ambiguous_result = scan(tmp_path, *args)
+    assert ambiguous_result.returncode == 2
+    ambiguous = json.loads(ambiguous_result.stdout)
+    assert ambiguous["counts"]["failed"] == 1
+    assert ambiguous["counts"]["required_missing"] == 1
+    assert "default branch unavailable or ambiguous" in ambiguous["repos"][0]["error"]
+
+    checkpoint = tmp_path / "checkpoint.json"
+    current = git(work, "rev-parse", "HEAD")
+    checkpoint.write_text(
+        json.dumps({"repos": [{"remote_url": str(remote), "branch": "develop", "sha": current}]}),
+        encoding="utf-8",
+    )
+    fallback_result = scan(tmp_path, *args, "--checkpoint-json", str(checkpoint))
+    assert fallback_result.returncode == 0, fallback_result.stdout + fallback_result.stderr
+    fallback = json.loads(fallback_result.stdout)["repos"][0]
+    assert fallback["branch"] == "develop"
+    assert fallback["branch_selection"] == "checkpoint_fallback"
+
+
+def test_scanner_offline_accepts_unique_develop_branch(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, _, _ = make_remote(tmp_path, "offline-develop", {"README.md": "one\n"}, branch="develop")
+    (root / "repo").symlink_to(work, target_is_directory=True)
+
+    result = scan(tmp_path, "--root", str(root), "--cache-dir", str(tmp_path / "cache"), "--offline")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["repos"][0]["branch"] == "develop"
+
+
+def test_scanner_offline_origin_head_supersedes_checkpoint_branch(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, sha = make_remote(tmp_path, "offline-switch", {"README.md": "one\n"}, branch="main")
+    (root / "repo").symlink_to(work, target_is_directory=True)
+    git(work, "switch", "-c", "develop")
+    git(work, "push", "-u", "origin", "develop")
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/develop")
+    git(work, "remote", "set-head", "origin", "-a")
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({"repos": [{"remote_url": str(remote), "branch": "main", "sha": sha}]}),
+        encoding="utf-8",
+    )
+
+    result = scan(
+        tmp_path, "--root", str(root), "--checkpoint-json", str(checkpoint),
+        "--cache-dir", str(tmp_path / "cache"), "--offline",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    row = json.loads(result.stdout)["repos"][0]
+    assert row["branch"] == "develop"
+    assert row["branch_changed"] is True
+    assert row["branch_selection"] == "local_origin_head"
 
 
 def test_scanner_deduplicates_ssh_and_https_remote_forms(tmp_path: Path) -> None:
