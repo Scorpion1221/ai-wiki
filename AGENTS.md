@@ -107,16 +107,19 @@ run as `done`, `pending` (a later run resumes it after its cooldown), `needs_rep
 cap reached, or a non-retryable failure; it never blocks other sources), or `superseded` (a
 newer version of the same identity replaced an unfinished one). Exit codes: `0` everything is
 done or superseded; `1` work is pending, the runner lock is held, or a read failed (see
-`warnings`), which is normal; `3` some entries need repair while other work ran; `2` usage or
-state error. Retries follow the failed job's `failure.class`: capacity cools down for an hour
-and stops the batch; transient, timeout, interrupted, conflict and model_output get 3 attempts
-and internal 2; auth, disk and input need repair. Omit `--manifest` to resume only;
-`--retry-now` skips cooldowns once, never caps or rollback gates; `--status` reads the saved
-state offline. The CLI adds no scheduler.
+`warnings`), which is normal; `3` at least one ledger entry needs repair, including entries
+left from earlier runs (this outranks `1`); `2` usage or state error. Retries follow the failed
+job's `failure.class`: capacity cools down for an hour, and its first three consecutive
+failures of a stage also stop the batch; the failed non-capacity attempts of a stage, whatever
+their class, are capped at 3 when the latest is transient, timeout, interrupted, conflict or
+model_output and at 2 when it is internal; auth, disk and input need repair. Omit
+`--manifest` to resume only; `--retry-now` skips cooldowns once, never caps or rollback gates;
+`--status` reads the saved state offline. The CLI adds no scheduler.
 
 Files are stored verbatim. Supported text/code/image sources are curated; PDF and other
 opaque formats remain `needs-conversion` rather than being guessed. Identical submissions and
-repeated audits are successful idempotent no-ops.
+repeated audits are successful idempotent no-ops, except the one re-review after a verdict slip
+(below) and a new attempt after a failed job.
 
 Ingest completion is not verification. Interpret the audit terminal result:
 
@@ -134,10 +137,13 @@ Ingest completion is not verification. Interpret the audit terminal result:
 
 A collection cursor is decoupled from completion: advance it once every selected source is
 frozen into the `maintain` ledger (exit `0`, `1` or `3` with each manifest source in the
-summary; exit `2` or an `{"error"}` result froze nothing), not when its audit ends.
-Pending and needs-repair sources stay in the ledger and are retried later; they never hold the
-cursor back. A source is complete only when its audit job is `done` (`passed` or
-`needs_attention`), never after failure, timeout, or API error. The worker owns validation,
+summary; `maintain --import-only` freezes without submitting, so the cursor need not wait for
+a long run), not when its audit ends. Exit `2` or an `{"error"}` result never counts, even if
+some sources were frozen before the error. Pending sources are retried after their cooldown;
+needs-repair sources are re-checked every run but get no cooldown retry (they recover through a
+newer version, a new writer build, or an imported receipt). Neither holds the cursor back. A
+source is complete only when its audit job is `done` (`passed` or `needs_attention`), never
+after failure, timeout, or API error. The worker owns validation,
 commit and push. A real Git conflict aborts and retries from fresh remote state rather
 than running an LLM conflict resolver. A public read-only mirror may lag the writer, so
 record mirror visibility separately rather than assuming a push is already visible.
@@ -152,8 +158,9 @@ checkpoint gate; query-side evidence gates still apply to answers from returned 
 A deterministic watchdog ([docs/maintenance-watchdog.md](docs/maintenance-watchdog.md))
 pages on a stale checkpoint, stuck runs, `needs_repair` or long-pending ledger entries
 (`ledger_needs_repair`, `ledger_pending_stale`), and writer job failures with no later
-attempt (`job_failed`, for up to 7 days, so retry or deliberately drop a failed source within
-the week). Agents must not add their own monitoring.
+attempt (`job_failed`, for up to 7 days, so retry a failed out-of-band job within the week or
+record why it is abandoned). `ledger_needs_repair` never expires: `maintain` has no drop or
+reset, so the alert lasts until the entry recovers. Agents must not add their own monitoring.
 
 ## 5. Skill source of truth
 

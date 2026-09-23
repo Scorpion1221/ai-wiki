@@ -493,7 +493,8 @@ def main(argv=None) -> int:
     p_maintain.add_argument("--poll-seconds", type=_limit, default=15, help="job poll interval (default: 15)")
     p_maintain.add_argument("--wait-seconds", type=_positive, default=3600,
                             help="maximum wait per stage; timeout preserves job ID (default: 3600)")
-    p_maintain.add_argument("--json", action="store_true", help="emit complete recovery details as JSON")
+    p_maintain.add_argument("--json", action="store_true",
+                            help="emit the run summary as JSON (receipts stay in <state-dir>/state.json)")
 
     ap.command_path = _command_path(args)
     a = ap.parse_args(args)

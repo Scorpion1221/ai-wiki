@@ -27,7 +27,8 @@ test -f "$SKILL_DIR/scripts/checkpoint.py"
 `ai-wiki -b "$bundle" health --json` must report `"compatible": true` (`client_version` and
 `service_version` share major.minor) and `"okf_version": "0.2"`. Otherwise run `uv tool install
 --force git+https://github.com/Scorpion1221/ai-wiki && hash -r` and recheck. Still failing: stop
-(no scan, `maintain`, build or write). Never hard-code a release number.
+(no scan, `maintain`, build or write) and report it; a `health --json` without `compatible`
+means GitHub `main` still ships a client older than this skill. Never hard-code a release number.
 
 ## 2. Collection pipeline
 
@@ -35,11 +36,18 @@ test -f "$SKILL_DIR/scripts/checkpoint.py"
 "$autopilot" --cache-dir "$run_dir/multica" --output "$run_dir/find.json"` [`--seed-issue ID`].
 
 - `0` found (`issue_id`, `completed_at`, `issues_cursor`, `stale_repos`, `checkpoint`).
-- `1` all run issues read, none holds a checkpoint. Bootstrap: scan without `--checkpoint-json`,
-  run `issue_delta.py` with `--since-updated-at`/`--since-id`, build without `--previous`.
+- `1` all run issues read, none holds a valid checkpoint. A non-empty `invalid` list means a
+  checkpoint failed validation: stop and report it, never bootstrap over it. With `invalid`
+  empty, bootstrap: scan without `--checkpoint-json`; run `issue_delta.py --since-updated-at T
+  --since-id ID` (both required: `T` is the RFC 3339 start of issue history named in the
+  automation prompt, and if it names none, report that and do not bootstrap; `ID` only breaks
+  ties at `T`, so any non-empty value such as `0` works); build with `--issues-cursor` on that
+  delta and without `--previous` (without a cursor, `build` exits `2`).
 - `2` stop, never bootstrap (Multica failed, or issues were unreadable and no v4 was found).
 - `3` a v4 was found but some issues were unreadable, so it may not be the newest. Retry once;
-  if `3` persists, do not build or write a checkpoint this run.
+  if `3` persists, do not build or write a checkpoint this run and report the `unreadable` issue
+  ids. `find` cannot skip an issue, so a permanently unreadable (e.g. deleted) run issue blocks
+  every later checkpoint until a human restores it.
 
 **2.2 Scan the reference repositories:**
 
@@ -75,11 +83,13 @@ python3 "$SKILL_DIR/scripts/issue_delta.py" --autopilot "$autopilot" \
 ```
 
 Exit `0` ok. Exit `2` (Multica failed or the listing is not provably complete): build without
-`--issues-cursor` to keep the issues cursor; repos still advance. The current issue, autopilot
-run issues and `ai_wiki_*` metadata issues are excluded. `deferred: true` candidates return next
-run, so deduplicate comments by `id`. Shortlist with `jq` over `candidates`, then read threads
-from `comments_file`. Cursors are RFC 3339 (maybe with microseconds): never string-compare them,
-and never build from a `--since-updated-at` delta.
+`--issues-cursor` to keep the issues cursor; repos still advance. At bootstrap there is no
+cursor to keep, so do not build. The current issue, autopilot run issues and `ai_wiki_*`
+metadata issues are excluded. `deferred: true` candidates return next run, so deduplicate
+comments by `id`. Shortlist with `jq` over `candidates`, then read threads from
+`comments_file`. Cursors are RFC 3339 (maybe with microseconds): never string-compare them.
+Once `find` found a checkpoint, the delta must start at its cursor (`--cursor-json`): never
+build from a `--since-updated-at` delta when passing `--previous` (bootstrap is the only use).
 
 **2.4 Select durable knowledge** (the only judgment step):
 
@@ -92,12 +102,14 @@ and never build from a `--since-updated-at` delta.
   alone writes the manifest. If dispatch is unavailable, note it once and work serially.
 - Write evidence into `$run_dir`, then always write `$run_dir/sources.json` (even
   `{"sources":[]}`): `{"sources":[{"identity":"<repo-or-topic/window>","path":"/abs/file.md"}]}`.
-  Order is version order; optional `sha256`, and `ingest_job`/`audit_job` for out-of-band jobs.
+  Order is version order. Add each file's `sha256` (`maintain` refuses a mismatch, and the
+  checkpoint gate compares it); `ingest_job`/`audit_job` import out-of-band jobs.
 - A newer version supersedes an unfinished older one of the same identity, so an identity names
   a topic or window whose newer bytes include the older; independent deltas get distinct ones.
 
-**2.5 Maintain:** `ai-wiki -b "$bundle" maintain --manifest "$run_dir/sources.json" --state-dir
-"$state_dir" --audit-pending --json > "$run_dir/maintain.json"` (§3).
+**2.5 Freeze:** `ai-wiki -b "$bundle" maintain --manifest "$run_dir/sources.json" --state-dir
+"$state_dir" --import-only --json > "$run_dir/frozen.json"` freezes every source into the ledger
+and returns without submitting anything, so the checkpoint (§2.6) never waits on ingest or audit.
 
 **2.6 Build and write:**
 
@@ -109,26 +121,35 @@ python3 "$SKILL_DIR/scripts/checkpoint.py" write --issue "$MULTICA_ISSUE_ID" --f
 ```
 
 Each `baseline_required` repo needs `--baseline-done` (its current durable context was reviewed
-and ingested or found not wiki-worthy) or `--baseline-waive` with a reason; `REPO` is a `repo_id`
-or unique `name`. Always pass `--previous` when `find` found one. `build` exits `2` and writes
-nothing if the scan is not a full report or not diffed against `--previous`, a repo is dropped,
-the cursor would move back, the delta starts after the previous cursor, `completed_at` is not
-later, or a baseline decision is missing; it records `baseline {sha, at, disposition, reason}`.
-`write` reads the v4 back and compares: only exit `0` with `verified: true` counts. Never
-hand-assemble or edit checkpoint JSON.
+and its sources frozen by §2.5, audited or not, or it was found not wiki-worthy) or
+`--baseline-waive` with a reason; `REPO` is a `repo_id` or unique `name`. Always pass
+`--previous` when `find` found one. `build` exits `2` and writes nothing if the scan is not a
+full report or not diffed against `--previous`, a repo is dropped, the cursor would move back,
+the delta starts after the previous cursor, `completed_at` is not later, or a baseline decision
+is missing; it records `baseline {sha, at, disposition, reason}`. `write` reads the v4 back and
+compares: only exit `0` with `verified: true` counts. Never hand-assemble or edit checkpoint JSON.
+
+**2.7 Maintain** (last, so a long run never holds back §2.6): `ai-wiki -b "$bundle" maintain
+--state-dir "$state_dir" --audit-pending --json > "$run_dir/maintain.json"` (§3) resumes every
+unfinished source and can poll `--wait-seconds` per stage per source. If it is cut off, the
+checkpoint already holds and the next run resumes the ledger.
 
 ### Checkpoint rule: the cursor is decoupled from completion
 
 Write the collection checkpoint (repos and issues cursor) once all of these hold:
 
-1. Every selected source is frozen into the ledger: `maintain` exited `0`, `1` or `3`, and its
-   `sources` list each manifest identity + sha256. An exit-1 `{"error": …}` froze nothing.
+1. Every selected source is frozen into the ledger: the §2.5 run exited `0`, `1` or `3`, and
+   its `sources` list each manifest identity with that file's sha256. An `{"error": …}` result
+   never counts (exit `1`: nothing was frozen; exit `2`: some sources may have been, and the
+   next run dedupes them).
 2. The scanner exited `0` or `3`.
 3. `issue_delta.py` exited `0`, or you kept the issues cursor by omitting `--issues-cursor`.
 4. `build` exited `0`.
 
 `pending` and `needs_repair` sources stay in the ledger for later runs and never hold the cursor
-back. Any exit `2` (any step) or a persisting `find` exit `3` leaves the checkpoint unchanged.
+back. An exit `2` from `find`, the scanner, §2.5, `build` or `write`, or a persisting `find`
+exit `3`, leaves the checkpoint unchanged; an `issue_delta.py` exit `2` only keeps the issues
+cursor (item 3). A §2.7 exit `2` is reported but cannot undo a written checkpoint.
 
 ## 3. `ai-wiki maintain`
 
@@ -140,12 +161,15 @@ receipts atomically, locks out overlapping runners, and owns submission, polling
 - Statuses: `done` (ingest and audit receipts complete); `pending` (retried later, `retry_at`
   while cooling down); `needs_repair` (cap or non-retryable; never blocks other identities);
   `superseded` (a newer version replaced it; receipts kept).
-- Exit: `0` all done/superseded. `1` pending, runner lock held, or a failed read (`warnings`):
-  normal, carry over. `3` some need repair while other work ran: report them. `2` fatal.
+- Exit: `0` all done/superseded. `1` pending (cooling down, past the poll deadline, blocked
+  behind an older version, or awaiting a re-POST), runner lock held, or a failed read
+  (`warnings`): normal, carry over. `3` at least one ledger entry is `needs_repair`, including
+  entries left from earlier runs; it outranks `1`: report them. `2` fatal.
 - One new model attempt per stage per source per run, only after `phase: rolled_back`. Cooldown
   is `failure.retry_after_s` (capacity 1 h, interrupted 60 s, others 5 min); no sleeping.
-- Caps on failed non-capacity attempts per source and stage: 3 (transient, timeout, interrupted,
-  conflict, model_output), 2 (internal). Directly `needs_repair`: auth, disk, input, unconfirmed
+- Caps: every failed non-capacity attempt of a source and stage counts, whatever its class,
+  against the cap of the latest failure's class: 3 (transient, timeout, interrupted, conflict,
+  model_output), 2 (internal). Directly `needs_repair`: auth, disk, input, unconfirmed
   rollback, needs-conversion, rejected receipt, 4xx other than 429/"in progress".
 - Capacity is uncapped: the first three consecutive capacity failures of a stage set
   `writer_retry` and stop the batch until it expires; later ones cool down only that entry.
@@ -160,9 +184,12 @@ receipts atomically, locks out overlapping runners, and owns submission, polling
   same run (at most two slips per parent, as on the writer); a second slip stands.
 - `--audit-pending` adopts up to 20 audit-less ingests older than 24 h as `pending-audit:<id>`;
   report the rest from `ai-wiki jobs --pending-audit --json` (`total`, `truncated`, `unscoped`).
-- `needs_repair` recovers through a newer version, a deployed fix with a new build, or an
-  imported receipt: `--import-only` (needs `--manifest` with `ingest_job`/`audit_job`) freezes
-  and imports without submitting. There is no reset.
+- `needs_repair` is re-checked every run but has no cooldown retry, and keeps exit `3` (and the
+  watchdog page) until it recovers through: a newer version of its identity, only while every
+  ingest attempt is rolled back or needs-conversion (never after a done ingest, e.g. an audit at
+  its cap or a rejected receipt); the extra attempt for a new build; or an imported receipt.
+  `--import-only` (needs `--manifest`; imports any `ingest_job`/`audit_job`) freezes and imports
+  without submitting. There is no reset or drop.
 - `--status` reads the saved summary offline (no network or lock): counts, `writer_retry`,
   `warnings`, `sources[]` (`identity`, `sha256`, `status`, `error`, `action`, `retry_at`).
 
@@ -177,8 +204,10 @@ concepts stable but unverified: a business result, retried only with new evidenc
 verdict-slip rule). The scope is the parent ingest, not the bundle.
 
 `job.verdict` is `{status: valid|missing|invalid, verified, unverified, corrected,
-unknown_paths?}`; `audit.reason` appears only for a missing or invalid verdict, a format slip
-rather than an evidence judgment. Failed jobs carry `failure {class, retryable, retry_after_s,
+unknown_paths?, reason?}` (`reason` explains an invalid verdict); it is absent from
+`no_concepts_to_audit` audits and from audits that failed before a verdict was read.
+`audit.reason` appears only for a missing or invalid verdict, a format slip rather than an
+evidence judgment. Failed jobs carry `failure {class, retryable, retry_after_s,
 stage, detail}`; jobs carry `service {version, build}` and, after an agent error or timeout,
 a redacted `agent.output_tail`.
 
@@ -201,7 +230,8 @@ mirror visibility as `pending`/`unknown`. Query-side evidence gates still apply 
 - Do not edit concepts, `SCHEMA.md`, indexes, logs, sources or bundle Git; no `git commit`,
   `git push` or conflict resolution. Do not manufacture `verified`, change `status`, or extend
   `stale_after`. Do not reinterpret the auditor's bounded claims or act on optimistic prose.
-- Do not hand-edit `state.json` (archive it) or checkpoint JSON; do not poll or resubmit jobs.
+- Do not edit, move or delete `state.json` (read it, and copy it into the run report) or
+  checkpoint JSON; do not poll or resubmit jobs.
 - A deterministic watchdog (`docs/maintenance-watchdog.md`) pages on checkpoint age, stuck runs,
   pending/needs_repair ledger entries and unretried writer failures: add no monitoring of your own.
 
@@ -214,7 +244,12 @@ repos       scanner exit, counts, warnings, stale repos with stale_since/last_er
 baseline    each baseline_required repo: done | waived (reason)
 issues      issue_delta exit, candidates, deferred, shortlist
 sources     identity: status, ingest/audit ids, audit.status, verified/unverified/corrected, repairs
-ledger      maintain exit, status counts, writer_retry, warnings, pending-audit backlog
+ledger      freeze and maintain exits, status counts, writer_retry, warnings, pending-audit backlog
 ```
+
+`maintain --json` rows carry only `identity`, `sha256`, `status`, `error`, `action` and
+`retry_at`. Read the rest from `$state_dir/state.json`: each source's last `ingest[]` and
+`audit[]` receipt (`id`, `audit.status`, the three concept lists, `deterministic_repairs`), and
+`pending_audit_discovery` (`total`, `truncated`, `unscoped`) for the backlog.
 
 Alert only on new failures, new repairs or recoveries; repeated failures stay in the report.

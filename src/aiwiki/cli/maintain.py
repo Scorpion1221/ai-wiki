@@ -2,7 +2,8 @@
 """Resume a source manifest through the installed ai-wiki CLI. Never edit a bundle.
 
 The state directory is durable, single-writer orchestration state, NOT an OKF bundle or
-reference repo. Reuse it across daily runs; archive state.json with the run report.
+reference repo. Reuse it across daily runs; archive a copy of state.json with the run report
+and never move, delete or edit the original.
 
 Each run leaves every entry in one status:
 

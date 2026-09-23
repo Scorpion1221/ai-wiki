@@ -208,8 +208,9 @@ been reassigned away from the agent. On 2026-09-23 a run made 6 calls and finish
   running or done. A failure that nobody retries keeps alerting for
   `--unresolved-failure-hours` (7 days), well past the 24-hour listing window and the
   ledger's 48-hour `ledger_pending_stale` alert for the same source. After that the writer
-  stops reporting it. If nothing else is alerting, that sends a recovery message, so retry or
-  deliberately drop the source within the week.
+  stops reporting it. If nothing else is alerting, that sends a recovery message, so retry the
+  source within the week or record why it is abandoned. A `maintain` ledger entry cannot be
+  dropped: a `needs_repair` one keeps its `ledger_needs_repair` alert until it recovers.
 
 ## Historical replay
 

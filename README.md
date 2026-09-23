@@ -102,8 +102,9 @@ search/grep/log output includes `shown`, `total`, and `truncated` so callers can
 bounded response for a complete result set.
 
 An ingest is not verification. New/changed concepts are audited separately; a completed
-audit is either `passed` or `needs_attention`. The latter is a valid, non-retryable outcome
-that leaves an explicitly bounded durable concept unverified. A completed audit never leaves
+audit is either `passed` or `needs_attention`. The latter is a valid outcome that leaves an
+explicitly bounded durable concept unverified; it is not retried without new evidence, except
+the single re-review after a verdict slip described below. A completed audit never leaves
 a concept in the transient `draft` state: `passed` is stable and currently verified;
 `needs_attention` is stable/deprecated but unverified. Only technical/validation/Git
 failures produce a failed audit job. If ingest changed no concept files, audit returns an
@@ -117,8 +118,9 @@ edits and frontmatter spilled into a body are discarded; each repair is recorded
 with `audit.reason: verdict_missing`/`verdict_invalid`, and one more audit of that ingest is
 allowed.
 Repeating `audit` reuses an audit attempt while it is `queued`, `running`, or successfully
-`done`. A `failed` attempt remains available for diagnosis, but a subsequent call creates
-and queues a new attempt; callers must bound technical retries.
+`done`, except that the first `done` attempt with a verdict slip is not reused: the next call
+queues the one allowed re-review. A `failed` attempt remains available for diagnosis, but a
+subsequent call creates and queues a new attempt; callers must bound technical retries.
 
 A source's durable audit Job is its completion receipt: `done`, successful validation,
 `passed`/`needs_attention`, and the successful Git result when applicable. The daily collection
@@ -157,7 +159,9 @@ python3 scripts/sync_skills.py --check --dest /path/to/.agents/skills
 The sync preserves a platform-managed `multica-metadata.json` but replaces every other
 file in these skill directories, so stale bundled scripts cannot silently override the
 repository version. Publish the same directories to Multica and compare them against this
-check before enabling its Maintainer automation.
+check before enabling its Maintainer automation. Sync `ai-wiki-maintainer` only after its
+release is on GitHub `main` and deployed to the writer and read mirror: its preflight needs
+`compatible` from `ai-wiki health --json`, and reinstalling an older client cannot supply it.
 
 The CLI is non-interactive: usage/API failures are structured on stdout with exit code 2/1, and destructive `bundle rm` requires `--yes`. Bare `-v`, `-V`, and `--version` probes return only the version.
 
@@ -215,8 +219,10 @@ To use an existing API wrapper instead, replace only the `agent` object:
   | `repair_timeout_s` | `AIWIKI_AGENT_REPAIR_TIMEOUT_S` | `600` | bounded curation repair pass, seconds |
 
   Timeouts must be integers from 60 to 7200; any other value stops the worker at startup.
-  One ingest can take up to `timeout_s + repair_timeout_s` (2100 s by default), which the
-  `maintain` default `--wait-seconds 3600` covers.
+  One ingest's agent passes can take up to `timeout_s + repair_timeout_s` (2100 s by default),
+  within the `maintain` default `--wait-seconds 3600`. That wait also counts time queued behind
+  other jobs on the serial worker and Git/validation time, so it can run out; the source then
+  stays `pending` ("poll deadline reached") and the next run resumes the same job.
 - `ai-wiki config set` and `bundle` selection preserve `agent`. `config show` remains a
   connection-only view. On a writer, `ai-wiki health --json` exposes the **running server's**
   `writer_agent` (`runtime`, `bin`, `model`, `reasoning_effort`); jobs record the same settings.
@@ -288,32 +294,37 @@ Each run leaves every entry `done`, `pending`, `needs_repair`, or `superseded`, 
 | Exit | Meaning |
 |---|---|
 | `0` | every entry is done or superseded |
-| `1` | work is pending with a scheduled retry, the runner lock was held, or a read failed (listed in `warnings`); normal, resume later |
-| `3` | some entries need repair while independent work still progressed; alert on it |
+| `1` | work is pending (cooling down, past the poll deadline, blocked behind an older version, or awaiting a re-POST), the runner lock was held or the client config could not be read (an `{"error"}` result; nothing was frozen), or a read failed (listed in `warnings`); normal, resume later |
+| `3` | at least one ledger entry is `needs_repair`, including entries left from earlier runs; outranks `1`; alert on it |
 | `2` | usage or state error; fatal |
 
 - Retries follow the failed job's `failure.class`. Each run makes at most one new attempt
   per stage per source, only after a confirmed rollback, and waits for `retry_after_s`
   (capacity 1 h, interrupted 60 s, others 5 min). Capacity failures stop the batch for their
   first three consecutive occurrences; after that only the entry cools down.
-- Failed attempts are capped per source and stage: 3 for transient, timeout, interrupted,
-  conflict, and model_output; 2 for internal. Past the cap, or on auth, disk, input, an
-  unconfirmed rollback, or a rejected receipt, the entry becomes `needs_repair`, which never
-  blocks other sources. One extra attempt is allowed for each new `/health` build that
-  differs from the failed receipt's `service.build`.
+- Failed non-capacity attempts are counted per source and stage, whatever their class, against
+  the cap of the latest failure's class: 3 for transient, timeout, interrupted, conflict, and
+  model_output; 2 for internal (two transient failures then an internal one reach the cap).
+  Past the cap, or on auth, disk, input, an unconfirmed rollback, or a rejected receipt, the
+  entry becomes `needs_repair`, which never blocks other sources. One extra attempt is allowed
+  for each new `/health` build that differs from the failed receipt's `service.build`.
 - A newer version of the same identity supersedes an older unfinished one that has no ingest
   attempt or only rolled-back or needs-conversion attempts; its receipts are kept. Give
   independent deltas distinct identities.
 - Each POST is recorded before it is sent. After an uncertain outcome the next run re-POSTs,
   and the writer dedupes identical ingest bytes and per-parent audits onto the existing job.
   A done audit with `audit.reason: verdict_missing`/`verdict_invalid` is re-reviewed once.
-- `--import-only` (with `--manifest` entries carrying `ingest_job`/`audit_job`) freezes the
-  sources and imports jobs created out of band without submitting anything. Never edit
-  `state.json`; there is no reset command.
+- `--import-only` (needs `--manifest`) freezes the sources and imports any `ingest_job`/
+  `audit_job` created out of band without submitting anything, so a collection checkpoint can
+  advance before a long run. Never edit `state.json`; there is no reset or drop command. A
+  `needs_repair` entry is re-checked every run and recovers through a newer version (only
+  while its ingest attempts are all rolled back or needs-conversion), the extra attempt for a
+  new build, or an imported receipt; until then every run exits `3`.
 
-The JSON summary carries status counts, `writer_retry`, `warnings`, and per-source `status`,
-`action`, `error`, and `retry_at`. Existing v1 state and exact source bytes are reused; the
-Skill script is only a CLI forwarding entry point.
+The JSON summary carries status counts, `writer_retry`, `warnings`, and per-source `identity`,
+`sha256`, `status`, `action`, `error`, and `retry_at`; job IDs, full receipts and the
+pending-audit discovery counts stay in `<state-dir>/state.json`. Existing v1 state and exact
+source bytes are reused; the Skill script is only a CLI forwarding entry point.
 
 ### Job receipts
 
@@ -326,8 +337,10 @@ Skill script is only a CLI forwarding entry point.
 - `service {version, build}`: the writer that produced the receipt.
 - `agent.output_tail`: the redacted last 4000 characters of the agent's output after a
   nonzero exit or timeout.
-- On audits, `verdict {status: valid|missing|invalid, verified, unverified, corrected}` and,
-  for a missing or invalid verdict, `audit.reason`.
+- On audits that ran a reviewer, `verdict {status: valid|missing|invalid, verified,
+  unverified, corrected}` plus `unknown_paths` (paths outside the scope) and `reason` (on an
+  invalid verdict) when present, and, for a missing or invalid verdict, `audit.reason`.
+  `no_concepts_to_audit` audits and audits that failed before a verdict was read have none.
 
 Receipts written before these fields existed are still classified by the client's legacy
 rules.

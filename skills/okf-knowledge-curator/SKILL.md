@@ -111,8 +111,10 @@ not verification either.
 - On a substantive change the service stamps `generated: {by: process:ai-wiki-curator, at:
   <trusted pass time>}` (after an audit correction: `process:ai-wiki-adversarial-audit`),
   strictly after the prior generation and every retained verification event.
-- Edits that only change whitespace, key order, or quoting are not substantive: the service
-  restores the file's previous bytes, drops those edits, and records the repair.
+- Edits that only change frontmatter formatting (key order, quoting, YAML layout) or trailing
+  whitespace and blank lines in the body are not substantive: the service restores the file's
+  previous bytes, drops those edits, and records the repair. Any other body change, including
+  indentation or spacing inside a line, is substantive and gets a new `generated` stamp.
 - Verification history is restored byte-for-byte after every pass. The service appends a
   `verified` event (below) only when the adversarial auditor's verdict lists the concept as
   verified; the auditor does not write it either.
@@ -134,11 +136,11 @@ Trust is derived, never stored:
 - non-human verifiers only → machine-confirmed;
 - any `human:<id>` verifier → human-reviewed.
 
-If content changes after an audit, retain historical verification only when the worker's
-review protocol explicitly preserves it as history. Per OKF §5.3, that history still
-determines the displayed trust tier; separately, the changed content remains unconfirmed
-until re-audited (`verification_current: false`). Never present a previous verification as
-confirmation of a new claim.
+If content changes after an audit, the service keeps the historical verification unchanged
+(the curator never decides this). Per OKF §5.3, that history still determines the displayed
+trust tier; separately, the changed content remains unconfirmed until re-audited
+(`verification_current: false`). Never present a previous verification as confirmation of a
+new claim.
 
 ## Lifecycle and freshness
 
