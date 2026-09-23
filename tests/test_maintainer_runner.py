@@ -10,6 +10,7 @@ import pytest
 
 from aiwiki.cli import main as cli_main
 from aiwiki.cli import maintain as runner
+from aiwiki.version import VERSION
 
 
 def done(job_id, parent=None, sha=None, result="passed"):
@@ -42,14 +43,14 @@ class Service:
         command, rest = args[2], args[3:]
         if command == "health":
             self.health_calls += 1
-            return {"service_version": "0.2.9", "build": self.health_build}
+            return {"service_version": VERSION, "build": self.health_build}
         if command == "ingest":
             data = Path(rest[0]).read_bytes()
             self.submitted.append(data)
             job_id = f"i{len(self.submitted)}"
             job = done(job_id, sha=hashlib.sha256(data).hexdigest())
             if self.build:
-                job["service"] = {"version": "0.2.9", "build": self.build}
+                job["service"] = {"version": VERSION, "build": self.build}
             if data in self.fail:
                 failure = self.fail[data]
                 job.update(status="failed", phase="rolled_back", commit=None, git={})
