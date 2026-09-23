@@ -477,6 +477,7 @@ def main(argv=None) -> int:
             "ai-wiki -b my-kb maintain --manifest sources.json --state-dir ~/.ai-wiki/maintenance/my-kb",
             "ai-wiki -b my-kb maintain --state-dir ~/.ai-wiki/maintenance/my-kb --retry-now",
             "ai-wiki maintain --state-dir ~/.ai-wiki/maintenance/my-kb --status",
+            "ai-wiki maintain --state-dir ~/.ai-wiki/maintenance/my-kb --drop 1fcfb67c --reason 'superseded by X'",
         ), **common,
     )
     p_maintain.add_argument("--manifest", type=Path, help="add sources; omit to resume saved work only")
@@ -488,6 +489,10 @@ def main(argv=None) -> int:
                                  "non-retryable failures, or rollback gates")
     p_maintain.add_argument("--status", action="store_true",
                             help="print the saved state summary offline (no network, no lock)")
+    p_maintain.add_argument("--drop", metavar="SHA256_PREFIX",
+                            help="abandon one pending/needs_repair source for good (needs --reason); "
+                                 "newer versions of its identity stop waiting behind it")
+    p_maintain.add_argument("--reason", help="why the --drop source is abandoned (kept in state)")
     p_maintain.add_argument("--import-only", action="store_true",
                             help="freeze manifest sources and import listed job receipts; submit nothing")
     p_maintain.add_argument("--poll-seconds", type=_limit, default=15, help="job poll interval (default: 15)")
@@ -512,11 +517,18 @@ def main(argv=None) -> int:
         if a.status and (a.manifest or a.import_only or a.retry_now or a.audit_pending):
             _fail("--status only reads saved state; drop the other maintenance flags",
                   help_command="ai-wiki maintain --help", code=2)
+        if a.drop and (a.status or a.manifest or a.import_only or a.retry_now or a.audit_pending):
+            _fail("--drop only changes one saved source; drop the other maintenance flags",
+                  help_command="ai-wiki maintain --help", code=2)
+        if bool(a.drop) != bool(a.reason):
+            _fail("--drop and --reason go together", help_command="ai-wiki maintain --help", code=2)
         if a.import_only and not a.manifest:
             _fail("--import-only needs --manifest", help_command="ai-wiki maintain --help", code=2)
         try:
             if a.status:
                 result = maintain.status(a.state_dir.expanduser())
+            elif a.drop:
+                result = maintain.drop(a.state_dir.expanduser(), a.drop, a.reason)
             else:
                 # Resolve a default to a concrete name before binding durable state to it.
                 bsel = bsel or _api("/health").get("bundle")

@@ -445,3 +445,40 @@ def test_a_missing_reviewer_verdict_earns_exactly_one_fresh_audit(tmp_path, writ
     assert state["sources"][0]["audit"][-1]["audit"]["status"] == final
     # A later run never re-reviews a completed source.
     assert _maintain(state_dir, capsys=capsys)[0] == 0 and writer.audited == ["i1"] * audits
+
+
+def test_drop_is_the_explicit_exit_from_needs_repair(tmp_path, writer, capsys):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    old = _frozen(state_dir, b"old h5 delta", H5)
+    old.update(status="needs_repair", error="audit requires repair",
+               ingest=[done("i0", sha=old["sha256"])],
+               audit=[{"id": "a0", "kind": "audit", "status": "failed", "phase": "rolled_back",
+                       "parent_job": "i0", "error": "adversarial audit failed"}] * 3)
+    new = _frozen(state_dir, b"new h5 delta", H5)
+    _state_dir(tmp_path, [old, new])
+    code, result = _maintain(state_dir, capsys=capsys)
+    # needs_repair never blocks the newer version, but it keeps exit 3 (and the watchdog page).
+    assert code == 3 and result["needs_repair"] == 1 and result["done"] == 1
+    assert writer.ingested == [b"new h5 delta"]
+
+    def usage(*args):
+        try:
+            rc = cli_main.main(["-b", "kb", "maintain", "--state-dir", str(state_dir), "--json", *args])
+        except SystemExit as exc:
+            rc = exc.code
+        capsys.readouterr()
+        return rc
+
+    for bad in (["--drop", old["sha256"][:8]], ["--reason", "x"], ["--drop", "abc", "--reason", "x"]):
+        assert usage(*bad) == 2
+    code, result = _maintain(state_dir, "--drop", old["sha256"][:12], "--reason", "audit cap; content in newer",
+                             capsys=capsys)
+    assert code == 0 and result["dropped"] == 1 and result["needs_repair"] == 0
+    row = next(r for r in result["sources"] if r["sha256"] == old["sha256"])
+    assert row["dropped"]["reason"] == "audit cap; content in newer"
+
+    assert _maintain(state_dir, capsys=capsys)[0] == 0 and writer.ingested == [b"new h5 delta"]
+    state = json.loads((state_dir / "state.json").read_text())
+    assert len(state["sources"][0]["audit"]) == 3  # the dropped entry keeps its receipts
+    assert usage("--drop", new["sha256"][:12], "--reason", "done entries stay") == 2

@@ -46,8 +46,8 @@ means GitHub `main` still ships a client older than this skill. Never hard-code 
 - `2` stop, never bootstrap (Multica failed, or issues were unreadable and no v4 was found).
 - `3` a v4 was found but some issues were unreadable, so it may not be the newest. Retry once;
   if `3` persists, do not build or write a checkpoint this run and report the `unreadable` issue
-  ids. `find` cannot skip an issue, so a permanently unreadable (e.g. deleted) run issue blocks
-  every later checkpoint until a human restores it.
+  ids. A run issue that is permanently unreadable (e.g. deleted) is skipped only when the
+  automation prompt names it in `--exclude-issue ID`; never exclude one on your own.
 
 **2.2 Scan the reference repositories:**
 
@@ -129,10 +129,21 @@ the delta starts after the previous cursor, `completed_at` is not later, or a ba
 is missing; it records `baseline {sha, at, disposition, reason}`. `write` reads the v4 back and
 compares: only exit `0` with `verified: true` counts. Never hand-assemble or edit checkpoint JSON.
 
-**2.7 Maintain** (last, so a long run never holds back §2.6): `ai-wiki -b "$bundle" maintain
---state-dir "$state_dir" --audit-pending --json > "$run_dir/maintain.json"` (§3) resumes every
-unfinished source and can poll `--wait-seconds` per stage per source. If it is cut off, the
-checkpoint already holds and the next run resumes the ledger.
+**2.7 Maintain** (last, so a long run never holds back §2.6): it resumes every unfinished
+source (§3) and can take hours, longer than a shell tool call may block. Start it detached and
+check on it with the offline `--status` until the process exits:
+
+```sh
+nohup sh -c 'ai-wiki -b "$0" maintain --state-dir "$1" --audit-pending --json \
+  > "$2/maintain.json" 2> "$2/maintain.err"; echo $? > "$2/maintain.exit"' \
+  "$bundle" "$state_dir" "$run_dir" >/dev/null 2>&1 & echo $! > "$run_dir/maintain.pid"
+# every few minutes, in short tool calls, until maintain.exit exists:
+test -f "$run_dir/maintain.exit" || ai-wiki maintain --state-dir "$state_dir" --status
+```
+
+Report the code in `maintain.exit` (§3). If your run must end first, stop waiting (never kill
+it or start another): the checkpoint already holds, the lock refuses a second runner, and the
+next run resumes the ledger.
 
 ### Checkpoint rule: the cursor is decoupled from completion
 
@@ -189,7 +200,8 @@ receipts atomically, locks out overlapping runners, and owns submission, polling
   ingest attempt is rolled back or needs-conversion (never after a done ingest, e.g. an audit at
   its cap or a rejected receipt); the extra attempt for a new build; or an imported receipt.
   `--import-only` (needs `--manifest`; imports any `ingest_job`/`audit_job`) freezes and imports
-  without submitting. There is no reset or drop.
+  without submitting. Only an operator abandons an entry (`--drop SHA256_PREFIX --reason`,
+  status `dropped`); never drop one yourself.
 - `--status` reads the saved summary offline (no network or lock): counts, `writer_retry`,
   `warnings`, `sources[]` (`identity`, `sha256`, `status`, `error`, `action`, `retry_at`).
 

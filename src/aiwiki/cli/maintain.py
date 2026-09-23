@@ -10,7 +10,8 @@ Each run leaves every entry in one status:
 - ``done``: ingest and audit receipts are complete;
 - ``pending``: a later run retries it (``retry.after`` when a cooldown applies);
 - ``needs_repair``: attempt cap exhausted or not retryable; never blocks other identities;
-- ``superseded``: a newer version of the same identity replaced this unfinished one.
+- ``superseded``: a newer version of the same identity replaced this unfinished one;
+- ``dropped``: an operator abandoned it with ``--drop`` and a reason (receipts kept).
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from pathlib import Path
 
 from aiwiki.runtime.failure import classify
 
-STATUSES = ("done", "pending", "needs_repair", "superseded")
+STATUSES = ("done", "pending", "needs_repair", "superseded", "dropped")
 # Failed attempts per (source, stage) before an entry needs repair. Capacity failures do
 # not count: they cool down for an hour and stop the batch instead.
 ATTEMPT_CAPS = {"transient": 3, "timeout": 3, "interrupted": 3, "conflict": 3, "model_output": 3,
@@ -138,7 +139,7 @@ def retry_plan(entry: dict, stage: str, job: dict, failure: dict) -> dict:
 def summary(state: dict) -> dict:
     rows = []
     for entry in state["sources"]:
-        row = {k: entry[k] for k in ("identity", "sha256", "status", "error", "retry", "superseded_by")
+        row = {k: entry[k] for k in ("identity", "sha256", "status", "error", "retry", "superseded_by", "dropped")
                if k in entry}
         retry = entry.get("retry") or state.get("writer_retry")
         if entry["status"] == "pending":
@@ -154,7 +155,7 @@ def summary(state: dict) -> dict:
 
 
 def exit_code(result: dict) -> int:
-    """0: all done/superseded; 1: pending or a read to redo next run; 3: some need repair."""
+    """0: all done/superseded/dropped; 1: pending or a read to redo next run; 3: some need repair."""
     return 3 if result.get("needs_repair") else 1 if result.get("pending") or result.get("warnings") else 0
 
 
@@ -205,9 +206,10 @@ def add_sources(state: dict, manifest: dict, directory: Path, bundle: str) -> No
             entry[stage].append(job)
             if entry.get("submitting") == stage:
                 entry.pop("submitting")
-            if entry["status"] in {"superseded", "needs_repair"}:
+            if entry["status"] in {"superseded", "needs_repair", "dropped"}:
                 entry["status"] = "pending"  # re-evaluate with the imported receipt on the next run
                 entry.pop("superseded_by", None)
+                entry.pop("dropped", None)
 
 
 def _submit(state: dict, path: Path, bundle: str, entry: dict, stage: str, parent: str | None) -> dict:
@@ -390,7 +392,7 @@ def run_sources(state: dict, path: Path, bundle: str, *, poll: float = 15, wait:
     latest = {entry["identity"]: entry for entry in state["sources"]}
     blocked = set()
     for entry in state["sources"]:
-        if entry["status"] in {"done", "superseded"}:
+        if entry["status"] in {"done", "superseded", "dropped"}:
             continue
         identity = entry["identity"]
         entry.pop("error", None)
@@ -455,6 +457,40 @@ def status(state_dir: Path) -> dict:
     if not state_path.exists():
         raise ValueError("no saved state in this --state-dir")
     return summary(json.loads(state_path.read_text()))
+
+
+def drop(state_dir: Path, sha_prefix: str, reason: str) -> dict:
+    """Abandon one unfinished source for good; its receipts stay for the record.
+
+    The only exit from ``needs_repair`` that needs no new evidence or build: newer versions
+    of the identity stop waiting behind it and exit code 3 clears.
+    """
+    if not reason.strip():
+        raise ValueError("--drop needs a --reason")
+    if len(sha_prefix) < 8:
+        raise ValueError("--drop needs at least 8 hex characters of the source sha256")
+    state_path = state_dir / "state.json"
+    if not state_path.exists():
+        raise ValueError("no saved state in this --state-dir")
+    with (state_dir / "runner.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Pending("another runner owns this state directory") from None
+        state = json.loads(state_path.read_text())
+        matches = [entry for entry in state["sources"] if entry["sha256"].startswith(sha_prefix.lower())]
+        if len(matches) != 1:
+            raise ValueError(f"--drop {sha_prefix} matches {len(matches)} sources; give a longer prefix")
+        entry = matches[0]
+        if entry["status"] not in {"pending", "needs_repair"}:
+            raise ValueError(f"only pending or needs_repair sources can be dropped, not {entry['status']}")
+        if entry.get("submitting"):
+            raise ValueError("a submission is in flight; let the next run reconcile it first")
+        entry["status"] = "dropped"
+        entry["dropped"] = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "reason": reason.strip()[:500]}
+        entry.pop("retry", None)
+        save(state_path, state)
+        return summary(state)
 
 
 def run(*, manifest: Path | None, state_dir: Path, bundle: str, audit_pending: bool = False,

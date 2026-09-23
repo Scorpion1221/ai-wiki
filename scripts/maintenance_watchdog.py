@@ -270,7 +270,7 @@ def check_ledger(args: argparse.Namespace, now: datetime) -> tuple[dict, list[di
     for entry in sources:
         status = entry.get("status") or "pending"
         counts[status] = counts.get(status, 0) + 1
-        if status in ("done", "superseded"):
+        if status in ("done", "superseded", "dropped"):
             continue
         identity, sha = str(entry.get("identity")), str(entry.get("sha256") or "")[:12]
         since = pending_since(entry)

@@ -159,8 +159,9 @@ A deterministic watchdog ([docs/maintenance-watchdog.md](docs/maintenance-watchd
 pages on a stale checkpoint, stuck runs, `needs_repair` or long-pending ledger entries
 (`ledger_needs_repair`, `ledger_pending_stale`), and writer job failures with no later
 attempt (`job_failed`, for up to 7 days, so retry a failed out-of-band job within the week or
-record why it is abandoned). `ledger_needs_repair` never expires: `maintain` has no drop or
-reset, so the alert lasts until the entry recovers. Agents must not add their own monitoring.
+record why it is abandoned). `ledger_needs_repair` lasts until the entry recovers or an
+operator abandons it with `ai-wiki maintain --state-dir DIR --drop SHA256_PREFIX --reason TEXT`
+(status `dropped`, receipts kept). Agents must not add their own monitoring or drop entries.
 
 ## 5. Skill source of truth
 

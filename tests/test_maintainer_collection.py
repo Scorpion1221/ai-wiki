@@ -194,6 +194,20 @@ def test_find_pages_runs_and_reports_unreadable_issues(multica: FakeMultica) -> 
     assert offsets == ["0", "100"]
 
 
+def test_find_can_exclude_a_permanently_unreadable_run_issue(multica: FakeMultica) -> None:
+    state = production_like_state()
+    state["fail"] = {"issue metadata list issue-0917": "Error: issue not found (404)"}
+    multica.save(state)
+
+    result = script("checkpoint.py", "find", "--autopilot", AUTOPILOT, "--exclude-issue", "issue-0917")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    found = json.loads(result.stdout)
+    assert found["issue_id"] == "issue-0919" and found["unreadable"] == []
+    assert found["excluded"] == ["issue-0917"]
+    assert ["issue", "metadata", "list", "issue-0917", "--output", "json"] not in multica.calls()
+
+
 @pytest.mark.parametrize(
     ("metadata", "fail"),
     [

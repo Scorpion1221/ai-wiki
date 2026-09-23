@@ -211,6 +211,10 @@ def cmd_find(args: argparse.Namespace) -> int:
     runs = autopilot_runs(args.autopilot, args.cache_dir)
     issue_ids = run_issue_ids(runs)
     issue_ids += [issue for issue in args.seed_issue if issue not in issue_ids]
+    # A run issue that can never be read again (e.g. deleted) would otherwise keep every later
+    # find at exit 3. Excluding it is an explicit, reported operator decision.
+    excluded = [issue for issue in issue_ids if issue in set(args.exclude_issue)]
+    issue_ids = [issue for issue in issue_ids if issue not in set(args.exclude_issue)]
     found: dict[int, list[tuple[datetime, str, dict[str, Any]]]] = {4: [], 3: []}
     invalid: list[dict[str, str]] = []
     unreadable: list[dict[str, str]] = []
@@ -240,6 +244,7 @@ def cmd_find(args: argparse.Namespace) -> int:
         "valid": {"v4": len(found[4]), "v3": len(found[3])},
         "invalid": invalid,
         "unreadable": unreadable,
+        "excluded": excluded,
     }
     version = 4 if found[4] else 3 if found[3] else None
     if unreadable and version != 4:
@@ -431,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
     find = sub.add_parser("find", help="latest valid checkpoint from an autopilot's run issues (read-only)")
     find.add_argument("--autopilot", required=True, help="autopilot id")
     find.add_argument("--seed-issue", action="append", default=[], help="extra issue to consider (repeatable)")
+    find.add_argument("--exclude-issue", action="append", default=[], metavar="ISSUE_ID",
+                      help="skip a run issue that is permanently unreadable, e.g. deleted (repeatable)")
     find.add_argument("--cache-dir", type=Path, help="store raw multica responses here")
     find.add_argument("--output", type=Path, help="write the JSON result here as well as stdout")
     find.set_defaults(handler=cmd_find)

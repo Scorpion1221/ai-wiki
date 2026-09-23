@@ -316,10 +316,12 @@ Each run leaves every entry `done`, `pending`, `needs_repair`, or `superseded`, 
   A done audit with `audit.reason: verdict_missing`/`verdict_invalid` is re-reviewed once.
 - `--import-only` (needs `--manifest`) freezes the sources and imports any `ingest_job`/
   `audit_job` created out of band without submitting anything, so a collection checkpoint can
-  advance before a long run. Never edit `state.json`; there is no reset or drop command. A
-  `needs_repair` entry is re-checked every run and recovers through a newer version (only
-  while its ingest attempts are all rolled back or needs-conversion), the extra attempt for a
-  new build, or an imported receipt; until then every run exits `3`.
+  advance before a long run. Never edit `state.json`. A `needs_repair` entry is re-checked
+  every run and recovers through a newer version (only while its ingest attempts are all
+  rolled back or needs-conversion), the extra attempt for a new build, or an imported receipt;
+  until then every run exits `3`. An operator (not the agent) can abandon one for good with
+  `--drop SHA256_PREFIX --reason TEXT`: its status becomes `dropped`, receipts are kept, and it
+  no longer affects the exit code.
 
 The JSON summary carries status counts, `writer_retry`, `warnings`, and per-source `identity`,
 `sha256`, `status`, `action`, `error`, and `retry_at`; job IDs, full receipts and the
