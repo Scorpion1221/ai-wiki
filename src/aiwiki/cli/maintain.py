@@ -149,8 +149,10 @@ def add_sources(state: dict, manifest: dict, directory: Path, bundle: str) -> No
             raise ValueError(f"source hash mismatch: {identity}")
         entry = next((row for row in state["sources"] if row["identity"] == identity and row["sha256"] == sha), None)
         if entry is None:
-            frozen = directory / "sources" / (sha + Path(source["path"]).suffix)
-            frozen.parent.mkdir(exist_ok=True)
+            # Keep the hash in the durable directory, not the submitted basename:
+            # the writer adds its own hash to source snapshot filenames.
+            frozen = directory / "sources" / sha / ("evidence" + Path(source["path"]).suffix)
+            frozen.parent.mkdir(parents=True, exist_ok=True)
             if frozen.exists() and frozen.read_bytes() != data:
                 raise ValueError("frozen source was modified")
             frozen.write_bytes(data)

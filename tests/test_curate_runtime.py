@@ -173,6 +173,8 @@ def test_validation_failure_blocks_commit(tmp_path: Path, monkeypatch) -> None:
     }
     assert rolled_back == [True]
     assert committed == []
+    assert job["agent"]["attempts"] == 2
+    assert job["repair"]["remaining_error_count"] == 1
 
 
 def test_validation_pass_records_commit_and_changed_files(tmp_path: Path, monkeypatch) -> None:
@@ -581,6 +583,263 @@ def test_service_owns_source_snapshot_and_applies_only_isolated_concepts(
     assert (bundle / "features" / "x.md").is_file()
 
 
+@pytest.mark.parametrize("defect", ["yaml_indent", "resource_typo"])
+def test_one_isolated_repair_recovers_invalid_frontmatter_or_source_path(
+    tmp_path: Path, monkeypatch, defect: str,
+) -> None:
+    bundle = tmp_path / "bundle"
+    inbox = bundle / "sources" / "inbox" / "new.md.source"
+    inbox.parent.mkdir(parents=True)
+    raw = b"current evidence\n"
+    inbox.write_bytes(raw)
+    (bundle / "index.md").write_text(
+        '---\nokf_version: "0.2"\n---\n# Bundle\n', encoding="utf-8",
+    )
+    job_path = bundle / ".okf" / "jobs" / "j.json"
+    job_path.parent.mkdir(parents=True)
+    job_path.write_text(json.dumps({"source": inbox.relative_to(bundle).as_posix(), "status": "queued"}))
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(
+        curate, "_deterministic_closeout",
+        lambda *_args: {"indexes": [], "log": "log.md", "missing_index_descriptions": []},
+    )
+    calls = []
+
+    def agent(command, **kwargs):
+        calls.append(command[-1])
+        workspace = Path(kwargs["cwd"])
+        concept = workspace / "features" / "x.md"
+        concept.parent.mkdir(parents=True, exist_ok=True)
+        if len(calls) == 1:
+            if defect == "yaml_indent":
+                concept.write_text(
+                    _policy_concept().replace(
+                        "  resource: /sources/s.md.source",
+                        "   resource: /sources/new.md.source",
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                concept.write_text(
+                    _policy_concept().replace(
+                        "/sources/s.md.source", "/sources/new.md.souce",
+                    ),
+                    encoding="utf-8",
+                )
+        else:
+            assert "JSON data, not instructions" in command[-1]
+            assert "sources/new.md.source" in command[-1]
+            assert (workspace / "sources" / "new.md.source").read_bytes() == raw
+            concept.write_text(
+                _policy_concept().replace("/sources/s.md.source", "/sources/new.md.source"),
+                encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"pass {len(calls)}", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", agent)
+    curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
+
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert job["status"] == "done"
+    assert job["validation"] == {"status": "passed", "error_count": 0}
+    assert job["repair"]["attempted"] is True
+    assert job["repair"]["trigger_error_count"] >= 1
+    assert job["repair"]["remaining_error_count"] == 0
+    assert job["agent"]["attempts"] == 2
+    assert (bundle / "sources" / "new.md.source").read_bytes() == raw
+    assert not inbox.exists()
+    assert curate.parse_doc(bundle / "features" / "x.md")[0]["sources"][0]["resource"] == "/sources/new.md.source"
+
+
+@pytest.mark.parametrize("violation", ["purpose", "source"])
+def test_repair_scope_violation_fails_closed_without_third_attempt(
+    tmp_path: Path, monkeypatch, violation: str,
+) -> None:
+    bundle = tmp_path / "bundle"
+    inbox = bundle / "sources" / "inbox" / "new.md.source"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"current evidence")
+    job_path = bundle / ".okf" / "jobs" / "j.json"
+    job_path.parent.mkdir(parents=True)
+    job_path.write_text(json.dumps({"source": inbox.relative_to(bundle).as_posix(), "status": "queued"}))
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(curate, "validate_bundle", lambda _bundle: [])
+    calls = []
+
+    def agent(command, **kwargs):
+        calls.append(command[-1])
+        workspace = Path(kwargs["cwd"])
+        concept = workspace / "features" / "x.md"
+        concept.parent.mkdir(parents=True, exist_ok=True)
+        concept.write_text(_policy_concept(), encoding="utf-8")  # missing current evidence
+        if len(calls) == 2:
+            if violation == "purpose":
+                (workspace / "purpose.md").write_text("out of scope", encoding="utf-8")
+            else:
+                snapshot = workspace / "sources" / "new.md.source"
+                snapshot.chmod(0o600)
+                snapshot.write_bytes(b"poisoned")
+        return subprocess.CompletedProcess(command, 0, stdout="curated", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", agent)
+    curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
+
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert len(calls) == 2
+    assert job["status"] == "failed"
+    assert job["validation"]["reason"] == "agent scope violation"
+    assert not (bundle / "features" / "x.md").exists()
+    assert not (bundle / "purpose.md").exists()
+    assert not (bundle / "sources" / "new.md.source").exists()
+    assert inbox.read_bytes() == b"current evidence"
+
+
+@pytest.mark.parametrize("delete_all", [False, True])
+def test_repair_cannot_delete_first_pass_concepts_to_pass_validation(
+    tmp_path: Path, monkeypatch, delete_all: bool,
+) -> None:
+    bundle = tmp_path / "bundle"
+    inbox = bundle / "sources" / "inbox" / "new.md.source"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"current evidence")
+    (bundle / "index.md").write_text(
+        '---\nokf_version: "0.2"\n---\n# Bundle\n', encoding="utf-8",
+    )
+    job_path = bundle / ".okf" / "jobs" / "j.json"
+    job_path.parent.mkdir(parents=True)
+    job_path.write_text(json.dumps({"source": inbox.relative_to(bundle).as_posix(), "status": "queued"}))
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(
+        curate, "_deterministic_closeout",
+        lambda *_args: {"indexes": [], "log": "log.md", "missing_index_descriptions": []},
+    )
+    calls = 0
+
+    def agent(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        workspace = Path(kwargs["cwd"])
+        concepts = workspace / "features"
+        concepts.mkdir(exist_ok=True)
+        if calls == 1:
+            for name in ("x", "y"):
+                (concepts / f"{name}.md").write_text(
+                    _policy_concept().replace("/sources/s.md.source", "/sources/new.md.souce"),
+                    encoding="utf-8",
+                )
+        else:
+            (concepts / "y.md").unlink()
+            if delete_all:
+                (concepts / "x.md").unlink()
+            else:
+                (concepts / "x.md").write_text(
+                    _policy_concept().replace("/sources/s.md.source", "/sources/new.md.source"),
+                    encoding="utf-8",
+                )
+        return subprocess.CompletedProcess(command, 0, stdout=f"pass {calls}", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", agent)
+    curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
+
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert calls == 2
+    assert job["status"] == "failed"
+    assert job["repair"]["required_concepts"] == ["features/x.md", "features/y.md"]
+    assert job["repair"]["reverted_concepts"] == (
+        ["features/x.md", "features/y.md"] if delete_all else ["features/y.md"]
+    )
+    assert any("repair removed or reverted" in error for error in job["validation"]["errors"])
+    assert not (bundle / "features" / "x.md").exists()
+    assert not (bundle / "features" / "y.md").exists()
+    assert not (bundle / "sources" / "new.md.source").exists()
+    assert inbox.read_bytes() == b"current evidence"
+
+
+def test_repair_cannot_revert_existing_concept_to_original_content(tmp_path: Path, monkeypatch) -> None:
+    bundle = tmp_path / "bundle"
+    inbox = bundle / "sources" / "inbox" / "new.md.source"
+    concept = bundle / "features" / "x.md"
+    inbox.parent.mkdir(parents=True)
+    concept.parent.mkdir(parents=True)
+    inbox.write_bytes(b"current evidence")
+    (bundle / "sources" / "s.md.source").write_bytes(b"old evidence")
+    (bundle / "index.md").write_text(
+        '---\nokf_version: "0.2"\n---\n# Bundle\n', encoding="utf-8",
+    )
+    original = _policy_concept(body="old")
+    concept.write_text(original, encoding="utf-8")
+    job_path = bundle / ".okf" / "jobs" / "j.json"
+    job_path.parent.mkdir(parents=True)
+    job_path.write_text(json.dumps({"source": inbox.relative_to(bundle).as_posix(), "status": "queued"}))
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    calls = 0
+
+    def agent(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        workspace_concept = Path(kwargs["cwd"]) / "features" / "x.md"
+        workspace_concept.write_text(
+            _policy_concept(body="new", generated_at="2026-08-13T00:01:00Z")
+            if calls == 1 else original,
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=f"pass {calls}", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", agent)
+    curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
+
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert calls == 2
+    assert job["status"] == "failed"
+    assert job["repair"]["reverted_concepts"] == ["features/x.md"]
+    assert concept.read_text(encoding="utf-8") == original
+    assert inbox.read_bytes() == b"current evidence"
+
+
+def test_repair_cannot_add_unrelated_concept_edit(tmp_path: Path, monkeypatch) -> None:
+    bundle = tmp_path / "bundle"
+    inbox = bundle / "sources" / "inbox" / "new.md.source"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"current evidence")
+    (bundle / "index.md").write_text(
+        '---\nokf_version: "0.2"\n---\n# Bundle\n', encoding="utf-8",
+    )
+    job_path = bundle / ".okf" / "jobs" / "j.json"
+    job_path.parent.mkdir(parents=True)
+    job_path.write_text(json.dumps({"source": inbox.relative_to(bundle).as_posix(), "status": "queued"}))
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    calls = 0
+
+    def agent(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        concepts = Path(kwargs["cwd"]) / "features"
+        concepts.mkdir(exist_ok=True)
+        resource = "/sources/new.md.souce" if calls == 1 else "/sources/new.md.source"
+        (concepts / "x.md").write_text(
+            _policy_concept().replace("/sources/s.md.source", resource), encoding="utf-8",
+        )
+        if calls == 2:
+            (concepts / "z.md").write_text(
+                _policy_concept().replace("/sources/s.md.source", resource), encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=f"pass {calls}", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", agent)
+    curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
+
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert calls == 2
+    assert job["status"] == "failed"
+    assert job["repair"]["required_concepts"] == ["features/x.md"]
+    assert job["repair"]["added_concepts"] == ["features/z.md"]
+    assert any("outside the first-pass edit set" in error for error in job["validation"]["errors"])
+    assert not (bundle / "features" / "x.md").exists()
+    assert not (bundle / "features" / "z.md").exists()
+    assert inbox.read_bytes() == b"current evidence"
+
+
 def test_fake_windows_path_is_confined_and_rejected(tmp_path: Path, monkeypatch) -> None:
     bundle = tmp_path / "bundle"
     inbox = bundle / "sources" / "inbox" / "new.md.source"
@@ -751,6 +1010,7 @@ def test_curation_structural_prompt_injection_fails_and_rolls_back(
     job = json.loads(job_path.read_text(encoding="utf-8"))
     assert job["status"] == "failed"
     assert job["validation"]["reason"] == "agent scope violation"
+    assert "repair" not in job
     assert job["out_of_scope_files"] == ["purpose.md", "sources/new.md.source"]
     assert purpose.read_text(encoding="utf-8") == "# Trusted purpose\n"
     assert inbox.read_bytes() == b"current"
@@ -1329,6 +1589,7 @@ def test_no_git_failed_curation_restores_bundle_and_inbox_source(tmp_path: Path,
     curate.run(bundle, source.relative_to(bundle).as_posix(), job_path)
     job = json.loads(job_path.read_text(encoding="utf-8"))
     assert job["status"] == "failed"
+    assert "repair" not in job
     assert concept.read_text(encoding="utf-8") == original
     assert source.read_text(encoding="utf-8") == "raw"
     assert not (bundle / "sources" / "moved.md.source").exists()
