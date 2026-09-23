@@ -15,6 +15,8 @@ from aiwiki.service import ingest as I
 
 
 def test_audit_prompt_matches_generation_and_verification_policy() -> None:
+    assert "Trusted timestamp for NEW generated/verified events: {now}" in audit.AUDIT_PROMPT
+    assert "Preserve historical events" in audit.AUDIT_PROMPT
     assert "change only `status` and `verified`" in audit.AUDIT_PROMPT
     assert "change ANY frontmatter or body content" in audit.AUDIT_PROMPT
     assert "refresh `generated`" in audit.AUDIT_PROMPT
@@ -939,6 +941,144 @@ def test_audit_rejects_future_generation_and_verification_and_rolls_back(
     assert any("generated.at must not be in the future" in error for error in result["validation"]["errors"])
     assert any("verification timestamp must not be in the future" in error for error in result["validation"]["errors"])
     assert concept.read_text(encoding="utf-8") == original
+
+
+def test_audit_restamps_only_new_stale_auditor_verification(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    original_fm = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
+    original_fm["verified"] = [{"by": "human:owner", "at": "2026-08-13T00:30:00Z"}]
+    original = (
+        "---\n" + yaml.safe_dump(original_fm, sort_keys=False)
+        + "---\n# Summary\n\nThe feature was merged.\n"
+    )
+    concept.write_text(original, encoding="utf-8")
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    clock = {"now": AUDIT_NOW}
+    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
+
+    def stale_review(*args, **kwargs):
+        reviewed = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+        reviewed["status"] = "stable"
+        reviewed["verified"].append(
+            {"by": audit.AUDITOR, "at": "2026-08-13T00:50:00Z"}
+        )
+        concept.write_text(
+            "---\n" + yaml.safe_dump(reviewed, sort_keys=False)
+            + "---\n# Summary\n\nThe feature was merged.\n",
+            encoding="utf-8",
+        )
+        clock["now"] = "2026-08-13T01:10:00Z"
+        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", stale_review)
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done"
+    assert result["audit"]["status"] == "passed"
+    assert result["deterministic_repairs"] == {
+        "features/release.md": [
+            "restamped new auditor verification to trusted audit time"
+        ]
+    }
+    reviewed = yaml.safe_load(concept.read_text(encoding="utf-8").split("---", 2)[1])
+    assert reviewed["verified"][0] == original_fm["verified"][0]
+    assert reviewed["verified"][1]["by"] == audit.AUDITOR
+    assert audit._instant(reviewed["verified"][1]["at"]) == audit._instant(clock["now"])
+
+
+def test_audit_accepts_current_verification_during_long_agent_run(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    original = concept.read_text(encoding="utf-8")
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    clock = {"now": AUDIT_NOW}
+    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
+
+    def long_review(*args, **kwargs):
+        reviewed = yaml.safe_load(original[4:original.find("\n---\n", 4)])
+        reviewed["status"] = "stable"
+        reviewed["verified"] = [
+            {"by": audit.AUDITOR, "at": "2026-08-13T01:08:00Z"}
+        ]
+        concept.write_text(
+            "---\n" + yaml.safe_dump(reviewed, sort_keys=False)
+            + "---\n# Summary\n\nThe feature was merged.\n",
+            encoding="utf-8",
+        )
+        clock["now"] = "2026-08-13T01:10:00Z"
+        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", long_review)
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done"
+    assert result["audit"]["status"] == "passed"
+    assert "deterministic_repairs" not in result
+
+
+@pytest.mark.parametrize(
+    ("before_verified", "after_verified", "expected_error"),
+    [
+        ([], [{"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}], "must not be in the future"),
+        ([], [{"by": audit.AUDITOR, "at": "2026-08-13T00:50:00"}], "requires a valid timestamp"),
+        ([], [{"by": "human:forged", "at": "2026-08-13T00:50:00Z"}], "unauthorized verifier"),
+        (
+            [],
+            [
+                {"by": audit.AUDITOR, "at": "2026-08-13T00:40:00Z"},
+                {"by": audit.AUDITOR, "at": "2026-08-13T00:41:00Z"},
+            ],
+            "outside the trusted audit window",
+        ),
+        (
+            [{"by": audit.AUDITOR, "at": "2026-08-13T00:30:00Z"}],
+            [{"by": audit.AUDITOR, "at": "2026-08-13T00:40:00Z"}],
+            "must preserve existing verification",
+        ),
+    ],
+)
+def test_audit_timestamp_repair_keeps_invalid_or_historical_events_for_policy_rejection(
+    tmp_path: Path, before_verified: list[dict], after_verified: list[dict],
+    expected_error: str,
+) -> None:
+    concept = tmp_path / "release.md"
+    before_fm = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
+    if before_verified:
+        before_fm["verified"] = before_verified
+    before_text = (
+        "---\n" + yaml.safe_dump(before_fm, sort_keys=False)
+        + "---\n# Summary\n\nThe feature was merged.\n"
+    )
+    after_fm = dict(before_fm)
+    after_fm["status"] = "stable"
+    after_fm["verified"] = after_verified
+    output = (
+        "---\n" + yaml.safe_dump(after_fm, sort_keys=False)
+        + "---\n# Summary\n\nThe feature was merged.\n"
+    )
+    concept.write_text(output, encoding="utf-8")
+    trusted_finish = audit._instant(AUDIT_NOW)
+    assert trusted_finish is not None
+
+    assert audit._repair_audit_output(concept, before_text, trusted_finish) == []
+    assert concept.read_text(encoding="utf-8") == output
+    assert any(
+        expected_error in error
+        for error in audit._verification_policy_errors(concept, before_text, trusted_finish)
+    )
 
 
 def test_audit_rejects_bookkeeping_only_future_generation_and_rolls_back(
