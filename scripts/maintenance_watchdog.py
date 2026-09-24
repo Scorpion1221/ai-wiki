@@ -72,16 +72,18 @@ RUNBOOK_URL = "https://github.com/Scorpion1221/ai-wiki/blob/main/docs/maintenanc
 CARD_GROUPS = (
     (("checkpoint_", "latest_run_failed", "run_", "runs_missing", "issue_stuck"), "🗓️ 每日维护",
      "看当天 autopilot issue 的报告；下一次定时运行会从 ledger 自动续跑"),
-    (("maint_",), "🧭 Maintainer 队列",
-     "needs_human 用 `ai-wiki maint status` 看原因，修好后 owner 调 `POST /admin/items/<id>/retry`"
-     "（或 `/resolve` 结案）；ready 超时查 maintainer 定时运行，游标超时查 `maint collect`；"
-     "lease 卡住，查该 run 的 issue，下一次 `maint begin` 会接管过期的 lease"),
     (("ledger_",), "📒 待处理来源",
      "pending 会跨天自动重试；needs_repair 需要新证据、新 build，或由 owner 执行 maintain --drop"),
     (("job_",), "✍️ Writer 任务",
      "maintain 管理的来源会自动重试；成员手动 ingest 的失败需要重新提交"),
     (("bundle_commit_",), "📦 Bundle 提交", "确认 writer 服务和每日维护是否仍在产出提交"),
     (("error:",), "⚠️ 检查本身失败", "watchdog 无法完成这项检查，先修复访问或权限"),
+    # Last, so a backlog of per-item maint alerts cannot crowd the older groups off the card.
+    (("maint_",), "🧭 Maintainer 队列",
+     "needs_human 的原因见 `ai-wiki maint status --json`（尝试明细见 `GET /maint/items/<id>`），修好后 owner 调 "
+     "`POST /admin/items/<id>/retry`（或 `/resolve` 结案）；损坏的条目要恢复或修好它的 item.json；"
+     "ready 超时查 maintainer 定时运行；游标超时查 `maint collect` 和失败的仓库；"
+     "lease 卡住查该 run 的 issue，下一次 `maint begin` 会接管过期的 lease"),
 )
 _ISO = re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)")
 
@@ -629,6 +631,8 @@ def render_card(kind: str, label: str, result: dict, previous: dict) -> dict:
     else:
         items = [(a["key"], a["message"]) for a in result["alerts"]]
         items += [(f"error:{e['check']}", f"{e['check']}：{short(e['error'], 100)}") for e in result["errors"]]
+        old = set(previous.get("keys") or [])
+        items.sort(key=lambda item: item[0] in old)  # what changed leads its group, never cut off
         since = previous.get("alerting_since") if previous.get("fingerprint") else now
         elements = [{"tag": "markdown", "content": f"**{len(items)} 项需要关注** · 首次发现 {cst(since)}"}]
         shown = 0

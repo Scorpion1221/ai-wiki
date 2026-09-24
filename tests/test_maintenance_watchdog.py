@@ -476,6 +476,7 @@ def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) 
     assert "有效至 10-17 09:00，最后续期 10-17 06:00" in card_text_of(script.render_card("alert", "w", held, {}))
     text = card_text_of(script.render_card("alert", "aliyun-jp-writer", stale, {}))
     assert "**🧭 Maintainer 队列**" in text and "POST /admin/items/<id>/retry" in text
+    assert "`ai-wiki maint status --json`" in text
     assert "lease 已 73.0h（阈值 3h），于 10-17 09:00 过期，没有 maint end" in text  # +5h in Beijing time
 
     # The next run takes over the lapsed lease, collects and closes b; the owner reopens a.
@@ -598,6 +599,21 @@ def test_a_corrupted_needs_human_item_alerts_instead_of_reading_as_recovered(tmp
     code, second = run(*args)
     assert (code, maint_keys(second), second["notify"]["action"]) == (
         1, {f"maint_item_corrupt:solvely-wiki:{row['id']}"}, "alert")
+
+
+def test_a_maintainer_backlog_cannot_hide_what_changed_on_the_card() -> None:
+    def needs_human(n: int) -> dict:
+        return {"check": "maint:w", "key": f"maint_needs_human:w:it_{n:012x}",
+                "message": f"maint w：条目 it_{n:012x}（repo:x#{n}）转为 needs_human：attempt_cap/model_output"}
+
+    backlog = [needs_human(n) for n in range(12)]
+    previous = {"fingerprint": "f", "keys": sorted(a["key"] for a in backlog), "alerting_since": "2026-10-20T00:00:00Z"}
+    job = {"check": "writer:w", "key": "job_failed:w:9b21b986d4df",
+           "message": "writer w：ingest job 9b21b986d4df 于 2026-10-24T04:49:15Z 失败且未重试成功"}
+    result = {"now": "2026-10-24T08:52:05Z", "errors": [], "alerts": [job, *backlog, needs_human(12)]}
+    text = card_text_of(load_script().render_card("alert", "w", result, previous))
+    assert "job 9b21b986d4df" in text and "it_00000000000c" in text
+    assert "……另有 2 项" in text
 
 
 # --- Feishu notification and deduplication ----------------------------------------------------

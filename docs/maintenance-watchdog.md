@@ -207,7 +207,9 @@ been reassigned away from the agent. On 2026-09-23 a run made 6 calls and finish
 - **`ledger_needs_repair`**: clears once the entry is resolved through `ai-wiki maintain`.
 - **`maint_needs_human`**: clears when the owner reopens the item (`POST /admin/items/<id>/retry`) or
   closes it (`POST /admin/items/<id>/resolve`), or when a new build re-admits an attempt-capped item at
-  the next `maint begin`. Run `ai-wiki maint status` first to see the reason.
+  the next `maint begin`. To see why, run `ai-wiki maint status --json` (`needs_human[].resolution`
+  has the reason and class; the plain table does not) or read `GET /maint/items/<id>`, whose
+  `attempts.history` has each attempt's detail.
 - **`maint_item_corrupt`**: the `item.json` fails the writer's own item check, so `maint next`
   and `maint status` skip the item and the admin routes answer `500 item_corrupt`. Restore the
   file from a backup or repair it by hand. Removing the item directory also clears the alert,
