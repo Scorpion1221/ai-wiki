@@ -18,6 +18,7 @@ You turn on each group of checks with a flag. Every threshold can be changed wit
 | `--multica` | `multica` CLI, autopilot `5c80732b-…` (`--autopilot-id`) | The newest `ai_wiki_incremental_checkpoint_v4.completed_at` found in any run issue's metadata is older than `--checkpoint-max-age-hours` (30). The latest run failed and no checkpoint was written after that run started. The latest run is older than `--run-max-age-hours` (26), which means the schedule did not fire. A run issue has been in `todo`/`in_progress` longer than `--stuck-hours` (3). A run has not reached a terminal state after `--stuck-hours`, and its issue is not done or cancelled. |
 | `--ledger PATH` | `ai-wiki maintain` `state.json`, or its state directory | An entry is `needs_repair`. An entry has been pending longer than `--pending-max-age-hours` (48); the pending time is measured from the earlier of its frozen evidence mtime and its first job. `done` and `superseded` entries are ignored. |
 | `--bundle PATH` (repeatable) | The writer's bundle directory | The bundle's last Git commit is older than `--commit-max-age-hours` (48). A job in `<bundle>/.okf/jobs/` failed within the last `--unresolved-failure-hours` (168, 7 days) and no later attempt on the same source SHA (ingest) or parent job (audit) is done, queued or running. A queued or running job is older than `--stuck-hours`. The output lists every failure from the last `--failed-window-hours` (24) with the attempt that resolved it, and reports queue depth and the age of the oldest queued job. |
+| `--bundle PATH` (same flag) | The maintainer queue in `<bundle>/.okf/maint/` (`service/maint_state.py`, design §7) | An item is `needs_human` (one alert per item, so each new one posts at once). An item's `item.json` fails the writer's own item check, so the writer no longer sees the item (one alert per item). Some item has waited in `ready` longer than `--ready-max-age-hours` (72); the wait restarts when the item last came back to `ready` (an owner retry, an attempt that handed it back, or a new build re-admitting an attempt-capped item), and one alert per bundle names the count and the oldest item. The `repos` or `issues` cursor has not advanced for `--cursor-max-age-hours` (30); for `repos` that includes a repository the collector could not scan and carried forward with `stale_since`, even though the collector still rewrites the cursor. A cursor that does not exist yet never alerts. A maintainer or auditor run lease still names a run that acquired it more than `--stuck-hours` ago, live or lapsed, until `maint end` or the next `maint begin` replaces it. A missing `.okf/maint` is quiet, not an error. |
 
 The script prints one JSON document containing `status`, `alerts[]`, `errors[]`, per-check
 `checks` facts, and `notify`. Exit codes:
@@ -155,6 +156,29 @@ them as the worker's user (`admin`). Git then owns the repository it reads, so t
 
    The watchdog only reads, so writer deploys and restarts do not need to wait for it.
 
+### Maintainer queue across the migration
+
+- The production bundle gets its cursors only at Phase 3a Day 0 (`maint import-v4`, design
+  §9). Until then its maint checks stay quiet unless items or leases show up.
+- Phase 2 runs against the shadow bundle, and the unit above never reads that bundle's
+  `.okf/maint`. To watch the Phase 2 exit criterion (the shadow cursor advances on 6 of 7
+  days), add `--bundle <shadow bundle path>` to `ExecStart`. That also runs the writer checks
+  (commit age and jobs) against the shadow bundle, so the shadow bundle needs its own
+  `.okf/jobs/`. Remove the flag when the shadow is deleted.
+- After a Phase 3a rollback (legacy prompt, `maint export-v4 --pending-manifest`,
+  `solvely-wiki` removed from `AIWIKI_CHANGESETS_COMMIT`), nothing rewrites the server cursors
+  and the exported items stay `ready`. `maint_cursor_stale` then fires after 30 hours and
+  `maint_ready_stale` after 72, and neither clears. Once `ai-wiki maint status` shows no
+  active lease, archive the queue as the worker's user:
+
+  ```bash
+  sudo -u admin mv /home/admin/solvely-wiki/.okf/maint \
+    /home/admin/solvely-wiki/.okf/maint.rolled-back-$(date +%F)
+  ```
+
+  `.okf/` is excluded from Git, and a missing `.okf/maint` is quiet. A retried cutover starts
+  again from `maint import-v4`.
+
 ## Multica runtime host (optional)
 
 The Multica and ledger checks need the `multica` CLI to be logged in to the workspace with
@@ -204,6 +228,31 @@ been reassigned away from the agent. On 2026-09-23 a run made 6 calls and finish
   example after a manual recovery on the same issue (WAIO-547, WAIO-427), or when the next
   scheduled run succeeds.
 - **`ledger_needs_repair`**: clears once the entry is resolved through `ai-wiki maintain`.
+- **`maint_needs_human`**: clears when the owner reopens the item (`POST /admin/items/<id>/retry`) or
+  closes it (`POST /admin/items/<id>/resolve`), or when a new build re-admits an attempt-capped item at
+  the next `maint begin`. To see why, run `ai-wiki maint status --json` (`needs_human[].resolution`
+  has the reason and class; the plain table does not) or read `GET /maint/items/<id>`, whose
+  `attempts.history` has each attempt's detail.
+- **`maint_item_corrupt`**: the `item.json` fails the writer's own item check, so `maint next`
+  and `maint status` skip the item and the admin routes answer `500 item_corrupt`. Restore the
+  file from a backup or repair it by hand. Removing the item directory also clears the alert,
+  but it loses the item, because the cursor has already moved past its evidence.
+- **`maint_ready_stale`**: maintainer runs are not draining the queue (not scheduled, failing,
+  or too few items per run). It clears once no item has waited in `ready` longer than the
+  threshold.
+- **`maint_cursor_stale`**: no `maint collect` has succeeded for that collector, or, for
+  `repos`, some repository has not been scanned since its `stale_since`
+  (`cursors.repos.stale_repos` in the JSON output names them). It clears on the next collect
+  that scans every repository; a successful collect rewrites the cursor even when nothing
+  changed. A repository taken out of the scan keeps its row, so drop that row with
+  `ai-wiki admin cursor import <file> --replace`, where the file holds
+  `{"repos": {"value": <the edited repos cursor value>}}`.
+- **`maint_lease_stuck`**: the run named in the key acquired the lease more than `--stuck-hours`
+  ago and has not run `maint end`. While the lease is live, the message shows when it expires
+  and when it was last renewed. A lease stays live for up to 3 hours after the run's last
+  renewal, even if the run is dead, so check that run's issue. Once the lease has lapsed, the
+  next `maint begin` takes it over and returns the run's item to `ready`, which clears the
+  alert. It is one key for the whole time, so the lapse alone never sends a recovery card.
 - **`job_failed`**: clears once a later attempt on the same source or parent job is queued,
   running or done. A failure that nobody retries keeps alerting for
   `--unresolved-failure-hours` (7 days), well past the 24-hour listing window and the
@@ -221,8 +270,8 @@ been reassigned away from the agent. On 2026-09-23 a run made 6 calls and finish
 - Checkpoints written after it are ignored.
 - Issue status is rebuilt from the `status_changed` timeline.
 
-Pass the v3 key as well for dates before v4 existed. Ledger and writer checks read the files
-as they are today and only measure ages from `--now`.
+Pass the v3 key as well for dates before v4 existed. Ledger, writer and maint checks read the
+files as they are today and only measure ages from `--now`.
 
 ```bash
 ai-wiki-watchdog --multica --runs-limit 100 \
