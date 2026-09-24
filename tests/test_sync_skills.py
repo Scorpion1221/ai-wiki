@@ -62,6 +62,26 @@ def test_sync_skills_apply_installs_shims_the_cli_serves(tmp_path: Path) -> None
     assert applied.stdout == f"OK ai-wiki-maintainer: {target / 'ai-wiki-maintainer'}\n"
 
 
+def test_sync_skills_check_covers_every_canonical_skill(tmp_path: Path) -> None:
+    checked = run("--check", "--dest", str(tmp_path / "skills"))
+
+    assert checked.returncode == 1
+    assert [line.split(":")[0] for line in checked.stdout.splitlines()] == [
+        "DRIFT ai-wiki", "DRIFT ai-wiki-maintainer", "DRIFT ai-wiki-curating-maintainer",
+        "DRIFT okf-knowledge-curator"]
+
+
+def test_sync_skills_apply_installs_the_curating_maintainer(tmp_path: Path) -> None:
+    target = tmp_path / "skills"
+
+    applied = run("--apply", "--dest", str(target), "ai-wiki-curating-maintainer")
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert applied.stdout == f"OK ai-wiki-curating-maintainer: {target / 'ai-wiki-curating-maintainer'}\n"
+    installed = target / "ai-wiki-curating-maintainer" / "SKILL.md"
+    assert installed.read_bytes() == (ROOT / "skills/ai-wiki-curating-maintainer/SKILL.md").read_bytes()
+
+
 def test_sync_skills_apply_and_check_preserves_platform_metadata(tmp_path: Path) -> None:
     target = tmp_path / "skills"
     installed = target / "ai-wiki"

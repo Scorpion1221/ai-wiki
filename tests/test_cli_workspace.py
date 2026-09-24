@@ -94,9 +94,11 @@ def test_doctor_passes_a_curator_with_exactly_its_scopes(gate, capsys, tmp_path,
 
     assert code == 0, report
     checks = {row["check"]: row for row in report["checks"]}
-    assert {"api", "scopes", "okf_version", "state_dir", "disk", "tool:multica", "skill:ai-wiki-maintainer"} <= set(
-        checks)
-    assert checks["skill:ai-wiki"]["detail"] == f"sha256 {doctor.skill_digest(SKILLS / 'ai-wiki')}"
+    assert {"api", "scopes", "okf_version", "state_dir", "disk", "tool:multica",
+            "skill:okf-knowledge-curator"} <= set(checks)
+    assert "skill:ai-wiki" not in checks  # the reader's skill describes the legacy ingest and audit flow
+    assert checks["skill:ai-wiki-curating-maintainer"]["detail"] == \
+        f"sha256 {doctor.skill_digest(SKILLS / 'ai-wiki-curating-maintainer')}"
 
 
 def test_doctor_fails_closed(gate, capsys, tmp_path, monkeypatch) -> None:
@@ -138,6 +140,19 @@ def test_doctor_fails_a_run_on_a_whoami_the_read_mirror_answered(gate, capsys, t
     assert code == 4 and [row["check"] for row in report["checks"] if not row["ok"]] == ["writer"]
     monkeypatch.setenv("AIWIKI_TOKEN", TOKENS["member"])  # a member only ingests: /ingest is routed apart
     assert wiki_json(capsys, "doctor", "--role", "member", "--state-dir", tmp_path / "st")[0] == 0
+
+
+def test_doctor_fails_a_bundle_the_health_answerer_does_not_serve(gate, capsys, tmp_path, monkeypatch) -> None:
+    """The writer answers /whoami, but the tunnel leaves /health on a mirror without the bundle."""
+    monkeypatch.setattr(doctor.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    shutil.rmtree(gate.root / "kb-b")  # the curator may use kb-b; nothing serves it now
+
+    code, report = wiki_json(capsys, "-b", "kb-b", "doctor", "--role", "curator", "--state-dir", tmp_path / "st")
+
+    failed = [row for row in report["checks"] if not row["ok"]]
+    assert code == 4 and [row["check"] for row in failed] == ["okf_version"]
+    assert "404: no such bundle 'kb-b'" in failed[0]["detail"]
+    assert failed[0]["detail"].endswith("the read mirror must serve this bundle")
 
 
 # --- the HTTP client ---------------------------------------------------------------------------

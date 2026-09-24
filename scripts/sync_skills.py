@@ -22,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-SKILLS = ("ai-wiki", "ai-wiki-maintainer", "okf-knowledge-curator")
+SKILLS = ("ai-wiki", "ai-wiki-maintainer", "ai-wiki-curating-maintainer", "okf-knowledge-curator")
 PRESERVE = {"multica-metadata.json"}
 
 
