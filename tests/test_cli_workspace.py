@@ -94,8 +94,8 @@ def test_doctor_passes_a_curator_with_exactly_its_scopes(gate, capsys, tmp_path,
 
     assert code == 0, report
     checks = {row["check"]: row for row in report["checks"]}
-    assert {"api", "scopes", "okf_version", "state_dir", "disk", "tool:multica", "skill:ai-wiki-maintainer"} <= set(
-        checks)
+    assert {"api", "scopes", "okf_version", "state_dir", "disk", "tool:multica",
+            "skill:ai-wiki-curating-maintainer"} <= set(checks)
     assert checks["skill:ai-wiki"]["detail"] == f"sha256 {doctor.skill_digest(SKILLS / 'ai-wiki')}"
 
 
