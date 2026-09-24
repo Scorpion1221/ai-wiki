@@ -8,7 +8,9 @@ offset}, capped at ``page_cap`` rows whatever --limit says (production caps at 1
 echoes the requested limit); ``order_by_offset`` replaces the listing order for one offset
 to simulate a deletion or an unstable order among created_at ties; ``issue metadata list``
 -> {key: stored value}; ``issue metadata get`` -> the stored value JSON-encoded once more;
-``issue comment list`` -> [comments].
+``issue comment list`` -> [comments]; ``issue timeline`` -> [events], filtered by --action
+(repeatable or comma-separated); ``issue get <id|identifier>`` -> the issue row;
+``repo list`` -> [repos].
 """
 
 from __future__ import annotations
@@ -70,6 +72,19 @@ def main() -> int:
         with open(state_path, "w", encoding="utf-8") as handle:
             json.dump(state, handle)
         print(json.dumps({"issue_id": args[3], "key": option(args, "--key")}))
+    elif args[:2] == ["issue", "timeline"]:
+        actions = {action for index, arg in enumerate(args[:-1]) if arg == "--action"
+                   for action in args[index + 1].split(",")}
+        events = state.get("timelines", {}).get(args[2], [])
+        print(json.dumps([row for row in events if not actions or row.get("action") in actions]))
+    elif args[:2] == ["issue", "get"]:
+        found = [row for row in state.get("issues", []) if args[2] in (row["id"], row.get("identifier"))]
+        if not found:
+            print(f"Error: issue {args[2]!r} not found", file=sys.stderr)
+            return 1
+        print(json.dumps(found[0]))
+    elif args[:2] == ["repo", "list"]:
+        print(json.dumps(state.get("repos", [])))
     elif args[:3] == ["issue", "comment", "list"]:
         since = option(args, "--since")
         comments = state.get("comments", {}).get(args[3], [])

@@ -50,6 +50,10 @@ UTC = timezone.utc  # noqa: UP017
 DEFAULT_AUTOPILOT = "5c80732b-67a6-4e33-ba22-c620a94e27c1"
 DEFAULT_CHECKPOINT_KEY = "ai_wiki_incremental_checkpoint_v4"
 STUCK_ISSUE_STATUSES = ("todo", "in_progress")
+# The writer's run lease (service/maint_state.py): live until min(expires_at, renewed_at + TTL),
+# and a renewal stamped further ahead than the clock skew is forged.
+LEASE_TTL = timedelta(hours=3)
+LEASE_CLOCK_SKEW = timedelta(minutes=5)
 CLOSED_ISSUE_STATUSES = ("done", "cancelled", "canceled")
 MAX_MESSAGE_LINES = 12
 CST = timezone(timedelta(hours=8))
@@ -366,6 +370,9 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
     # An unretried failure keeps alerting after it leaves the listing window; otherwise it would
     # silently drop out and read as a recovery while nothing was fixed.
     alert_start = now - timedelta(hours=max(args.failed_window_hours, args.unresolved_failure_hours))
+    # An admin revert leaves nothing of a changeset to audit: it settles that audit's failures.
+    reverted = {changeset: j for _c, j in jobs if j.get("kind") == "revert" and j.get("status") == "done"
+                and isinstance(j.get("reverted"), list) for changeset in j["reverted"] if isinstance(changeset, str)}
     failed = []
     for created, job in jobs:
         finished = parse_ts(job.get("finished")) or created
@@ -375,6 +382,8 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
         # (ingest title), or the same parent (audit) that is done or in flight resolves it.
         retry = next((j for c, j in jobs if c > created and resolves(j, job)
                       and j.get("status") in ("done", "queued", "running")), None)
+        if retry is None and job.get("kind") == "audit" and isinstance(job.get("parent_job"), str):
+            retry = reverted.get(job["parent_job"])
         failure = job.get("failure") if isinstance(job.get("failure"), dict) else {}
         row = {"id": job.get("id"), "kind": job.get("kind", "ingest"), "finished": iso(finished),
                "class": failure.get("class"), "error": short(job.get("error"), 120),
@@ -388,12 +397,27 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
                                 f"（{reason}）"))
 
     queued = sorted(created for created, job in jobs if job.get("status") == "queued")
+    # The writer holds queued Codex audits back while a maintainer run holds its lease (design
+    # §2.6). Such an audit is not stuck until the lease lapses, and its wait counts from then.
+    lease_until = None
+    try:
+        lease = json.loads((bundle / ".okf" / "maint" / "lease-maintainer.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        lease = None
+    if isinstance(lease, dict):
+        expires, renewed = parse_ts(lease.get("expires_at")), parse_ts(lease.get("renewed_at"))
+        if expires and renewed and renewed <= now + LEASE_CLOCK_SKEW:
+            lease_until = min(expires, renewed + LEASE_TTL)
     stuck = []
     for created, job in jobs:
         status = job.get("status")
         if status not in ("queued", "running"):
             continue
         since = (parse_ts(job.get("started")) or created) if status == "running" else created
+        if status == "queued" and job.get("kind") == "audit" and lease_until is not None:
+            if now < lease_until:
+                continue
+            since = max(since, lease_until)
         age = age_h(now, since)
         if age > args.stuck_hours:
             stuck.append({"id": job.get("id"), "status": status, "age_hours": age})
@@ -401,7 +425,7 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
                                 f"writer {name}：job {job.get('id')} 停在 {status} 已 {age}h"
                                 f"（阈值 {args.stuck_hours:g}h）"))
     facts = {"bundle": str(bundle), "last_commit": commit_fact, "jobs": len(jobs), "unreadable_jobs": unreadable,
-             "status_counts": counts, "queue_depth": len(queued),
+             "status_counts": counts, "queue_depth": len(queued), "maintainer_lease_until": iso(lease_until),
              "oldest_queued_age_hours": age_h(now, queued[0]) if queued else None, "stuck_jobs": stuck,
              "failed_in_window": failed, "failed_window_hours": args.failed_window_hours,
              "unresolved_failure_hours": args.unresolved_failure_hours}

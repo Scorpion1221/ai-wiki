@@ -1,0 +1,40 @@
+compare live=solvely-wiki@b71c2e0d1e2f shadow=solvely-wiki-shadow@c9d0e1f2a3b4 since=a3583950c1d2
+concepts changed: live 3, shadow 2; differing 2, identical 1
+identical: metrics/same.md
+
+== metrics/funnel.md (live: changed, shadow: changed)
+solvely-wiki                                       solvely-wiki-shadow
+@@ 3 | 3 @@
+title: Plugin funnel                               title: Plugin funnel
+description: Install to first payment              description: Install to first payment
+generated:                                         generated:
+  by: process:ai-wiki-curator                    |   by: process:ai-wiki-maintainer
+  at: '2026-10-17T04:12:09Z'                     |   at: '2026-10-17T05:30:41Z'
+sources:                                           sources:
+- id: waio-1                                       - id: waio-1
+  resource: /sources/waio-1.md.source                resource: /sources/waio-1.md.source
+- id: waio-612                                     - id: waio-612
+  resource: /sources/waio-612.md.source          |   resource: /sources/waio-612-3f2a.md.source
+---                                                ---
+# Summary                                          # Summary
+
+The plugin funnel counts installs that reach a f   The plugin funnel counts installs that reach a f
+irst payment.                                      irst payment.
+
+The 7-day rate rose to 4.1% after the checkout f | 结账修复后，7 日首付率从 3.2% 升到 4.1%，来源是
+ix.[^waio-612]                                     WAIO-612 的周报，覆盖 2026-10-09 至 2026-10-16
+                                                   的全部插件安装。[^waio-612]
+
+# Definition                                       # Definition
+
+
+== metrics/new.md (live: created, shadow: absent)
+solvely-wiki                                       solvely-wiki-shadow
+@@ 1 | 1 @@
+---                                              <
+type: Metric                                     <
+title: New                                       <
+---                                              <
+# Summary                                        <
+                                                 <
+A metric only the live flow created.             <

@@ -210,6 +210,88 @@ def test_deprecated_status_survives_audit_and_draft_becomes_stable() -> None:
     assert "status: deprecated" in _audit(deprecated, deprecated, verdict="unverified")[0]
 
 
+MAINTAINER = "process:ai-wiki-maintainer"
+
+
+def _changeset(before: str | None, after: str, **kwargs) -> tuple[str, list[str]]:
+    return bookkeeping.apply_bookkeeping(
+        before, after, actor=MAINTAINER, trusted_now=NOW, stage="changeset", **kwargs,
+    )
+
+
+def test_changeset_new_concept_starts_draft_with_service_generation_only() -> None:
+    forged = (
+        "---\ntype: Risk\ntitle: New\ndescription: d\ntags: [a]\nstatus: stable\n"
+        "generated: {by: 'human:x', at: 2030-01-01T00:00:00Z}\n"
+        "sources:\n  - id: s\n    resource: /sources/s.md.source\n"
+        f"verified: {{by: {AUDITOR}, at: 2030-01-01T00:00:00Z}}\n---\n# New\n"
+    )
+    text, repairs = _changeset(None, forged)
+    assert repairs == [
+        "restored service-owned verification history without adding verification",
+        "restored service-owned status",
+    ]
+    assert text == (
+        "---\ntype: Risk\ntitle: New\ndescription: d\ntags: [a]\nstatus: draft\n"
+        f"generated: {{by: '{MAINTAINER}', at: {STAMP}}}\n"
+        "sources:\n  - id: s\n    resource: /sources/s.md.source\n---\n# New\n"
+    )
+
+
+def test_changeset_keeps_existing_status_and_history_while_stamping_generation() -> None:
+    before = _live("metrics/plugin-install-first-payment-funnel-2026-09.md")
+    after = before.replace("status: stable", "status: draft").replace(
+        "verified:\n", "verified:\n- {by: 'human:forged', at: 2026-09-24T00:00:00Z}\n",
+    ).replace("Redacted fixture body.", "Changed claim.")
+    text, repairs = _changeset(before, after)
+    assert repairs == [
+        "restored service-owned verification history without adding verification",
+        "restored service-owned status",
+    ]
+    frontmatter = parse_document(text).frontmatter
+    assert frontmatter["status"] == "stable"
+    assert frontmatter["verified"] == parse_document(before).frontmatter["verified"]
+    assert frontmatter["generated"] == {"by": MAINTAINER, "at": STAMP}
+    assert concept_metadata(frontmatter)["verification_current"] is False
+    # Only service keys changed: the file is a no-op and keeps its bytes.
+    assert _changeset(before, before.replace("status: stable", "status: draft")) == (
+        before, ["restored service-owned status"],
+    )
+
+
+def test_changeset_deprecate_sets_deprecated_status() -> None:
+    before = _live("metrics/plugin-install-first-payment-funnel-2026-09.md")
+    noted = before.replace("# Summary", "> Deprecated 2026-09-24: superseded by x.\n\n# Summary", 1)
+    text, _repairs = _changeset(before, noted, deprecate=True)
+    frontmatter = parse_document(text).frontmatter
+    assert (frontmatter["status"], frontmatter["generated"]) == ("deprecated", {"by": MAINTAINER, "at": STAMP})
+    with pytest.raises(ValueError, match="only a changeset may deprecate"):
+        bookkeeping.apply_bookkeeping(before, noted, actor=CURATOR, trusted_now=NOW, stage="curate", deprecate=True)
+    with pytest.raises(ValueError, match="require the pre-edit document"):
+        _changeset(None, noted, deprecate=True)
+
+
+@pytest.mark.parametrize(
+    ("line", "key"),
+    [
+        ('"stat\\x75s": stable\n', "status"),  # escaped: the patterns see another name
+        ('"s\\x6furces": []\n', "sources"),
+        ("!!str status: stable\n", "status"),  # tagged, so it joins the block above
+        ("? status\n: stable\n", "status"),  # explicit key
+        ("<<: {status: stable}\n", "<<"),  # merge key
+    ],
+)
+def test_changeset_refuses_keys_yaml_reads_under_another_name(line: str, key: str) -> None:
+    before = _live("metrics/plugin-install-first-payment-funnel-2026-09.md")
+    after = before.replace("aliases:\n", line + "aliases:\n", 1)
+    with pytest.raises(bookkeeping.BookkeepingError, match=f"key {key!r} is not written as a plain name") as raised:
+        _changeset(before, after)
+    assert raised.value.line == after.splitlines().index(line.splitlines()[0]) + 1
+    assert _changeset(before, before.replace("Redacted fixture body.", "Changed."))[0]  # plain keys pass
+    # The Codex stages keep their behaviour until the changeset path ships.
+    assert _audit(before, after)[0]
+
+
 def test_spill_the_editor_writes_is_discarded_and_reported() -> None:
     """The e5c00b16c75a slip: a reviewer event one line below the closing delimiter."""
     before = _live("metrics/view-references-exposure-proxy-2026-09.md")
@@ -308,6 +390,32 @@ def test_snapshot_reference_normalization_leaves_ambiguous_or_valid_references(
     assert bookkeeping.normalize_snapshot_reference(
         text, concept_rel="risks/x.md", snapshot_rel=snapshot, existing=existing,
     ) == (text, [])
+
+
+@pytest.mark.parametrize("rel", sorted(SHAPES))
+def test_appended_sources_follow_each_live_list_style(rel: str) -> None:
+    before = _live(rel)
+    text = bookkeeping.append_sources(before, [{"id": "packet", "resource": "evidence:packet"}])
+    start = before.index("sources:\n")
+    item = next(line for line in before[start:].splitlines()[1:] if line.lstrip().startswith("- "))
+    pad = item[: len(item) - len(item.lstrip())]
+    assert text.replace(f"{pad}- {{id: packet, resource: 'evidence:packet'}}\n", "", 1) == before
+    assert parse_document(text).frontmatter["sources"][-1] == {"id": "packet", "resource": "evidence:packet"}
+    inline = "---\ntype: Risk\nsources: [{id: a, resource: /sources/a.md.source}]\n---\n# X\n"
+    assert bookkeeping.append_sources(inline, [{"id": "b", "resource": "/sources/b.md.source"}]) == (
+        "---\ntype: Risk\nsources:\n  - {id: a, resource: /sources/a.md.source}\n"
+        "  - {id: b, resource: /sources/b.md.source}\n---\n# X\n"
+    )
+
+
+def test_source_resource_rewrite_touches_only_matching_resources() -> None:
+    text = _cite("evidence:packet").replace("title: Evidence", "title: 'Evidence'")
+    rewritten, indices = bookkeeping.rewrite_source_resource(
+        text, placeholder="evidence:packet", resource="/" + SNAPSHOT,
+    )
+    assert (rewritten, indices) == (_cite("/" + SNAPSHOT).replace("title: Evidence", "title: 'Evidence'"), [0])
+    quoted = text.replace("title: 'Evidence'", "title: 'cites evidence:packet'")
+    assert bookkeeping.rewrite_source_resource(quoted, placeholder="evidence:packet", resource="/x") == (quoted, [])
 
 
 LIVE_GIT = os.environ.get("AIWIKI_TEST_BUNDLE_GIT")

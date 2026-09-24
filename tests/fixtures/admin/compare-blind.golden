@@ -1,0 +1,28 @@
+compare blind since=a3583950c1d2
+concepts changed: 3; differing 2, identical 1
+identical: metrics/same.md
+
+== metrics/funnel.md (A: changed, B: changed)
+A                                                  B
+@@ 12 | 12 @@
+
+The plugin funnel counts installs that reach a f   The plugin funnel counts installs that reach a f
+irst payment.                                      irst payment.
+
+结账修复后，7 日首付率从 3.2% 升到 4.1%，来源是  | The 7-day rate rose to 4.1% after the checkout f
+WAIO-612 的周报，覆盖 2026-10-09 至 2026-10-16     ix.[^S2]
+的全部插件安装。[^S2]
+
+# Definition                                       # Definition
+
+
+== metrics/new.md (A: created, B: absent)
+A                                                  B
+@@ 1 | 1 @@
+---                                              <
+type: Metric                                     <
+title: New                                       <
+---                                              <
+# Summary                                        <
+                                                 <
+A metric only the live flow created.             <

@@ -12,6 +12,8 @@ connection once, then list / switch / create bundles that live on that server:
 
 Config lives at ~/.ai-wiki/config.json (override with $AIWIKI_CONFIG):
     {"endpoint": "https://host/", "token": "<tok>", "bundle": "<active-name>"}
+$AIWIKI_TOKEN, when set, is used instead of the saved token, so an agent's injected token
+never has to be written to the file.
 Older configs (a flat {endpoint, token}, or the {current, bundles:{...}} form) are read
 and migrated transparently.
 """
@@ -19,8 +21,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.error
@@ -38,6 +42,7 @@ _DESCRIPTION = "Read and maintain a curated OKF knowledge bundle over its servic
 _VERSION_FLAGS = {"-v", "-V", "--version"}
 _DEFAULT_CAT_CHARS = 8000
 _DEFAULT_GREP_LIMIT = 100
+_STATE_DIR = Path("~/.ai-wiki/state")  # expanded when used, so help and tests never pin a home
 
 
 class _AxiParser(argparse.ArgumentParser):
@@ -84,6 +89,26 @@ def _positive(value: str) -> int:
     return parsed
 
 
+def _pair(value: str) -> tuple[str, str]:
+    path, _sep, reason = value.partition(":")
+    if not path or not reason.strip():
+        raise argparse.ArgumentTypeError("expected PATH:REASON")
+    return path, reason
+
+
+def _triple(value: str) -> tuple[str, str, str]:
+    path, successor, reason = (value.split(":", 2) + ["", ""])[:3]
+    if not path or not successor or not reason.strip():
+        raise argparse.ArgumentTypeError("expected PATH:SUPERSEDED_BY:REASON")
+    return path, successor, reason
+
+
+def _run(value: str) -> str:
+    if not re.fullmatch(r"[\w.:@/-]{1,128}", value):
+        raise argparse.ArgumentTypeError("1-128 of A-Z a-z 0-9 _ . : @ / -")
+    return value
+
+
 def _compatible(service_version: object) -> bool:
     """Client and writer interoperate when their major.minor versions match."""
     def major_minor(value: object) -> list[str] | None:
@@ -109,7 +134,8 @@ def _command_path(args: list[str]) -> str:
             positionals.append(arg)
     if not positionals:
         return "ai-wiki"
-    depth = 2 if positionals[0] in ("bundle", "config") and len(positionals) > 1 else 1
+    depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint") \
+        and len(positionals) > 1 else 1
     return "ai-wiki " + " ".join(positionals[:depth])
 
 
@@ -148,12 +174,18 @@ def _save(cfg: dict) -> None:
     CONFIG.chmod(0o600)
 
 
+def _token(cfg: dict) -> str | None:
+    """$AIWIKI_TOKEN wins over the saved token."""
+    return os.environ.get("AIWIKI_TOKEN") or cfg.get("token")
+
+
 def _conn() -> tuple[str, str]:
     cfg = _normalize(_load())
-    if not cfg.get("endpoint") or not cfg.get("token"):
-        _fail("not configured: endpoint and token are required",
+    token = _token(cfg)
+    if not cfg.get("endpoint") or not token:
+        _fail("not configured: endpoint and token (saved or $AIWIKI_TOKEN) are required",
               help_command='ai-wiki config set --endpoint <url> --token <token>')
-    return cfg["endpoint"], cfg["token"]
+    return cfg["endpoint"], token
 
 
 def _active(override: str | None = None) -> str | None:
@@ -184,6 +216,31 @@ def _post(route: str, payload: dict, *, bundle: str | None = None, method: str =
         method=method,
     )
     return _send(req)
+
+
+def _http(method: str, route: str, *, bundle: str | None = None, params: dict | None = None,
+          data: bytes | None = None, headers: dict | None = None, timeout: float = 60):
+    """One request, answered as ``(status, headers, body)`` whatever its status.
+
+    Only a network failure raises (``OSError``: ``URLError``, a timeout, a truncated or
+    garbled answer), so a caller can retry it; the returned headers are looked up
+    case-insensitively.
+    """
+    endpoint, token = _conn()
+    query = {k: v for k, v in {**(params or {}), "bundle": bundle}.items() if v is not None}
+    url = f"{endpoint.rstrip('/')}{route}" + (f"?{urllib.parse.urlencode(query)}" if query else "")
+    sent = {"Authorization": f"Bearer {token}", "User-Agent": _UA, **(headers or {})}
+    if data is not None:
+        sent.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(url, data=data, headers=sent, method=method)
+    try:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:  # every non-2xx, a 304 included
+            return e.code, e.headers, e.read()
+    except http.client.HTTPException as exc:  # IncompleteRead, BadStatusLine: the answer was lost
+        raise OSError(f"{type(exc).__name__}: {exc}") from exc
 
 
 def _send(req: urllib.request.Request) -> dict:
@@ -271,7 +328,7 @@ def _home() -> int:
     identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION})
     print("\n".join(identity))
     cfg = _normalize(_load())
-    if not cfg.get("endpoint") or not cfg.get("token"):
+    if not cfg.get("endpoint") or not _token(cfg):
         print()
         emit(
             object_lines("connection", {"configured": False}),
@@ -500,6 +557,93 @@ def main(argv=None) -> int:
                             help="maximum wait per stage; timeout preserves job ID (default: 3600)")
     p_maintain.add_argument("--json", action="store_true",
                             help="emit the run summary as JSON (receipts stay in <state-dir>/state.json)")
+    from aiwiki.cli import admin, maint
+
+    admin.add_parser(sub, common)
+    maint.add_parser(sub, common)
+
+    # curation through changesets (design §3): a local workspace judged by the gate's own code
+    p_doctor = sub.add_parser(
+        "doctor", help="preflight a role: API contract, exact scopes, bundle, state dir, tools (exit 4 fails)",
+        command_path="ai-wiki doctor",
+        epilog=_examples("ai-wiki doctor --role curator", "ai-wiki doctor --role auditor --json"), **common,
+    )
+    p_doctor.add_argument("--role", required=True, choices=("curator", "auditor", "member"))
+    p_doctor.add_argument("--state-dir", type=Path, default=_STATE_DIR, help=f"default: {_STATE_DIR}")
+    p_doctor.add_argument("--skills-dir", type=Path, help="report the role's installed skills by digest")
+    p_doctor.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    p_ws = sub.add_parser(
+        "workspace", help="pull the published bundle into a local workspace; show local changes",
+        command_path="ai-wiki workspace",
+        epilog=_examples("ai-wiki workspace pull --dir ws", "ai-wiki workspace status --dir ws",
+                         "ai-wiki workspace diff --dir ws --stamped --item <item>"), **common,
+    )
+    wsub = p_ws.add_subparsers(dest="action", required=True)
+    p_pull = wsub.add_parser(
+        "pull", help="fetch the published revision; local edits of paths the server changed become <path>.mine "
+                     "(exit 7)", command_path="ai-wiki workspace pull",
+        epilog=_examples("ai-wiki -b solvely-wiki workspace pull --dir ws"), **common,
+    )
+    p_status = wsub.add_parser(
+        "status", help="list local changes against the pulled base", command_path="ai-wiki workspace status",
+        epilog=_examples("ai-wiki workspace status --dir ws"), **common,
+    )
+    p_diff = wsub.add_parser(
+        "diff", help="unified diff of local changes; --stamped shows the bytes the service would commit",
+        command_path="ai-wiki workspace diff",
+        epilog=_examples("ai-wiki workspace diff --dir ws", "ai-wiki workspace diff --dir ws --stamped --item <item>"),
+        **common,
+    )
+    p_diff.add_argument("--stamped", action="store_true", help="diff against the service-stamped result")
+    p_concept = sub.add_parser(
+        "concept", help="scaffold a concept without service-owned keys", command_path="ai-wiki concept",
+        epilog=_examples("ai-wiki concept new metrics/x.md --type Metric --title X --description D --tags a,b "
+                         "--source-id s"), **common,
+    )
+    p_new = p_concept.add_subparsers(dest="action", required=True).add_parser(
+        "new", help="write the frontmatter skeleton; you write the body", command_path="ai-wiki concept new",
+        epilog=_examples('ai-wiki concept new decisions/x.md --type Decision --title "X" --description "…" '
+                         "--tags checkout,recovery --source-id x-status"), **common,
+    )
+    p_new.add_argument("path", help="bundle-relative concept path, e.g. decisions/x.md")
+    p_new.add_argument("--type", required=True)
+    p_new.add_argument("--title", required=True)
+    p_new.add_argument("--description", required=True)
+    p_new.add_argument("--tags", required=True, help="comma-separated")
+    p_new.add_argument("--source-id", required=True, help="the evidence id the concept cites as evidence:packet")
+    p_validate = sub.add_parser(
+        "validate", help="judge the workspace's changeset locally with the service gate's code (exit 6 rejects)",
+        command_path="ai-wiki validate",
+        epilog=_examples("ai-wiki validate --dir ws --item <item>", "ai-wiki validate --dir ws --json"), **common,
+    )
+    p_propose = sub.add_parser(
+        "propose", help="validate, then submit the workspace's changeset to the writer gate",
+        command_path="ai-wiki propose",
+        epilog=_examples("ai-wiki propose --dir ws --item <item> --run WAIO-612",
+                         "ai-wiki propose --dir ws --upload notes.md --source-id notes-2026-09 --dry-run"), **common,
+    )
+    p_propose.add_argument("--dry-run", action="store_true", help="ask the writer for its verdict; commit nothing")
+    p_propose.add_argument("--no-close", action="store_true", help="leave the work item open (more changesets follow)")
+    p_propose.add_argument("--wait", type=_positive, default=1800,
+                           help="seconds to follow a queued job (default: 1800)")
+    p_propose.add_argument("--state-dir", type=Path, default=_STATE_DIR,
+                           help=f"the maintenance run's state directory, where it records the proposal "
+                                f"(default: {_STATE_DIR})")
+    for parser in (p_pull, p_status, p_diff, p_new, p_validate, p_propose):
+        parser.add_argument("--dir", default=".", help="the workspace directory (default: .)")
+    for parser in (p_diff, p_validate, p_propose):
+        evidence = parser.add_mutually_exclusive_group(required=parser is p_propose)
+        evidence.add_argument("--item", help="cite the frozen evidence of this work item (it_<id>)")
+        evidence.add_argument("--upload", help="cite this file as the evidence packet (needs --source-id)")
+        parser.add_argument("--source-id", help="the evidence id the concepts cite (default: the one they cite)")
+        parser.add_argument("--deprecate", action="append", type=_triple, metavar="PATH:SUPERSEDED_BY:REASON")
+        parser.add_argument("--allow-shrink", action="append", type=_pair, metavar="PATH:REASON",
+                            help="let PATH's body shrink below 70%% of its base, for REASON")
+        parser.add_argument("--allow-retype", action="append", type=_pair, metavar="PATH:REASON",
+                            help="let PATH's type or title change, for REASON")
+        parser.add_argument("--run", type=_run, help="the maintenance run (X-AIWiki-Run), e.g. WAIO-612")
+    for parser in (p_pull, p_status, p_diff, p_validate, p_propose):
+        parser.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
 
     ap.command_path = _command_path(args)
     a = ap.parse_args(args)
@@ -510,6 +654,33 @@ def main(argv=None) -> int:
         return _cmd_config(a)
 
     bsel = _active(a.bundle)  # bundle to target on the server (None → server default)
+
+    if a.cmd == "doctor":
+        from aiwiki.cli import doctor
+
+        result = doctor.run(a.role, bundle=bsel, state_dir=a.state_dir.expanduser(),
+                            skills_dir=a.skills_dir.expanduser() if a.skills_dir else None)
+        if a.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            emit(object_lines("doctor", {"role": result["role"], "ok": result["ok"]}),
+                 table_lines("checks", result["checks"], ("check", "ok", "detail")))
+        return 0 if result["ok"] else 4
+    if a.cmd in ("workspace", "concept", "validate", "propose"):
+        from aiwiki.cli import workspace
+
+        if getattr(a, "upload", None) and not a.source_id:
+            _fail("--upload needs --source-id", help_command=f"{ap.command_path} --help", code=2)
+        try:
+            return workspace.run(a, a.bundle)  # a workspace keeps its bundle; only -b may contradict it
+        except workspace.WorkspaceError as exc:
+            _fail(str(exc), help_command=f"{ap.command_path} --help", code=exc.code)
+        except OSError as exc:  # the writer unreachable, or the workspace unwritable
+            _fail(str(exc), help_command="ai-wiki config show")
+    if a.cmd == "admin":
+        return admin.command(a, bsel)
+    if a.cmd == "maint":
+        return maint.command(a, a.bundle)  # a run keeps its bundle; only -b may contradict it
 
     if a.cmd == "maintain":
         from aiwiki.cli import maintain
@@ -842,9 +1013,11 @@ def _cmd_config(a) -> int:
                                      "token_set": bool(cfg.get("token")),
                                      "bundle": cfg.get("bundle") or "server default"}))
     else:
-        tok = cfg.get("token") or ""
+        tok = _token(cfg) or ""
         output = {"path": str(CONFIG), "endpoint": cfg.get("endpoint"),
                   "token": (tok[:4] + "…") if tok else None,
+                  "token_source": ("env:AIWIKI_TOKEN" if os.environ.get("AIWIKI_TOKEN")
+                                   else "config" if tok else None),
                   "bundle": cfg.get("bundle") or "server default"}
         if a.json:
             print(json.dumps(output, ensure_ascii=False, indent=2))

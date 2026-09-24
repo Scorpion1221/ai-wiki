@@ -99,6 +99,26 @@ def _entry(op: str, subject: str, note: str, files: list[str]) -> str:
     return " — ".join(segments)
 
 
+def append(root: Path, op: str, subject: str, files: list[str], note: str = "", day: str | None = None) -> str:
+    """Prepend one entry to ``root/log.md`` and return its date.
+
+    Services call this rather than ``main``: a concept path such as ``-x.md`` must never
+    be parsed as an option. Raises ``ValueError`` for an invalid entry or log.
+    """
+    log = root / "log.md"
+    if has_symlink_component(root, log):
+        raise ValueError("unsafe log path (outside bundle or symlink): log.md")
+    today = _valid_date(day or date.today().isoformat())
+    entry = _entry(op, subject, note, files)
+    text = log.read_text(encoding="utf-8") if log.exists() else HEADER
+    intro, sections = _parse_log(text)
+    # Newest operation first within the day; date sections are sorted newest first
+    # by _render_log.
+    sections[today] = [entry, *sections.get(today, [])]
+    log.write_text(_render_log(intro, sections), encoding="utf-8")
+    return today
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Append an entry to an OKF v0.2 log.md.")
     parser.add_argument("bundle", type=Path)
@@ -112,25 +132,16 @@ def main(argv=None) -> int:
     root = args.bundle.expanduser().resolve()
     if not root.is_dir():
         parser.error(f"not a bundle directory: {root}")
-    log = root / "log.md"
-    if has_symlink_component(root, log):
+    if has_symlink_component(root, root / "log.md"):
         print("error: unsafe log path (outside bundle or symlink): log.md", file=sys.stderr)
         return 2
 
     try:
-        today = _valid_date(args.date or date.today().isoformat())
-        entry = _entry(args.op, args.subject, args.note, args.files)
-        text = log.read_text(encoding="utf-8") if log.exists() else HEADER
-        intro, sections = _parse_log(text)
+        today = append(root, args.op, args.subject, args.files, args.note, args.date)
     except ValueError as exc:
         print(f"error: invalid OKF v0.2 log: {exc}", file=sys.stderr)
         return 2
-
-    # Newest operation first within the day; date sections are sorted newest first
-    # by _render_log.
-    sections[today] = [entry, *sections.get(today, [])]
-    log.write_text(_render_log(intro, sections), encoding="utf-8")
-    print(f"appended to {log.relative_to(root)}: {today} {args.op} | {args.subject}")
+    print(f"appended to log.md: {today} {args.op} | {args.subject}")
     return 0
 
 

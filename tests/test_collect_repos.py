@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -11,8 +13,16 @@ from pathlib import Path
 
 import pytest
 
+from aiwiki.maint import collect_repos, planner
+from aiwiki.runtime import secrets
+from aiwiki.service import maint_state
+
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "skills" / "ai-wiki-maintainer" / "scripts" / "scan_reference_repos.py"
+SCANNER = (sys.executable, "-m", "aiwiki.maint.collect_repos")
+
+
+def env() -> dict[str, str]:
+    return {**os.environ, "PYTHONPATH": str(ROOT / "src")}
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -44,8 +54,9 @@ def make_remote(
 
 def scan(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
+        [*SCANNER, *args],
         cwd=ROOT,
+        env=env(),
         capture_output=True,
         text=True,
         check=False,
@@ -747,10 +758,10 @@ def test_scanner_bounds_git_calls_and_never_prompts(tmp_path: Path, monkeypatch:
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--root", str(root), "--required-remote", str(slow_remote),
+        [*SCANNER, "--root", str(root), "--required-remote", str(slow_remote),
          "--required-remote", str(fast_remote), "--required-remote", secret_url,
          "--cache-dir", str(tmp_path / "cache"), "--git-timeout", "2"],
-        cwd=ROOT, capture_output=True, text=True, check=False, timeout=25,
+        cwd=ROOT, env=env(), capture_output=True, text=True, check=False, timeout=25,
     )
 
     assert result.returncode == 3, result.stdout + result.stderr
@@ -944,3 +955,272 @@ def test_scanner_keeps_non_ascii_paths_verbatim(tmp_path: Path) -> None:
         {"status": "A", "path": "tasks/20260921-新任务/状态 notes.md"},
     ]
     assert row["priority_groups"] == {"tasks/20260920-中文需求": 1, "tasks/20260921-新任务": 1}
+
+
+# Repos collector (design §4.3): report -> planner candidates with frozen evidence -> cursor.
+
+
+def scan_report(tmp_path: Path, root: Path, *args: str) -> dict:
+    result = scan(tmp_path, "--root", str(root), "--cache-dir", str(tmp_path / "cache"), *args)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+def commit_all(work: Path, message: str, files: dict[str, str | bytes | None]) -> str:
+    for relative, content in files.items():
+        target = work / relative
+        if content is None:
+            target.unlink()
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="utf-8")
+    git(work, "add", "-A")
+    git(work, "commit", "-m", message)
+    git(work, "push")
+    return git(work, "rev-parse", "HEAD")
+
+
+def cursor_file(tmp_path: Path, cursor: dict) -> str:
+    path = tmp_path / "cursor-checkpoint.json"
+    path.write_text(json.dumps(collect_repos.checkpoint_from_cursor(cursor)), encoding="utf-8")
+    return str(path)
+
+
+def test_collect_freezes_task_roots_and_top_directories_and_counts_noise(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, first = make_remote(tmp_path, "control", {
+        "README.md": "control\n", "tasks/h5/README.md": "# h5\n", "tasks/h5/sql/q.sql": "select 1;\n",
+        "memory/learnings.md": "- one\n", "src/app.ts": "export {}\n", "package-lock.json": "{}\n",
+        "tests/test_app.py": "def test(): pass\n",
+    }, branch="master")
+    (root / "control").symlink_to(work, target_is_directory=True)
+    identity = collect_repos.canonical_remote(str(remote))
+
+    baseline = collect_repos.collect(scan_report(tmp_path, root, "--priority-prefix", "tasks"))
+
+    [summary] = baseline["candidates"]
+    assert summary["topic_key"] == f"rebaseline:{identity}"
+    assert summary["origin"]["reason"] == "new"
+    assert "- tasks/h5: 2" in summary["files"][0]["data"].decode()
+    assert baseline["cursor"] == {identity: {"branch": "master", "sha": first, "stale_since": None, "error": None}}
+
+    secret = "sk-" + "a" * 32
+    head = commit_all(work, "second", {
+        "README.md": None,
+        "tasks/h5/status.md": "status: done\n",
+        "tasks/h5/sql/q.sql": "select 2;\n",
+        "memory/learnings.md": "- one\n- two\n",
+        "src/app.ts": f"const client = new Client('{secret}')\n",
+        "package-lock.json": '{"lockfileVersion": 3}\n',
+        "tests/test_app.py": "def test(): assert True\n",
+        "assets/logo.png": b"\x89PNG\x00\x01",
+        "docs/big.md": "x" * 30000 + "\n",
+        "docs/blob.dat": b"\x00\x01binary",
+    })
+    # --max-paths 1 truncates the report's lists; the collector re-reads the full change set.
+    report = scan_report(tmp_path, root, "--priority-prefix", "tasks", "--max-paths", "1",
+                         "--checkpoint-json", cursor_file(tmp_path, baseline["cursor"]))
+    row = report["repos"][0]
+    assert (row["state"], row["paths_truncated"]) == ("changed", True)
+
+    collected = collect_repos.collect(report)
+
+    by_topic = {candidate["topic_key"].removeprefix(f"repo:{identity}#"): candidate
+                for candidate in collected["candidates"]}
+    assert sorted(by_topic) == [".", "docs", "memory/learnings.md", "src", "tasks/h5"]
+    assert collected["counts"] == {"candidates": 5, "changed": 1, "excluded": 0, "failed": 0, "rebaselined": 0,
+                                   "noise": {"binary": 1, "lockfile": 1, "test": 1}}
+    assert collected["cursor"] == {identity: {"branch": "master", "sha": head, "stale_since": None, "error": None}}
+
+    tasks = by_topic["tasks/h5"]
+    assert [file["name"] for file in tasks["files"]] == [
+        f"changes-{first[:7]}-{head[:7]}.md", collect_repos.snapshot_name("tasks/h5/status.md"),
+        collect_repos.snapshot_name("tasks/h5/sql/q.sql")]
+    assert tasks["files"][1]["name"].endswith("-status.md")
+    status = tasks["files"][1]
+    assert status["data"] == b"status: done\n"
+    assert status["sha256"] == hashlib.sha256(b"status: done\n").hexdigest()
+    assert status["origin"] == {
+        "kind": "git-file", "remote": row["remote_url"], "commit": head, "path": "tasks/h5/status.md",
+        "blob": git(work, "rev-parse", f"{head}:tasks/h5/status.md"), "truncated": False, "redactions": 0,
+    }
+    manifest = tasks["files"][0]["data"].decode()
+    assert "- A tasks/h5/status.md" in manifest and "- M tasks/h5/sql/q.sql" in manifest
+    assert "second" in manifest and "- commits: 1" in manifest
+    assert tasks["origin"] == {"kind": "repo", "remote": row["remote_url"], "commit": head, "branch": "master",
+                               "base": first}
+    assert tasks["brief"] == f"control tasks/h5: 1 commits since {first[:7]}; changed sql/q.sql, status.md"
+
+    app = by_topic["src"]["files"][1]
+    assert secret not in app["data"].decode() and app["origin"]["redactions"] == 1
+    big = by_topic["docs"]["files"][1]
+    assert big["origin"]["path"] == "docs/big.md"
+    assert big["origin"]["truncated"] and big["bytes"] <= planner.FILE_TEXT_LIMIT
+    assert by_topic["docs"]["brief"].endswith("; 1 not frozen")  # docs/blob.dat is binary content
+    top = by_topic["."]
+    assert [file["name"] for file in top["files"]] == [f"changes-{first[:7]}-{head[:7]}.md"]
+    assert "- D README.md" in top["files"][0]["data"].decode()
+    assert "noise (counted, not frozen): lockfile 1" in top["files"][0]["data"].decode()
+    assert all(sum(file["bytes"] for file in candidate["files"]) <= planner.ITEM_TEXT_LIMIT
+               for candidate in collected["candidates"])
+
+    items = planner.plan(collected["candidates"])
+    assert [(item["topic_key"].removeprefix(f"repo:{identity}#"), item["priority"]) for item in items] == [
+        ("memory/learnings.md", 80), ("tasks/h5", 70), (".", 40), ("docs", 40), ("src", 40),
+    ]
+    # Collecting the same delta again yields the same item keys, which the queue dedupes on.
+    again = planner.plan(collect_repos.collect(report)["candidates"])
+    assert list(map(_key, again)) == list(map(_key, items))
+    excluded = collect_repos.collect(report, exclude_remotes=[str(remote)])  # the bundle's own repository
+    assert (excluded["candidates"], excluded["counts"]["excluded"]) == ([], 1)
+
+
+def test_consecutive_ranges_merge_by_path_without_losing_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, _, _ = make_remote(tmp_path, "control", {"tasks/a/README.md": "a\n"})
+    (root / "control").symlink_to(work, target_is_directory=True)
+    cursor = collect_repos.collect(scan_report(tmp_path, root))["cursor"]
+    first = commit_all(work, "one", {"tasks/a/README.md": "top v1\n", "tasks/a/sub/README.md": "sub v1\n",
+                                     "tasks/a/status.md": "doing\n", "tasks/a/需求 说明.md": "需求\n"})
+    one = collect_repos.collect(scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, cursor)))
+    second = commit_all(work, "two", {"tasks/a/sub/README.md": "sub v2\n", "tasks/a/status.md": "done\n"})
+    two = collect_repos.collect(scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, one["cursor"])))
+
+    [[run1], [run2]] = [[candidate["files"] for candidate in result["candidates"]] for result in (one, two)]
+    assert all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", file["name"]) for file in run1 + run2)
+    # The queue folds a same-topic collection into a ready item by file name, newest wins.
+    merged = {file["name"]: file for file in run1} | {file["name"]: file for file in run2}
+    snapshots = {file["origin"]["path"]: file["data"].decode() for file in merged.values() if "path" in file["origin"]}
+    assert snapshots == {"tasks/a/README.md": "top v1\n", "tasks/a/sub/README.md": "sub v2\n",
+                         "tasks/a/status.md": "done\n", "tasks/a/需求 说明.md": "需求\n"}
+    manifests = [file for file in merged.values() if file["origin"]["kind"] == "git-changes"]
+    assert sorted(file["origin"]["commit"] for file in manifests) == sorted([first, second])
+
+
+def _key(item: dict) -> str:
+    """The writer's key of a planned item (POST /maint/items dedupes on it)."""
+    return maint_state.item_key(item["origin"]["kind"], item["topic_key"], [file["sha256"] for file in item["files"]])
+
+
+def test_collected_items_fit_the_writer_queue_under_one_key(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, _, _ = make_remote(tmp_path, "control", {"tasks/a/README.md": "a\n"})
+    (root / "control").symlink_to(work, target_is_directory=True)
+    cursor = collect_repos.collect(scan_report(tmp_path, root))["cursor"]
+    commit_all(work, "many", {f"tasks/a/notes/n{i:03}.md": f"note {i}\n" for i in range(80)})
+    report = scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, cursor))
+
+    [candidate] = collect_repos.collect(report)["candidates"]
+    assert len(candidate["files"]) == planner.ITEM_FILE_LIMIT == maint_state.MAX_FILES
+    assert candidate["brief"].endswith(f"; {80 - planner.ITEM_FILE_LIMIT + 1} not frozen")
+
+    # W9's POST /maint/items body: the writer accepts the batch and keys it by its evidence.
+    [item] = planner.plan([candidate])
+    body = [{"origin": item["origin"], "topic_key": item["topic_key"], "priority": item["priority"],
+             "brief": item["brief"], "files": [{"name": f["name"], "origin": f["origin"],
+                                                "content_b64": base64.b64encode(f["data"]).decode()}
+                                               for f in item["files"]]}]
+    bundle = tmp_path / "kb"
+    [queued] = maint_state.enqueue(bundle, body, principal="process:test")["items"]
+    assert (queued["result"], queued["item_key"]) == ("created", _key(item))
+    assert maint_state.enqueue(bundle, body, principal="process:test")["duplicate"] == 1
+    first = item["files"][1]
+    assert maint_state.read_file(bundle, queued["id"], first["name"]) == first["data"]
+
+
+def test_collect_never_freezes_credentials(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, _, _ = make_remote(tmp_path, "ops", {"docs/setup.md": "setup\n"})
+    (root / "ops").symlink_to(work, target_is_directory=True)
+    cursor = collect_repos.collect(scan_report(tmp_path, root))["cursor"]
+    pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+    commit_all(work, "deploy", {
+        "deploy/id_ed25519": pem,
+        "config/.env.production": "DB_PASS=hunter2\n",
+        "docs/setup.md": "Use aiw_c_9f8e7d6c5b4a39281706f5e4 with AKIAIOSFODNN7EXAMPLE.\n" + pem,
+    })
+
+    collected = collect_repos.collect(scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, cursor)))
+
+    assert collected["counts"]["noise"] == {"secret": 2}
+    assert sorted(candidate["topic_key"].rsplit("#", 1)[1] for candidate in collected["candidates"]) == ["docs"]
+    frozen = [file for candidate in collected["candidates"] for file in candidate["files"]]
+    assert [file["origin"].get("path") for file in frozen] == [None, "docs/setup.md"]
+    assert frozen[1]["origin"]["redactions"] == 3
+    for file in frozen:
+        text = file["data"].decode()
+        assert secrets.scan(text) == [] and "hunter2" not in text
+
+
+def test_collect_keeps_the_previous_cursor_row_when_evidence_cannot_be_read(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, first = make_remote(tmp_path, "flaky", {"docs/a.md": "a\n"})
+    (root / "flaky").symlink_to(work, target_is_directory=True)
+    identity = collect_repos.canonical_remote(str(remote))
+    cursor = collect_repos.collect(scan_report(tmp_path, root))["cursor"]
+    commit_all(work, "second", {"docs/a.md": "b\n"})
+    report = scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, cursor))
+    report["repos"][0]["object_repo"] = str(tmp_path / "gone")
+
+    collected = collect_repos.collect(report)
+
+    assert collected["candidates"] == []
+    assert collected["counts"]["failed"] == 1 and collected["failed"][0]["error"]
+    row = collected["cursor"][identity]
+    assert (row["branch"], row["sha"], row["stale_since"]) == ("main", first, report["generated_at"])
+    assert row["error"] == collected["failed"][0]["error"]
+    # Failing again keeps the first failure's age, like the scanner's carried rows.
+    report = scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, collected["cursor"]))
+    report["repos"][0]["object_repo"] = str(tmp_path / "gone")
+    report["generated_at"] = "2099-01-01T00:00:00Z"
+    again = collect_repos.collect(report, previous=collected["cursor"])["cursor"][identity]
+    assert (again["sha"], again["stale_since"]) == (first, row["stale_since"])
+
+
+def test_collect_summarizes_rewritten_history_instead_of_diffing_across_lineages(tmp_path: Path) -> None:
+    root = tmp_path / "reference"
+    root.mkdir()
+    work, remote, _ = make_remote(tmp_path, "rewritten", {"docs/a.md": "a\n", "src/app.ts": "1\n"})
+    (root / "rewritten").symlink_to(work, target_is_directory=True)
+    cursor = collect_repos.collect(scan_report(tmp_path, root))["cursor"]
+    (work / "docs" / "a.md").write_text("rewritten\n", encoding="utf-8")
+    git(work, "commit", "-a", "--amend", "-m", "rewritten")
+    git(work, "push", "--force")
+
+    report = scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, cursor))
+    collected = collect_repos.collect(report)
+
+    [summary] = collected["candidates"]
+    assert summary["topic_key"] == f"rebaseline:{collect_repos.canonical_remote(str(remote))}"
+    assert summary["origin"]["reason"] == "history_rewritten"
+    text = summary["files"][0]["data"].decode()
+    assert "Not an incremental diff" in text and "- docs: 1" in text and "- src: 1" in text
+    assert planner.plan([summary])[0]["priority"] == 40
+    assert collected["counts"] == {"candidates": 1, "changed": 0, "excluded": 0, "failed": 0, "rebaselined": 1,
+                                   "noise": {}}
+
+
+def test_repos_cursor_round_trips_through_the_scanner_checkpoint_form() -> None:
+    cursor = {
+        "code.example.com/web/control": {"branch": "master", "sha": "a" * 40, "stale_since": None, "error": None},
+        "code.example.com/web/stale": {"branch": "main", "sha": "b" * 40, "stale_since": "2026-10-16T20:00:00Z",
+                                       "error": "git ls-remote timed out after 120s"},
+    }
+
+    checkpoint = collect_repos.checkpoint_from_cursor(cursor)
+
+    by_remote, _ = collect_repos.checkpoint_repositories(checkpoint)
+    assert sorted(by_remote) == sorted(cursor)
+    assert checkpoint["repos"][collect_repos.repo_id("code.example.com/web/stale")] == {
+        "name": "stale", "remote_url": "https://code.example.com/web/stale", "branch": "main", "sha": "b" * 40,
+        "stale_since": "2026-10-16T20:00:00Z", "last_error": "git ls-remote timed out after 120s",
+    }
+    assert collect_repos.cursor_from_report({"checkpoint_candidate": checkpoint}) == cursor

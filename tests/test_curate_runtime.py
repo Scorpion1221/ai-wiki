@@ -145,7 +145,7 @@ def _run_job(tmp_path: Path, monkeypatch, validation_errors: list[str], refresh=
     job_path.write_text(json.dumps({"source": "sources/inbox/n.md.source", "status": "queued"}), encoding="utf-8")
 
     monkeypatch.setattr(curate, "_repo_root", lambda _bundle: bundle)
-    monkeypatch.setattr(curate, "_pre_sync", lambda _root: {"synced": True})
+    monkeypatch.setattr(curate, "_pre_sync", lambda _root, **_kwargs: {"synced": True})
     monkeypatch.setattr(curate, "_git", lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="base\n"))
     monkeypatch.setattr(curate, "_working_files", lambda _root: [])
     monkeypatch.setattr(curate, "_refresh_visualization", refresh or (lambda _root, _bundle: None))
@@ -1719,11 +1719,11 @@ def test_remote_push_failure_is_technical_failure_and_rolls_back(tmp_path: Path,
     job_path.parent.mkdir(parents=True)
     job_path.write_text(json.dumps({"source": source.relative_to(bundle).as_posix(), "status": "queued"}))
     monkeypatch.setattr(curate, "_repo_root", lambda _bundle: bundle)
-    monkeypatch.setattr(curate, "_pre_sync", lambda _root: {"synced": True})
+    monkeypatch.setattr(curate, "_pre_sync", lambda _root, **_kwargs: {"synced": True})
     monkeypatch.setattr(curate, "_working_files", lambda _root: [])
     monkeypatch.setattr(curate, "_git", lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="base\n"))
     monkeypatch.setattr(curate, "_concept_snapshot", lambda _bundle: {})
-    monkeypatch.setattr(curate, "_curation_policy_errors", lambda *_args: [])
+    monkeypatch.setattr(curate, "_curation_policy_errors", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(curate, "validate_bundle", lambda _bundle: [])
     monkeypatch.setattr(curate, "_curated_source", lambda *_args: "sources/n.md.source")
     monkeypatch.setattr(curate, "_agent_process", lambda *args, **kwargs: subprocess.CompletedProcess(

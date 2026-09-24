@@ -105,7 +105,7 @@ writes, even if the prompt forbids them. Treat this as behavioral restriction, n
 read-only isolation. For a dedicated read-only service deployment, existing controls are:
 
 ```text
-AIWIKI_DISABLE=ingest,audit,create,delete
+AIWIKI_DISABLE=ingest,audit,create,delete,changesets,workspace,maint,admin
 AIWIKI_CURATE=off
 ```
 

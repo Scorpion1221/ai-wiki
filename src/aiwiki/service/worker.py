@@ -5,13 +5,23 @@ time. Serializing curation is what makes many concurrent writers safe: two curat
 passes never touch the bundle or its git tree at once, so the only contention left is
 between this worker and *other* writers' pushes — which curate.py handles by rebasing.
 
-On startup, queued jobs left by a previous run are re-enqueued. Interrupted running
-jobs are reconciled from durable Git transaction metadata before being marked failed.
+The queue is ordered by kind (design §2.6): changesets and admin reverts, then Codex
+audits, then Codex ingests, first in first out within a kind; a running job is never
+preempted. Until a bundle commits changesets its Codex audits and ingests stay in one FIFO,
+as before. Once it does, a Codex audit of it waits while its maintainer run holds the lease,
+so it never takes the lock for minutes in the middle of a run; a lease on any other bundle
+holds nothing back.
+
+On startup, queued jobs left by a previous run are re-enqueued (a changeset from its
+request in ``.okf/changesets``, a revert from its own job). Interrupted running jobs are
+reconciled from durable Git transaction metadata before being marked failed.
 """
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
+import os
 import queue
 import threading
 import time
@@ -19,11 +29,35 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..runtime import audit, curate
+from ..runtime import audit, changeset, curate, revert
 from ..runtime.failure import classify, failure
 from . import ingest as I
+from . import maint_state as M
 
-_q: queue.Queue = queue.Queue()
+PRIORITY = {"changeset": 0, "revert": 0, "audit": 1, "ingest": 2}  # lower runs first
+# Installed by the app (design §2.11): the bundles whose changesets commit (none while
+# AIWIKI_DISABLE=changesets), and whether a principal may still propose one to a bundle.
+# A queued changeset is checked again when it runs, so a rollback or a revoked principal
+# (§8.5) stops it too. AUDIT_BUNDLES are the committing bundles whose changesets queue their
+# own Codex audit (all but AIWIKI_CODEX_AUDIT_MANUAL).
+COMMIT_BUNDLES: frozenset[str] = frozenset()
+AUDIT_BUNDLES: frozenset[str] = frozenset()
+
+
+def actor_of(principal: str, bundle: str) -> str | None:
+    """The actor a principal now in force stamps on a changeset to ``bundle``, or None when it
+    may no longer propose one there."""
+    return None  # until the app installs its principals
+
+
+_q: queue.PriorityQueue = queue.PriorityQueue()
+_order = itertools.count()  # FIFO within a priority
+_deferred: list[tuple] = []  # Codex audits waiting out a maintainer run (worker thread only)
+_finished: dict[Path, threading.Event] = {}  # changeset or revert job -> set once its receipt is final
+# Changeset job -> (principal, changeset_sha256) as admitted. The job and its request wait in
+# .okf, which an in-place Codex audit can write, so a run holds them to this memory.
+_admitted: dict[Path, tuple[str, str]] = {}
+DEFER_POLL_S = 30
 _started = False
 _lock = threading.Lock()
 _mutation_lock = threading.Lock()
@@ -269,22 +303,86 @@ def _classify_failed(job_path: Path) -> None:
         _save_job(job_path, job)
 
 
+def _put(kind: str, bundle: Path, subject: str, job_path: Path) -> None:
+    # A bundle's Codex audits go ahead of Codex ingests only once its changesets commit and
+    # queue their own audits; a manual (shadow) bundle's audits never pass production's work.
+    priority = PRIORITY["ingest"] if kind == "audit" and bundle.name not in AUDIT_BUNDLES else PRIORITY[kind]
+    _q.put((priority, next(_order), (kind, bundle, subject, job_path)))
+
+
 def submit(bundle: Path, source_rel: str, job_path: Path) -> None:
-    _q.put(("ingest", bundle, source_rel, job_path))
+    _put("ingest", bundle, source_rel, job_path)
 
 
 def submit_audit(bundle: Path, parent_job: str, job_path: Path) -> None:
-    _q.put(("audit", bundle, parent_job, job_path))
+    _put("audit", bundle, parent_job, job_path)
+
+
+def submit_changeset(bundle: Path, job_path: Path, *, principal: str | None = None, digest: str | None = None) -> None:
+    """Queue a changeset job ahead of all Codex work; its request is ``I.changeset_path``.
+
+    ``principal`` and ``digest`` (its changeset_sha256) are what intake admitted; recovery
+    after a restart has only the job file to go by.
+    """
+    if principal is not None and digest is not None:
+        _admitted[job_path] = (principal, digest)
+    _finished.setdefault(job_path, threading.Event())
+    _put("changeset", bundle, job_path.stem, job_path)
+
+
+def submit_revert(bundle: Path, job_path: Path) -> None:
+    """Queue an admin revert (design §8.5) with the changesets, ahead of all Codex work."""
+    _finished.setdefault(job_path, threading.Event())
+    _put("revert", bundle, job_path.stem, job_path)
+
+
+def wait(job_path: Path, timeout: float) -> None:
+    """Block until a queued changeset's or revert's receipt is final, or ``timeout`` seconds pass."""
+    event = _finished.get(job_path)
+    if event is not None:
+        event.wait(timeout)
+
+
+def _maintaining(bundle: Path) -> bool:
+    try:
+        return M.active_lease(bundle, "maintainer") is not None
+    except OSError:
+        return False
+
+
+def _take() -> tuple:
+    """The next job by priority; a Codex audit of a bundle that commits changesets waits
+    while its maintainer run lasts (design §2.6). Elsewhere a lease defers nothing."""
+    while True:
+        for entry in [entry for entry in _deferred if not _maintaining(entry[2][1])]:
+            _deferred.remove(entry)
+            _q.put(entry)
+            _q.task_done()  # the put counts it again, so join() never sees it finished
+        try:
+            entry = _q.get(timeout=DEFER_POLL_S if _deferred else None)
+        except queue.Empty:
+            continue
+        kind, bundle = entry[2][:2]
+        if kind == "audit" and bundle.name in COMMIT_BUNDLES and _maintaining(bundle):
+            _deferred.append(entry)  # still unfinished until it runs
+            continue
+        return entry
 
 
 def _run() -> None:
     while True:
-        kind, bundle, subject, job_path = _q.get()
+        _priority, _n, (kind, bundle, subject, job_path) = _take()
         try:
             with serialized_mutation():
                 try:
-                    if kind == "audit":
+                    if kind == "audit" and subject in I.reverted_by(bundle):
+                        _skip_reverted(job_path)
+                    elif kind == "audit":
                         audit.run(bundle, subject, job_path)
+                    elif kind == "changeset":
+                        _run_changeset(bundle, job_path)
+                    elif kind == "revert":
+                        revert.run(bundle, job_path)
                     else:
                         curate.run(bundle, subject, job_path)
                 finally:
@@ -292,7 +390,120 @@ def _run() -> None:
         except Exception:  # noqa: BLE001 — runtimes record their own failures; never kill the worker
             pass
         finally:
+            event = _finished.pop(job_path, None)
+            if event is not None:
+                event.set()
             _q.task_done()
+
+
+def _skip_reverted(job_path: Path) -> None:
+    """An admin reverted the changeset this Codex audit reviews: nothing of it is left to verify."""
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    detail = f"changeset {job.get('parent_job')} was reverted before its audit ran"
+    job.update(status="failed", error=detail, finished=curate._now(),
+               failure=failure("input", stage="intake", detail=detail, retryable=False))
+    _save_job(job_path, job)
+
+
+def closed_rejection(items: list[dict]) -> dict:
+    """409 work_item_closed: an item once closed takes no further changeset (design §2.7)."""
+    errors = []
+    for item in items:
+        resolution = item.get("resolution") or {}
+        errors.append(changeset._error("work_item_closed", f"{item['id']} is already {item['status']}",
+                                       item=item["id"], closed_by=resolution.get("job") or resolution.get("by")))
+    return changeset._rejected({}, errors)
+
+
+def _run_changeset(bundle: Path, job_path: Path) -> None:
+    """Run one queued changeset job from its persisted request (design §2.5 G5–G15). The
+    request is only needed while the job is queued, so it is deleted once the job has run."""
+    admitted = _admitted.pop(job_path, None)
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if job.get("status") != "queued":
+        return  # a duplicate queue entry of a job that already ran
+    try:
+        _run_queued(bundle, job_path, job, admitted)
+    finally:
+        I.changeset_path(bundle, job_path.stem).unlink(missing_ok=True)
+
+
+def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, str] | None) -> None:
+    """Admit the job again as it runs (G0 and G3b may have changed while it queued), then run it.
+
+    The actor is the one its principal stamps now, never a value read back from ``.okf``; a
+    job or request that no longer matches what intake admitted fails without running.
+    """
+    principal, digest = admitted or (str(job.get("principal")), job.get("changeset_sha256"))
+    actor = actor_of(principal, bundle.name)
+    if bundle.name not in COMMIT_BUNDLES or actor is None:
+        detail = f"{principal} may no longer commit changesets to '{bundle.name}'"
+        job.update(status="rejected", http_status=403, errors=[changeset._error("forbidden", detail)],
+                   failure=failure("auth", stage="intake", detail=detail), finished=curate._now())
+        _save_job(job_path, job)
+        return
+    try:
+        record = json.loads(I.changeset_path(bundle, job_path.stem).read_text(encoding="utf-8"))
+        request = record["request"]
+        evidence = [changeset.EvidenceFile(part["name"], M.evidence(bundle, *part["name"].split("/", 1),
+                                                                    part["sha256"])[1], part.get("origin") or {})
+                    for part in record["evidence_files"]]
+        changed = (job.get("principal"), job.get("changeset_sha256")) != (principal, digest) or digest != \
+            changeset.changeset_sha256(request, {item.name: hashlib.sha256(item.data).hexdigest() for item in evidence})
+        items = [M.get_item(bundle, item_id) for item_id in job.get("work_items") or []]
+        closed = [item for item in items if item["status"] in M.TERMINAL]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, M.MaintError) as exc:
+        job.update(status="failed", error=f"changeset request or evidence unusable: {exc}", finished=curate._now(),
+                   failure=failure("internal", stage="intake", detail=exc, retryable=False))
+        _save_job(job_path, job)
+        return
+    if changed:
+        detail = "the queued job or request no longer matches what was admitted; resubmit the changeset"
+        job.update(status="failed", error=detail, finished=curate._now(),
+                   failure=failure("internal", stage="intake", detail=detail, retryable=False))
+        _save_job(job_path, job)
+        return
+    if closed:
+        # G3b again: an item another changeset closed while this one waited in the queue.
+        job.update(closed_rejection(closed), finished=curate._now())
+        _save_job(job_path, job)
+        return
+    curate.run_changeset(bundle, job_path, request, actor=actor, evidence_files=evidence,
+                         on_done=lambda done: _closeout(bundle, done))
+
+
+def _closeout(bundle: Path, job: dict) -> None:
+    """G15 for a done changeset, under the writer lock: close its work items and register the
+    deferred Codex audit. Idempotent, so recovery can finish a job interrupted here."""
+    try:
+        closed = M.close_curated(bundle, list(job.get("work_items") or []), job_id=job["id"],
+                                 commit=job.get("commit"), principal=str(job.get("principal")),
+                                 run=job.get("run")) if job.get("close_items", True) else []
+        job["audit"] = _register_audit(bundle, job)
+        job["closed_items"] = closed
+        job.pop("closeout_error", None)
+    except Exception as exc:  # noqa: BLE001 — the commit is published; the next start retries this
+        job["closeout_error"] = repr(exc)
+
+
+def _register_audit(bundle: Path, job: dict) -> dict:
+    """Phases 1-3: queue a Codex audit of the changeset; it waits out the maintainer run (§4.7).
+    A bundle in AIWIKI_CODEX_AUDIT_MANUAL queues none: POST /jobs/{id}/audit requests it."""
+    mode = os.environ.get("AIWIKI_AUDIT", "").strip() or "codex"
+    if mode != "codex":
+        return {"mode": mode}
+    if bundle.name not in AUDIT_BUNDLES:
+        return {"mode": "manual"}
+    audit_job, existing = I.receive_audit(bundle, job["id"], audit.concept_files(bundle, job))
+    if audit_job["status"] == "queued" and not existing:
+        submit_audit(bundle, job["id"], I.job_path(bundle, audit_job["id"]))
+    entry = {"mode": mode, "job": audit_job["id"]}
+    if audit_job["status"] == "queued" and _maintaining(bundle):
+        entry["deferred_until"] = "lease_release"
+    return entry
 
 
 def ensure_started() -> None:
@@ -362,6 +573,7 @@ def start_sweeper(bundles_fn) -> None:
 def recover(bundles: list[Path]) -> bool:
     """Re-enqueue queued jobs and durably reconcile interrupted Git transactions."""
     queued: list[tuple[str, Path, str, Path]] = []
+    closeouts: list[tuple[Path, Path]] = []
     pending_remote_confirmation = False
     for b in bundles:
         jdir = b / ".okf" / "jobs"
@@ -373,9 +585,24 @@ def recover(bundles: list[Path]) -> bool:
             except (OSError, ValueError):
                 continue
             status, kind = job.get("status"), job.get("kind", "ingest")
+            if job.get("mode") == "changeset" and status != "queued":
+                I.changeset_path(b, jf.stem).unlink(missing_ok=True)  # only a queued job runs from it
             if status == "queued" and kind == "audit" and job.get("parent_job"):
                 queued.append(("audit", b, job["parent_job"], jf))
-            elif status == "queued" and job.get("source"):
+            elif status == "queued" and kind == "revert":
+                queued.append(("revert", b, jf.stem, jf))
+            elif status == "queued" and job.get("mode") == "changeset":
+                if I.changeset_path(b, jf.stem).is_file():
+                    queued.append(("changeset", b, jf.stem, jf))
+                else:
+                    job.update(status="failed", error="changeset request lost before it ran; resubmit it",
+                               finished=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                               failure=failure("interrupted", stage="startup", detail="changeset request lost"))
+                    _save_job(jf, job)
+            elif status == "done" and job.get("mode") == "changeset" and "closed_items" not in job:
+                closeouts.append((b, jf))  # G15 interrupted after the receipt read done
+            elif status == "queued" and job.get("source") and job.get("mode") != "changeset":
+                # A changeset stages its packet as ``source``; the Codex curator never takes it.
                 queued.append(("ingest", b, job["source"], jf))
             elif status == "running":
                 outcome = _reconcile_running(b, job)
@@ -392,9 +619,13 @@ def recover(bundles: list[Path]) -> bool:
                         "interrupted" if rolled_back else "internal", stage="startup",
                         detail=job["error"], retryable=None if rolled_back else False,
                     )
+                    if kind == "revert":
+                        job["reverted"] = []  # its commit never reached the remote
                 job["finished"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 _save_job(jf, job)
                 curate._cleanup_recovery_source(b, job)
+                if job.get("status") == "done" and job.get("mode") == "changeset":
+                    closeouts.append((b, jf))  # the remote holds the commit: finish G15
     # Never build new work on an unresolved local commit. A failed fetch is retried
     # on the next service startup rather than being mistaken for a rejected push.
     if pending_remote_confirmation:
@@ -402,9 +633,17 @@ def recover(bundles: list[Path]) -> bool:
     # Reconciliation can reset a repository. Queue prior work only after *every*
     # interrupted transaction is terminal, and startup starts the thread after this
     # function returns, so recovery never races a new mutation.
+    for bundle, job_path in closeouts:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        _closeout(bundle, job)
+        _save_job(job_path, job)
     for kind, bundle, subject, job_path in queued:
         if kind == "audit":
             submit_audit(bundle, subject, job_path)
+        elif kind == "changeset":
+            submit_changeset(bundle, job_path)
+        elif kind == "revert":
+            submit_revert(bundle, job_path)
         else:
             submit(bundle, subject, job_path)
     return True

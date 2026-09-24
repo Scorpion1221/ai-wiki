@@ -1131,6 +1131,36 @@ def test_audit_keeps_deprecated_concepts_deprecated(tmp_path: Path, monkeypatch)
     assert _frontmatter(concept)["status"] == "deprecated"
 
 
+
+@pytest.mark.parametrize("scope", [["features/release.md"], ["features/release.md", "features/other.md"]])
+def test_a_changeset_audit_leaves_out_what_a_later_changeset_deprecated(tmp_path: Path, monkeypatch,
+                                                                        scope: list[str]) -> None:
+    """Its audit waited out the run while a later changeset of that run retired the concept."""
+    bundle = _bundle(tmp_path)
+    (bundle / "features" / "other.md").write_text(_concept().replace("Release claim", "Other claim"),
+                                                  encoding="utf-8")
+    parent = {**json.loads(I.job_path(bundle, "ingest1").read_text(encoding="utf-8")), "mode": "changeset",
+              "concept_files": scope}
+    I.save_job(bundle, parent)
+    concept = bundle / "features" / "release.md"
+    retired = concept.read_text(encoding="utf-8").replace("status: draft", "status: deprecated")
+    concept.write_text(retired, encoding="utf-8")
+    reviewed = []
+
+    def edit(_path: Path) -> None:
+        reviewed.append(sorted(json.loads(path.read_text(encoding="utf-8"))["concept_files"]
+                               for path in (bundle / ".okf" / "jobs").glob("*.json")
+                               if json.loads(path.read_text(encoding="utf-8")).get("kind") == "audit")[0])
+
+    result = _review(bundle, monkeypatch, edit, _verdict(verified=["features/other.md"]))
+
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    assert result["deprecated_files"] == ["features/release.md"] and concept.read_text(encoding="utf-8") == retired
+    if scope == ["features/release.md"]:
+        assert result["reason"] == "no_concepts_to_audit" and reviewed == []  # no reviewer ran
+    else:
+        assert result["concept_files"] == ["features/other.md"] and reviewed == [["features/other.md"]]
+
 def test_audit_restores_generation_when_only_provenance_edit_survived(
     tmp_path: Path, monkeypatch,
 ) -> None:

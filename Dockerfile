@@ -3,7 +3,17 @@
 #   docker build -t ai-wiki .
 #   docker run -d --name ai-wiki --restart unless-stopped \
 #     -p 127.0.0.1:8787:8787 -v /path/to/bundles:/bundles:ro \
-#     -e AIWIKI_TOKEN=... -e AIWIKI_DISABLE=ingest,audit,create,delete -e AIWIKI_CURATE=off ai-wiki
+#     -e AIWIKI_TOKEN=... -e AIWIKI_DISABLE=ingest,audit,create,delete,changesets,workspace,maint,admin \
+#     -e AIWIKI_CURATE=off ai-wiki
+# A mirror serves reads only: the writer answers every other route (design §2.1), so a request
+# routed here by mistake is refused rather than answered from the mirror's clone.
+# Or share the writer's principals file instead of AIWIKI_TOKEN; the mirror's routes only
+# need the `read` scope. Mount the directory (a single-file bind mount pins the old inode
+# when the file is replaced), check the edited file as the container sees it, then send SIGHUP
+# (a refused reload keeps the old principals and only logs):
+#     -v /etc/ai-wiki:/etc/ai-wiki:ro -e AIWIKI_PRINCIPALS=/etc/ai-wiki/principals.json
+#   docker exec ai-wiki uv run --no-dev python -m aiwiki.service.auth /etc/ai-wiki/principals.json
+#   docker kill -s HUP ai-wiki
 FROM python:3.12-slim
 
 # Health revision reporting and the writer transaction path both require Git.
@@ -25,7 +35,7 @@ ENV AIWIKI_BUNDLES=/bundles \
     AIWIKI_HOST=0.0.0.0 \
     AIWIKI_PORT=8787 \
     AIWIKI_CURATE=off \
-    AIWIKI_DISABLE=ingest,audit,create,delete
+    AIWIKI_DISABLE=ingest,audit,create,delete,changesets,workspace,maint,admin
 # Deployed revision reported as /health "build"; declared after `uv sync` so a new revision
 # keeps the dependency layer cached:
 #   docker build --build-arg AIWIKI_BUILD_COMMIT=$(git rev-parse HEAD) -t ai-wiki .

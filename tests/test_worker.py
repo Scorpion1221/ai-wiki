@@ -9,6 +9,9 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
+from aiwiki.service import maint_state as M
 from aiwiki.service import worker
 
 
@@ -64,17 +67,26 @@ def test_serial_fifo_and_survives_failure(monkeypatch) -> None:
     assert order == ["s0", "s1", "boom", "s2", "s3"]  # FIFO; queue kept going past the failure
 
 
-def test_ingest_and_audit_share_one_serial_fifo(monkeypatch) -> None:
+@pytest.mark.parametrize("audits", ["auto", "manual", "off"])
+def test_one_serial_queue_runs_changesets_then_audits_then_ingests(monkeypatch, audits: str) -> None:
+    # Codex audits go ahead of Codex ingests only in a bundle whose changesets commit (the flag)
+    # and queue their own audits: a manual (shadow) bundle's requested audits keep the FIFO.
+    commits = audits == "auto"
+    monkeypatch.setattr(worker, "COMMIT_BUNDLES", frozenset({"b"} if audits != "off" else ()))
+    monkeypatch.setattr(worker, "AUDIT_BUNDLES", frozenset({"b"} if commits else ()))
     events = []
     state = {"active": 0, "max": 0}
     lock = threading.Lock()
+    release = threading.Event()
 
     def record(kind):
-        def _run(_bundle, subject, _job_path):
+        def _run(_bundle, subject, *_job_path):
             with lock:
                 state["active"] += 1
                 state["max"] = max(state["max"], state["active"])
             try:
+                if subject == "running":
+                    release.wait(5)  # a Codex pass holds the lock while the others queue
                 events.append((kind, subject))
                 time.sleep(0.01)
             finally:
@@ -84,15 +96,77 @@ def test_ingest_and_audit_share_one_serial_fifo(monkeypatch) -> None:
 
     monkeypatch.setattr(worker.curate, "run", record("ingest"))
     monkeypatch.setattr(worker.audit, "run", record("audit"))
+    monkeypatch.setattr(worker, "_run_changeset", lambda bundle, job_path: record("changeset")(bundle, job_path.stem))
     worker.ensure_started()
+    worker.submit(Path("/b"), "running", Path("/j/running.json"))
+    deadline = time.monotonic() + 5
+    while not state["active"] and time.monotonic() < deadline:
+        time.sleep(0.01)
     worker.submit(Path("/b"), "source-a", Path("/j/a.json"))
-    worker.submit_audit(Path("/b"), "parent-a", Path("/j/audit.json"))
+    worker.submit_audit(Path("/b"), "parent-a", Path("/j/audit-a.json"))
     worker.submit(Path("/b"), "source-b", Path("/j/b.json"))
+    worker.submit_changeset(Path("/b"), Path("/j/cs-a.json"))
+    worker.submit_audit(Path("/b"), "parent-b", Path("/j/audit-b.json"))
+    release.set()
     worker._q.join()
 
+    # Never two at once, the running pass is not preempted, then design §2.6's order:
+    # changesets, Codex audits, Codex ingests, each first in first out. Otherwise legacy
+    # Codex work keeps today's single FIFO.
     assert state["max"] == 1
-    assert events == [("ingest", "source-a"), ("audit", "parent-a"), ("ingest", "source-b")]
+    codex = [("audit", "parent-a"), ("audit", "parent-b"), ("ingest", "source-a"), ("ingest", "source-b")] \
+        if commits else [("ingest", "source-a"), ("audit", "parent-a"), ("ingest", "source-b"), ("audit", "parent-b")]
+    assert events == [("ingest", "running"), ("changeset", "cs-a"), *codex]
 
+
+def test_codex_audits_wait_while_a_maintainer_run_holds_the_lease(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(worker, "DEFER_POLL_S", 0.02)
+    monkeypatch.setattr(worker, "COMMIT_BUNDLES", frozenset({tmp_path.name}))
+    events = []
+    monkeypatch.setattr(worker.curate, "run", lambda _bundle, subject, _job: events.append(("ingest", subject)))
+    monkeypatch.setattr(worker.audit, "run", lambda _bundle, subject, _job: events.append(("audit", subject)))
+    run = {"principal": "process:ai-wiki-maintainer", "run": "WAIO-1"}
+    M.acquire_lease(tmp_path, "maintainer", **run)
+    worker.ensure_started()
+    worker.submit_audit(tmp_path, "parent-a", tmp_path / "audit-a.json")
+    worker.submit(tmp_path, "source-a", tmp_path / "a.json")
+    deadline = time.monotonic() + 5
+    while not events and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)  # many polls later, the audit still waits for the run
+    assert events == [("ingest", "source-a")]
+
+    M.release_lease(tmp_path, "maintainer", **run)
+    worker._q.join()
+    assert events == [("ingest", "source-a"), ("audit", "parent-a")]
+
+    # An expired lease (a run that died) does not hold audits back either.
+    M.acquire_lease(tmp_path, "maintainer", **run)
+    worker.submit_audit(tmp_path, "parent-b", tmp_path / "audit-b.json")
+    time.sleep(0.1)
+    assert events[-1] == ("audit", "parent-a")
+    later = M._now() + M.LEASE_TTL
+    monkeypatch.setattr(M, "_now", lambda: later)
+    worker._q.join()
+    assert events[-1] == ("audit", "parent-b")
+
+
+
+def test_a_lease_on_a_bundle_that_commits_no_changesets_defers_no_audit(tmp_path: Path, monkeypatch) -> None:
+    # Today's writer, or the phase 1 production bundle: whoever holds a maintainer lease
+    # there (a shared legacy token could take one) never holds the P0 audits back.
+    monkeypatch.setattr(worker, "DEFER_POLL_S", 0.02)
+    monkeypatch.setattr(worker, "COMMIT_BUNDLES", frozenset({"solvely-wiki-shadow"}))
+    events = []
+    monkeypatch.setattr(worker.audit, "run", lambda _bundle, subject, _job: events.append(("audit", subject)))
+    M.acquire_lease(tmp_path, "maintainer", principal="member:legacy-token", run="anyone-1")
+    worker.ensure_started()
+
+    worker.submit_audit(tmp_path, "parent-a", tmp_path / "audit-a.json")
+    worker._q.join()
+
+    assert events == [("audit", "parent-a")] and worker._deferred == []
+    assert M.active_lease(tmp_path, "maintainer") is not None
 
 def test_recover_rolls_back_precommit_tree_and_restores_ignored_inbox(tmp_path: Path) -> None:
     repo, bundle, _remote, base = _repo(tmp_path)
