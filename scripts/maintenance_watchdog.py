@@ -510,9 +510,16 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
                                 f"maint {name}：条目 {item['id']}（{short(item.get('topic_key'), 50)}）"
                                 f"转为 needs_human：{why}"))
         elif item["status"] == "ready":
-            # An admin retry restarts the wait; merged evidence and unparking do not.
-            reopened = [parse_ts(r.get("at")) for r in item.get("reopened") or [] if isinstance(r, dict)]
-            ready.append((max(filter(None, reopened), default=parse_ts(item["created_at"])), item["id"]))
+            # The wait restarts when the item last came back to ready: an owner retry (reopened),
+            # an attempt that handed it back (attempts.history), or a new build re-admitting an
+            # attempt-capped item (build_retry, which only updated_at dates). Merged evidence
+            # alone does not restart it.
+            stamps = [parse_ts(item["created_at"])]
+            stamps += [parse_ts(r.get("at")) for r in item.get("reopened") or [] if isinstance(r, dict)]
+            stamps += [parse_ts(h.get("at")) for h in item["attempts"]["history"]]
+            if item.get("build_retry"):
+                stamps.append(parse_ts(item.get("updated_at")))
+            ready.append((max(filter(None, stamps)), item["id"]))
     ready.sort()
     stale = [(since, item_id) for since, item_id in ready if age_h(now, since) > args.ready_max_age_hours]
     if stale:

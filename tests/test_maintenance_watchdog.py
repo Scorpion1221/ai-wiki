@@ -519,6 +519,34 @@ def test_a_repository_that_stopped_advancing_makes_the_repos_cursor_stale(tmp_pa
     assert maint_keys(result) == set()
 
 
+def test_a_build_retry_restarts_the_ready_wait(tmp_path: Path, monkeypatch) -> None:
+    t0 = datetime(2026, 10, 16, 20, 0, tzinfo=UTC)
+    clock, build = [t0], ["build-1"]
+    monkeypatch.setattr(M, "_now", lambda: clock[0])
+    monkeypatch.setattr(M, "build", lambda: build[0])
+    bundle = make_bundle(tmp_path, iso(t0), [])
+    [row] = M.enqueue(bundle, [maint_item("repo:x#a", 40)], principal=MAINTAINER)["items"]
+    for n in range(1, 4):  # three counted failures cap the item
+        clock[0] = t0 + timedelta(hours=8 * n)
+        M.acquire_lease(bundle, "maintainer", principal=MAINTAINER, run=f"WAIO-{n}")  # unparks it
+        assert M.next_item(bundle, principal=MAINTAINER, run=f"WAIO-{n}")["item"]["id"] == row["id"]
+        M.resolve(bundle, row["id"], {"outcome": "parked", "class": "model_output", "reason": "yaml_parse"},
+                  principal=MAINTAINER, run=f"WAIO-{n}")
+        M.release_lease(bundle, "maintainer", principal=MAINTAINER, run=f"WAIO-{n}")
+    assert M.get_item(bundle, row["id"])["resolution"]["reason"] == "attempt_cap"
+
+    clock[0], build[0] = t0 + timedelta(hours=120), "build-2"
+    assert M.acquire_lease(bundle, "maintainer", principal=MAINTAINER, run="WAIO-4")["build_retry"] == [row["id"]]
+    M.release_lease(bundle, "maintainer", principal=MAINTAINER, run="WAIO-4")  # max-items reached first
+
+    _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=121)))
+    assert maint_keys(result) == set()  # ready for 1h, not since its creation 121h ago
+    assert result["checks"]["maint:solvely-wiki"]["oldest_ready"] == {
+        "id": row["id"], "since": iso(t0 + timedelta(hours=120)), "age_hours": 1.0}
+    _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=193)))
+    assert maint_keys(result) == {"maint_ready_stale:solvely-wiki"}
+
+
 def corrupt(bundle: Path, item_id: str, text: str) -> None:
     (bundle / ".okf" / "maint" / "items" / item_id / "item.json").write_text(text)
 
