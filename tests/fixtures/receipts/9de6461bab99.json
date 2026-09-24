@@ -1,0 +1,59 @@
+{
+  "id": "9de6461bab99",
+  "kind": "audit",
+  "parent_job": "fc5a4cccfb29",
+  "concept_files": [
+    "decisions/growthbook-general-experiment-platform-contract.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "features/ai-interview-frontend.md",
+    "features/waio-admin-authentication-permissions.md",
+    "playbooks/mini-game-package-release-validation.md"
+  ],
+  "status": "failed",
+  "created": "2026-09-19T20:46:46Z",
+  "started": "2026-09-19T20:46:46Z",
+  "agent": {
+    "runtime": "codex",
+    "bin": "/home/<user>/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh",
+    "role": "adversarial-auditor",
+    "heartbeat_at": "2026-09-19T20:48:03Z",
+    "elapsed_s": 75.0,
+    "finished_at": "2026-09-19T20:48:05Z"
+  },
+  "source": "sources/0c9f9f8a1718712cd468cc278dfd6c2782c1426e57d5fb82026122507c63-0c9f9f8a1718712cd468cc278dfd6c2782c1426e57d5fb82026122507c63ba4c.md.source",
+  "base_revision": "ffb3cf407f89976f715165f358564158bdafe9eb",
+  "base_branch": "main",
+  "phase": "rolled_back",
+  "pre_sync": {
+    "synced": true
+  },
+  "returncode": 0,
+  "summary": "<agent summary redacted>",
+  "discarded_files": [
+    "decisions/growthbook-general-experiment-platform-contract.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "features/ai-interview-frontend.md",
+    "features/waio-admin-authentication-permissions.md",
+    "playbooks/mini-game-package-release-validation.md"
+  ],
+  "error": "OKFDocumentError('invalid YAML frontmatter: while parsing a block mapping\\n  in \"<unicode string>\", line 1, column 1:\\n    type: Experiment\\n    ^\\nexpected <block end>, but found \\'-\\'\\n  in \"<unicode string>\", line 11, column 1:\\n    - {by: process:ai-wiki-adversari ... \\n    ^')",
+  "validation": {
+    "status": "not_run",
+    "reason": "OKFDocumentError('invalid YAML frontmatter: while parsing a block mapping\\n  in \"<unicode string>\", line 1, column 1:\\n    type: Experiment\\n    ^\\nexpected <block end>, but found \\'-\\'\\n  in \"<unicode string>\", line 11, column 1:\\n    - {by: process:ai-wiki-adversari ... \\n    ^')"
+  },
+  "audit": {
+    "status": "failed",
+    "verified_concepts": [],
+    "unverified_concepts": [
+      "decisions/growthbook-general-experiment-platform-contract.md",
+      "experiments/web-home-writing-bubble-ab.md",
+      "features/ai-interview-frontend.md",
+      "features/waio-admin-authentication-permissions.md",
+      "playbooks/mini-game-package-release-validation.md"
+    ],
+    "corrected_concepts": []
+  },
+  "finished": "2026-09-19T20:48:06Z"
+}

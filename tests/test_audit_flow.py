@@ -214,11 +214,7 @@ def test_audit_with_no_changed_concepts_is_immediate_idempotent_pass(tmp_path: P
     assert second["id"] == first["id"] and second["deduplicated"] is True
 
 
-def test_audit_endpoint_fails_closed_during_bundle_mutation(tmp_path: Path, monkeypatch) -> None:
-    bundle = _bundle(tmp_path)
-    client, submitted = _client(bundle, monkeypatch)
-    from aiwiki.service import app as appmod
-
+def _post_audit_while_mutating(client, appmod, params=None):
     entered = threading.Event()
     release = threading.Event()
 
@@ -232,18 +228,85 @@ def test_audit_endpoint_fails_closed_during_bundle_mutation(tmp_path: Path, monk
     assert entered.wait(5)
     try:
         response = client.post("/jobs/ingest1/audit", headers=AUTH)
+        status = client.get(f"/jobs/{response.json().get('id', 'ingest1')}", headers=AUTH)
     finally:
         release.set()
         thread.join(timeout=5)
+    return response, status
 
-    assert response.status_code == 503
+
+def _audit_jobs(bundle: Path) -> list[dict]:
+    return [
+        job for job in (json.loads(path.read_text(encoding="utf-8"))
+                        for path in (bundle / ".okf" / "jobs").glob("*.json"))
+        if job.get("kind") == "audit"
+    ]
+
+
+def test_audit_endpoint_enqueues_during_bundle_mutation(tmp_path: Path, monkeypatch) -> None:
+    """A long agent pass must not turn POST /audit or a status read into a 503 (CUR-07)."""
+    bundle = _bundle(tmp_path)
+    client, submitted = _client(bundle, monkeypatch)
+    from aiwiki.service import app as appmod
+
+    response, status = _post_audit_while_mutating(client, appmod)
+
+    assert response.status_code == 200
+    job = response.json()
+    assert job["status"] == "queued" and job["deduplicated"] is False
+    assert job["concept_files"] == ["features/release.md"]
+    assert status.status_code == 200 and status.json()["id"] == job["id"]
+    assert len(submitted) == 1
+    assert [audit_job["id"] for audit_job in _audit_jobs(bundle)] == [job["id"]]
+    # The queued attempt is idempotent like any other.
+    again = client.post("/jobs/ingest1/audit", headers=AUTH).json()
+    assert again["id"] == job["id"] and again["deduplicated"] is True
+
+
+def test_audit_endpoint_during_mutation_keeps_no_concept_and_legacy_gates(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    parent = I.read_job(bundle, "ingest1")
+    parent.pop("concept_files")
+    I.save_job(bundle, parent)
+    client, submitted = _client(bundle, monkeypatch)
+    from aiwiki.service import app as appmod
+
+    # An unscoped legacy receipt needs the live tree to resolve scope: nothing is created.
+    response, _status = _post_audit_while_mutating(client, appmod)
+    assert response.status_code == 409 and "in progress" in response.json()["detail"]
+    assert submitted == [] and _audit_jobs(bundle) == []
+
+    # A receipt that declares no concepts is a tree-independent no-op pass.
+    parent["concept_files"] = []
+    I.save_job(bundle, parent)
+    response, _status = _post_audit_while_mutating(client, appmod)
+    assert response.status_code == 200
+    assert response.json()["status"] == "done" and response.json()["reason"] == "no_concepts_to_audit"
     assert submitted == []
-    jobs = []
-    for path in (bundle / ".okf" / "jobs").glob("*.json"):
-        job = json.loads(path.read_text(encoding="utf-8"))
-        if job.get("kind") == "audit":
-            jobs.append(job)
-    assert jobs == []
+
+
+def test_queued_audit_rechecks_declared_scope_on_the_live_tree(tmp_path: Path, monkeypatch) -> None:
+    bundle = _bundle(tmp_path)
+    (bundle / "features" / "other.md").write_text(_concept(), encoding="utf-8")
+    parent = I.read_job(bundle, "ingest1")
+    parent["concept_files"] = ["features/other.md", "features/release.md"]
+    I.save_job(bundle, parent)
+    job = I.new_audit_job(bundle, "ingest1", parent["concept_files"])
+    (bundle / "features" / "other.md").unlink()  # a later pass removed a declared concept
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a scope mismatch must fail before the reviewer runs")
+
+    monkeypatch.setattr(curate, "_agent_process", unexpected)
+    audit.run(bundle, "ingest1", I.job_path(bundle, job["id"]))
+
+    result = I.read_job(bundle, job["id"])
+    assert result["status"] == "failed"
+    assert result["error"] == "ingest audit scope is missing or invalid"
+    assert result["failure"]["class"] == "input" and result["failure"]["retryable"] is False
 
 
 def test_audit_endpoint_rejects_missing_declared_concept_scope(tmp_path: Path, monkeypatch) -> None:

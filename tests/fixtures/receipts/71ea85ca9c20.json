@@ -1,0 +1,62 @@
+{
+  "id": "71ea85ca9c20",
+  "kind": "audit",
+  "parent_job": "6f4b6f97e4b2",
+  "concept_files": [
+    "experiments/ai-study-deferred-login-ab.md",
+    "experiments/sepa-first-payment-experiment-2026-09.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "experiments/web-landing-page-aio-ab.md",
+    "references/six-landing-pages-direct-home-checkpoint-2026-09.md"
+  ],
+  "status": "failed",
+  "created": "2026-09-23T15:52:57Z",
+  "started": "2026-09-23T15:52:57Z",
+  "agent": {
+    "runtime": "codex",
+    "bin": "/home/<user>/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh",
+    "role": "adversarial-auditor",
+    "heartbeat_at": "2026-09-23T15:55:13Z",
+    "elapsed_s": 135.0,
+    "finished_at": "2026-09-23T15:55:15Z"
+  },
+  "source": "sources/evidence-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+  "base_revision": "3b5731bf80586fc5fa3fb0e3422517fce517ab96",
+  "base_branch": "main",
+  "phase": "rolled_back",
+  "pre_sync": {
+    "synced": true
+  },
+  "returncode": 0,
+  "summary": "<agent summary redacted>",
+  "validation": {
+    "status": "failed",
+    "error_count": 1,
+    "errors": [
+      "web-landing-page-aio-ab.md: audit verification timestamp is outside the trusted audit window"
+    ]
+  },
+  "discarded_files": [
+    "experiments/ai-study-deferred-login-ab.md",
+    "experiments/sepa-first-payment-experiment-2026-09.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "experiments/web-landing-page-aio-ab.md",
+    "references/six-landing-pages-direct-home-checkpoint-2026-09.md"
+  ],
+  "error": "bundle validation failed with 1 error(s)",
+  "audit": {
+    "status": "failed",
+    "verified_concepts": [],
+    "unverified_concepts": [
+      "experiments/ai-study-deferred-login-ab.md",
+      "experiments/sepa-first-payment-experiment-2026-09.md",
+      "experiments/web-home-writing-bubble-ab.md",
+      "experiments/web-landing-page-aio-ab.md",
+      "references/six-landing-pages-direct-home-checkpoint-2026-09.md"
+    ],
+    "corrected_concepts": []
+  },
+  "finished": "2026-09-23T15:55:19Z"
+}

@@ -38,10 +38,13 @@ from ..engine.render_viz import generate_visualization
 from ..engine.scan_sources import _source_resource_rel
 from ..engine.validate import parse_doc, should_check
 from ..engine.validate import validate as validate_bundle
-from .config import load_agent_config
+from ..version import service_identity
+from .config import load_agent_config, load_agent_timeouts
+from .failure import classify, failure, model_output_error, output_tail, redact
 
-TIMEOUT_S = 900
-REPAIR_TIMEOUT_S = 300
+_AGENT_TIMEOUTS = load_agent_timeouts()
+TIMEOUT_S = _AGENT_TIMEOUTS["timeout_s"]
+REPAIR_TIMEOUT_S = _AGENT_TIMEOUTS["repair_timeout_s"]
 GIT_TIMEOUT_S = 120
 AGENT_HEARTBEAT_S = 15
 AGENT_RUNTIME = "codex"
@@ -1239,6 +1242,7 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
     job["status"] = "running"
     job["started"] = _now()
     job["agent"] = _agent_metadata()
+    job["service"] = service_identity()
     job.pop("repair", None)
     _save(job_path, job)
     git_on = os.environ.get("AIWIKI_GIT", "auto") != "off"
@@ -1657,7 +1661,8 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
                         elif proc.returncode != 0:
                             prepare_rollback_without_git()
                             job["status"] = "failed"
-                            job["error"] = (proc.stderr or "").strip()[-2000:] or "curation failed"
+                            job["error"] = redact((proc.stderr or "").strip())[-2000:] or "curation failed"
+                            job["agent"]["output_tail"] = output_tail(proc.stdout, proc.stderr)
                             job["validation"] = {"status": "not_run", "reason": "curation failed"}
                             rollback()
                         elif workspace_errors:
@@ -1825,18 +1830,32 @@ def run(bundle: Path, source_rel: str, job_path: Path) -> None:
                     job["status"] = "done"
                     job["phase"] = "done"
     except subprocess.TimeoutExpired as exc:
-        repair_timeout = job.get("repair", {}).get("error") == "TimeoutExpired"
-        phase = "curation repair" if repair_timeout else "curation"
+        # Git helpers time out too; only an agent timeout is a curation timeout.
+        git_timeout = isinstance(exc.cmd, list) and exc.cmd[:1] == ["git"]
+        repair_timeout = not git_timeout and job.get("repair", {}).get("error") == "TimeoutExpired"
+        phase = "curation git" if git_timeout else "curation repair" if repair_timeout else "curation"
         job["status"] = "failed"
         job["error"] = f"{phase} timed out after {exc.timeout}s"
         job["validation"] = {"status": "not_run", "reason": f"{phase} timed out"}
+        if git_timeout:
+            job["failure"] = failure("transient", stage="git", detail=job["error"])
+        else:
+            job.setdefault("agent", _agent_metadata())["output_tail"] = output_tail(exc.stdout, exc.stderr)
+            job["failure"] = failure("timeout", stage="repair" if repair_timeout else "agent",
+                                     detail=job["error"])
         rollback()
     except Exception as e:  # noqa: BLE001 — record any failure on the job, never crash the worker
         job["status"] = "failed"
         job["error"] = repr(e)
         job["validation"] = {"status": "not_run", "reason": "runtime exception"}
+        # Before rollback: the phase still names the stage. Malformed model output is decided
+        # by type, not by regexes over a repr that quotes its frontmatter or file names.
+        job["failure"] = (failure("model_output", stage="validation", detail=job["error"])
+                          if model_output_error(e) else classify(job))
         rollback()
     job["finished"] = _now()
+    if job.get("status") == "failed" and not isinstance(job.get("failure"), dict):
+        job["failure"] = classify(job)
     _save(job_path, job)
     if agent_workspace_dir is not None:
         shutil.rmtree(agent_workspace_dir, ignore_errors=True)

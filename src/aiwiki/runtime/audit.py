@@ -24,9 +24,12 @@ from ..engine.document import OKFDocumentError, _instant, current_verified, norm
 from ..engine.gen_indexes import generate_indexes
 from ..engine.validate import parse_doc, should_check
 from ..engine.validate import validate as validate_bundle
+from ..version import service_identity
 from . import curate
+from .config import load_agent_timeouts
+from .failure import classify, failure, model_output_error, output_tail, redact
 
-TIMEOUT_S = 900
+TIMEOUT_S = load_agent_timeouts()["audit_timeout_s"]
 AUDITOR = "process:ai-wiki-adversarial-audit"
 AUDIT_EVENT_WINDOW = timedelta(minutes=5)
 
@@ -532,6 +535,7 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
     job["status"] = "running"
     job["started"] = curate._now()
     job["agent"] = {**curate._agent_metadata(), "role": "adversarial-auditor"}
+    job["service"] = service_identity()
     _save(job_path, job)
 
     root: Path | None = None
@@ -679,6 +683,11 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
         if not concepts:
             _set_failure(job, "parent ingest job changed no concept files")
             return
+        declared = parent.get("concept_files")
+        if isinstance(declared, list) and len(concepts) != len(set(declared)):
+            # Same gate as POST /audit; a queued audit re-checks it on the live tree.
+            _set_failure(job, "ingest audit scope is missing or invalid")
+            return
         source = _find_source(bundle, parent)
         if source is None:
             _set_failure(job, "immutable source snapshot not found")
@@ -810,7 +819,8 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
             _set_failure(job, "adversarial audit failed")
-            job["stderr"] = (proc.stderr or "").strip()[-2000:]
+            job["stderr"] = redact((proc.stderr or "").strip())[-2000:]
+            job["agent"]["output_tail"] = output_tail(proc.stdout, proc.stderr)
             return
 
         if root is not None:
@@ -970,14 +980,19 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
             job["commit"] = None
         job["status"] = "done"
         job["phase"] = "done"
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         metadata_errors, state_paths = rollback()
         if metadata_errors:
             fail_git_metadata(metadata_errors)
         elif state_paths:
             fail_agent_state(state_paths)
+        elif isinstance(exc.cmd, list) and exc.cmd[:1] == ["git"]:
+            _set_failure(job, f"audit git command timed out after {exc.timeout}s")
+            job["failure"] = failure("transient", stage="git", detail=job["error"])
         else:
             _set_failure(job, f"adversarial audit timed out after {TIMEOUT_S}s")
+            job.setdefault("agent", {})["output_tail"] = output_tail(exc.stdout, exc.stderr)
+            job["failure"] = failure("timeout", stage="agent", detail=job["error"])
     except Exception as exc:  # noqa: BLE001 — a failed audit is a durable job result
         metadata_errors, state_paths = rollback()
         if metadata_errors:
@@ -986,8 +1001,12 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
             fail_agent_state(state_paths)
         else:
             _set_failure(job, repr(exc))
+            if model_output_error(exc):
+                job["failure"] = failure("model_output", stage="validation", detail=job["error"])
     finally:
         job["finished"] = curate._now()
+        if job.get("status") == "failed" and not isinstance(job.get("failure"), dict):
+            job["failure"] = classify(job)
         _save(job_path, job)
         if agent_output_dir is not None:
             shutil.rmtree(agent_output_dir, ignore_errors=True)

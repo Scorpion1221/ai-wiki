@@ -84,6 +84,16 @@ def _positive(value: str) -> int:
     return parsed
 
 
+def _compatible(service_version: object) -> bool:
+    """Client and writer interoperate when their major.minor versions match."""
+    def major_minor(value: object) -> list[str] | None:
+        parts = str(value or "").split(".")[:2]
+        return parts if len(parts) == 2 and all(part.isdigit() for part in parts) else None
+
+    client = major_minor(VERSION)
+    return client is not None and client == major_minor(service_version)
+
+
 def _command_path(args: list[str]) -> str:
     """Best command path for self-correcting root-level argparse errors."""
     positionals: list[str] = []
@@ -466,6 +476,7 @@ def main(argv=None) -> int:
         epilog=_examples(
             "ai-wiki -b my-kb maintain --manifest sources.json --state-dir ~/.ai-wiki/maintenance/my-kb",
             "ai-wiki -b my-kb maintain --state-dir ~/.ai-wiki/maintenance/my-kb --retry-now",
+            "ai-wiki maintain --state-dir ~/.ai-wiki/maintenance/my-kb --status",
         ), **common,
     )
     p_maintain.add_argument("--manifest", type=Path, help="add sources; omit to resume saved work only")
@@ -473,7 +484,12 @@ def main(argv=None) -> int:
     p_maintain.add_argument("--audit-pending", action="store_true",
                             help="also discover orphaned ingests older than 24h")
     p_maintain.add_argument("--retry-now", action="store_true",
-                            help="skip recoverable-failure cooldown once; never bypass validation or rollback gates")
+                            help="skip retry cooldowns once; never bypasses attempt caps, "
+                                 "non-retryable failures, or rollback gates")
+    p_maintain.add_argument("--status", action="store_true",
+                            help="print the saved state summary offline (no network, no lock)")
+    p_maintain.add_argument("--import-only", action="store_true",
+                            help="freeze manifest sources and import listed job receipts; submit nothing")
     p_maintain.add_argument("--poll-seconds", type=_limit, default=15, help="job poll interval (default: 15)")
     p_maintain.add_argument("--wait-seconds", type=_positive, default=3600,
                             help="maximum wait per stage; timeout preserves job ID (default: 3600)")
@@ -492,30 +508,44 @@ def main(argv=None) -> int:
     if a.cmd == "maintain":
         from aiwiki.cli import maintain
 
-        # Resolve a default to a concrete name before binding durable state to it.
-        bsel = bsel or _api("/health").get("bundle")
-        if not bsel:
-            _fail("maintenance needs a bundle", help_command="ai-wiki bundle use <name>", code=2)
+        if a.status and (a.manifest or a.import_only or a.retry_now or a.audit_pending):
+            _fail("--status only reads saved state; drop the other maintenance flags",
+                  help_command="ai-wiki maintain --help", code=2)
+        if a.import_only and not a.manifest:
+            _fail("--import-only needs --manifest", help_command="ai-wiki maintain --help", code=2)
         try:
-            result = maintain.run(manifest=a.manifest.expanduser() if a.manifest else None,
-                                  state_dir=a.state_dir.expanduser(), bundle=bsel,
-                                  audit_pending=a.audit_pending, retry_now=a.retry_now,
-                                  poll=a.poll_seconds, wait=a.wait_seconds)
+            if a.status:
+                result = maintain.status(a.state_dir.expanduser())
+            else:
+                # Resolve a default to a concrete name before binding durable state to it.
+                bsel = bsel or _api("/health").get("bundle")
+                if not bsel:
+                    _fail("maintenance needs a bundle", help_command="ai-wiki bundle use <name>", code=2)
+                result = maintain.run(manifest=a.manifest.expanduser() if a.manifest else None,
+                                      state_dir=a.state_dir.expanduser(), bundle=bsel,
+                                      audit_pending=a.audit_pending, retry_now=a.retry_now,
+                                      poll=a.poll_seconds, wait=a.wait_seconds, import_only=a.import_only)
         except (maintain.Pending, ValueError, OSError, KeyError, TypeError) as exc:
+            # Pending (another runner holds the lock, the writer is unreachable before any work)
+            # resumes on the next run: 1. Usage and state errors are fatal: 2.
+            code = 1 if isinstance(exc, maintain.Pending) else 2
             if a.json:
                 print(json.dumps({"error": str(exc), "help": "ai-wiki maintain --help"}, ensure_ascii=False))
-                return 1
-            _fail(str(exc), help_command="ai-wiki maintain --help")
+                return code
+            _fail(str(exc), help_command="ai-wiki maintain --help", code=code)
         if a.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
-            emit(object_lines("count", {k: result[k] for k in ("done", "pending")}),
+            emit(object_lines("count", {k: result[k] for k in maintain.STATUSES}),
                  object_lines("writer_retry", result["writer_retry"]) if result.get("writer_retry") else [],
+                 table_lines("warnings", ({"warning": w} for w in result.get("warnings", [])), ("warning",))
+                 if result.get("warnings") else [],
                  table_lines("sources", result["sources"], ("identity", "status", "action", "retry_at")))
-        return 1 if result["pending"] else 0
+        return maintain.exit_code(result)
     elif a.cmd == "health":
         d = _api("/health", bundle=bsel)
         if a.json:
+            d = {**d, "client_version": VERSION, "compatible": _compatible(d.get("service_version"))}
             print(json.dumps(d, ensure_ascii=False, indent=2))
         else:
             emit(

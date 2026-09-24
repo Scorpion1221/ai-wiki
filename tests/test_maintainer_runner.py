@@ -32,19 +32,32 @@ class Service:
         self.fail = {}
         self.audit_result = "passed"
         self.reads = []
+        self.build = None  # writer build stamped on new receipts and reported by health
+        self.health_build = None
+        self.health_calls = 0
 
     def __call__(self, *args, read=False):
         if args[:2] == ("config", "show"):
             return {"endpoint": "https://wiki/"}
         command, rest = args[2], args[3:]
+        if command == "health":
+            self.health_calls += 1
+            return {"service_version": "0.2.9", "build": self.health_build}
         if command == "ingest":
             data = Path(rest[0]).read_bytes()
             self.submitted.append(data)
             job_id = f"i{len(self.submitted)}"
             job = done(job_id, sha=hashlib.sha256(data).hexdigest())
+            if self.build:
+                job["service"] = {"version": "0.2.9", "build": self.build}
             if data in self.fail:
-                job.update(status="failed", phase="rolled_back", error=self.fail[data])
-                job["validation"] = {"status": "failed" if "validation" in job["error"] else "not_run"}
+                failure = self.fail[data]
+                job.update(status="failed", phase="rolled_back", commit=None, git={})
+                if isinstance(failure, dict):
+                    job.update(failure)
+                else:
+                    job["error"] = failure
+                    job["validation"] = {"status": "failed" if "validation" in failure else "not_run"}
             self.jobs[job_id] = job
             return {"submissions": [{"job": job_id}]}
         if command == "audit":
@@ -109,7 +122,8 @@ def test_running_job_is_resumed_without_duplicate_submission(setup):
     assert service.submitted == [] and service.audited == ["running"]
 
 
-def test_same_source_versions_stay_ordered_and_old_pending_survives_manifest(setup):
+def test_newer_version_supersedes_failed_old_version_and_keeps_its_receipts(setup):
+    # Previously the failed old version blocked every newer version forever (WAIO-568/587).
     service, state, path, add = setup
     add("repo", b"old")
     service.fail[b"old"] = "validation failed"
@@ -117,9 +131,20 @@ def test_same_source_versions_stay_ordered_and_old_pending_survives_manifest(set
     add("repo", b"new")
     add("independent", b"other")
     result = runner.run_sources(state, path, "kb", poll=0)
-    assert result["pending"] == 2 and result["done"] == 1
-    assert service.submitted == [b"old", b"other"]
-    assert "earlier version" in state["sources"][1]["error"]
+    assert (result["done"], result["pending"], result["needs_repair"], result["superseded"]) == (2, 0, 0, 1)
+    assert service.submitted == [b"old", b"new", b"other"]
+    old, new = state["sources"][:2]
+    assert old["status"] == "superseded" and old["superseded_by"] == new["sha256"]
+    assert [job["id"] for job in old["ingest"]] == ["i1"] and old["ingest"][0]["status"] == "failed"
+    assert runner.exit_code(result) == 0
+
+
+def test_unsubmitted_old_version_is_superseded_without_spending_a_pass(setup):
+    service, state, path, add = setup
+    add("repo", b"old")
+    add("repo", b"new")
+    result = runner.run_sources(state, path, "kb", poll=0)
+    assert service.submitted == [b"new"] and (result["done"], result["superseded"]) == (1, 1)
 
 
 def test_transient_failure_retries_after_cooldown_across_restarts(setup, monkeypatch):
@@ -144,13 +169,16 @@ def test_transient_failure_retries_after_cooldown_across_restarts(setup, monkeyp
     assert service.submitted == [b"source"] * 3 and len(service.audited) == 1
 
 
-@pytest.mark.parametrize("error", ["login required", "disk full", "permission denied", "validation failed"])
+@pytest.mark.parametrize("error", ["login required", "disk full", "permission denied"])
 def test_nontransient_failures_do_not_blindly_retry(setup, error):
     service, state, path, add = setup
     add("repo", b"source")
+    add("independent", b"other")
     service.fail[b"source"] = error
-    runner.run_sources(state, path, "kb", poll=0)
-    assert len(service.submitted) == 1
+    result = runner.run_sources(state, path, "kb", poll=0)
+    assert len(service.submitted) == 2 and result["done"] == 1
+    assert state["sources"][0]["status"] == "needs_repair" and "not retryable" in state["sources"][0]["error"]
+    assert runner.exit_code(result) == 3
 
 
 def test_needs_attention_is_completed_and_not_retried(setup):
@@ -162,27 +190,38 @@ def test_needs_attention_is_completed_and_not_retried(setup):
     assert len(service.audited) == 1
 
 
-def test_submission_unknown_is_persisted_and_never_blindly_duplicated(setup, monkeypatch):
+def test_unknown_submission_is_reconciled_by_idempotent_repost(setup, monkeypatch):
+    # Previously an uncertain POST left a permanent `submitting` dead end (F4).
     service, state, path, add = setup
     add("repo", b"source")
-    calls = []
+    posts = []
 
-    def unknown(*args, **kwargs):
-        calls.append(args)
-        raise runner.Pending("response lost")
+    def lossy_writer(*args, **kwargs):
+        if args[2:3] != ("ingest",):
+            return service(*args, **kwargs)
+        posts.append(args)
+        sha = hashlib.sha256(Path(args[3]).read_bytes()).hexdigest()
+        existing = [job for job in service.jobs.values() if job.get("sha256") == sha]
+        if existing:  # the writer dedupes identical bytes to the active/done job
+            return {"submissions": [{"job": existing[0]["id"]}]}
+        service(*args, **kwargs)  # the job was created, but the response was lost
+        raise runner.Pending("server rejected the request (status 502)")
 
-    monkeypatch.setattr(runner, "cli", unknown)
+    monkeypatch.setattr(runner, "cli", lossy_writer)
     assert runner.run_sources(state, path, "kb", poll=0)["pending"] == 1
     assert json.loads(path.read_text())["sources"][0]["submitting"] == "ingest"
-    runner.run_sources(state, path, "kb", poll=0)
-    assert len(calls) == 1
+    restored = json.loads(path.read_text())
+    assert runner.run_sources(restored, path, "kb", poll=0)["done"] == 1
+    assert len(posts) == 2 and service.submitted == [b"source"]
+    assert [job["id"] for job in restored["sources"][0]["ingest"]] == ["i1"]
+    assert "submitting" not in restored["sources"][0]
 
 
 def test_frozen_source_tampering_is_blocked(setup):
     service, state, path, add = setup
     entry = add("repo", b"source")
     Path(entry["path"]).write_bytes(b"tampered")
-    assert runner.run_sources(state, path, "kb", poll=0)["pending"] == 1
+    assert runner.run_sources(state, path, "kb", poll=0)["needs_repair"] == 1
     assert not service.submitted
 
 
@@ -375,8 +414,7 @@ def test_retry_now_skips_capacity_cooldown_but_only_probes_once(setup):
     assert service.submitted == [b"source", b"source", b"source", b"later"]
 
 
-@pytest.mark.parametrize("error", ["login required", "disk full", "permission denied", "validation failed",
-                                   "unrecognized model output", "invalid source 5fc6667503e429f"])
+@pytest.mark.parametrize("error", ["login required", "disk full", "permission denied"])
 def test_retry_now_cannot_bypass_hard_failures(setup, error):
     service, state, path, add = setup
     add("repo", b"source")
@@ -384,6 +422,28 @@ def test_retry_now_cannot_bypass_hard_failures(setup, error):
     runner.run_sources(state, path, "kb", poll=0)
     runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0, retry_now=True)
     assert len(service.submitted) == 1 and not service.audited
+
+
+@pytest.mark.parametrize("error,kind,cap", [
+    ("validation failed", "model_output", 3),
+    ("curation timed out after 900s", "timeout", 3),
+    ("unrecognized model output", "internal", 2),
+    ("invalid source 5fc6667503e429f", "internal", 2),
+])
+def test_retries_are_bounded_then_needs_repair_without_blocking_independent_work(setup, error, kind, cap):
+    # Previously validation/unknown failures never retried and transient ones retried forever.
+    service, state, path, add = setup
+    entry = add("repo", b"source")
+    service.fail[b"source"] = error
+    for _ in range(cap + 2):
+        result = runner.run_sources(state, path, "kb", poll=0, retry_now=True)
+    assert service.submitted == [b"source"] * cap
+    assert entry["status"] == "needs_repair" and f"cap of {cap}" in entry["error"] and kind in entry["error"]
+    assert runner.exit_code(result) == 3
+    add("independent", b"independent")
+    result = runner.run_sources(state, path, "kb", poll=0)
+    assert (result["done"], result["needs_repair"]) == (1, 1)
+    assert service.submitted == [b"source"] * cap + [b"independent"]
 
 
 @pytest.mark.parametrize("kind", ["ingest", "audit"])
@@ -397,14 +457,15 @@ def test_retry_now_requires_confirmed_rollback_and_correct_receipt(setup, kind):
         entry["audit"] = [failed]
     failed.update(status="failed", phase="recovery_pending", error="connection reset")
     failed["validation"] = {"status": "not_run"}
-    assert runner.run_sources(state, path, "kb", poll=0, retry_now=True)["pending"] == 1
+    assert runner.run_sources(state, path, "kb", poll=0, retry_now=True)["needs_repair"] == 1
+    assert "without a confirmed rollback" in state["sources"][0]["error"]
     assert not service.submitted and not service.audited
     failed["phase"] = "rolled_back"
     if kind == "ingest":
         failed["sha256"] = "wrong"
     else:
         failed["parent_job"] = "wrong"
-    assert runner.run_sources(state, path, "kb", poll=0, retry_now=True)["pending"] == 1
+    assert runner.run_sources(state, path, "kb", poll=0, retry_now=True)["needs_repair"] == 1
     assert not service.submitted and not service.audited
 
 
@@ -457,17 +518,22 @@ def test_new_evidence_is_frozen_during_cooldown_and_resume_needs_no_manifest(set
     assert service.submitted == [b"source", b"source", b"extra"]
 
 
-def test_same_source_new_version_waits_for_transient_recovery(setup):
+def test_old_version_with_done_ingest_finishes_its_audit_before_newer_version(setup):
     service, state, path, add = setup
-    add("repo", b"old")
+    old = add("repo", b"old")
+    old["ingest"] = [done("original", sha=old["sha256"])]
+    failed = done("old-audit", parent="original")
+    failed.update(status="failed", phase="rolled_back", error="status 503: service unavailable",
+                  validation={"status": "not_run"})
+    old["audit"] = [failed]
     add("repo", b"new")
     add("independent", b"other")
-    service.fail[b"old"] = "status 503: service unavailable"
     result = runner.run_sources(state, path, "kb", poll=0)
-    assert result["done"] == 1 and service.submitted == [b"old", b"other"]
-    service.fail.clear()
+    assert (result["done"], result["pending"]) == (1, 2) and service.submitted == [b"other"]
+    assert "earlier version" in state["sources"][1]["error"]
     result = runner.run_sources(json.loads(path.read_text()), path, "kb", poll=0, retry_now=True)
-    assert result["done"] == 3 and service.submitted == [b"old", b"other", b"old", b"new"]
+    assert result["done"] == 3 and service.submitted == [b"other", b"new"]
+    assert service.audited[:2] == ["i1", "original"]
 
 
 def test_cli_maintain_formats_and_missing_state_error(setup, monkeypatch, capsys):
@@ -481,7 +547,7 @@ def test_cli_maintain_formats_and_missing_state_error(setup, monkeypatch, capsys
     assert cli_main.main([*args, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["done"] == 1
     assert len(service.submitted) == 1 and len(service.audited) == 1
-    assert cli_main.main(["-b", "kb", "maintain", "--state-dir", str(path.parent / "empty"), "--json"]) == 1
+    assert cli_main.main(["-b", "kb", "maintain", "--state-dir", str(path.parent / "empty"), "--json"]) == 2
     assert "no saved state" in json.loads(capsys.readouterr().out)["error"]
 
 

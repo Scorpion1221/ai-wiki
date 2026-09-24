@@ -1,0 +1,33 @@
+{
+  "id": "a658b12f157b",
+  "kind": "ingest",
+  "source": "sources/inbox/evidence-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+  "sha256": "95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900",
+  "status": "failed",
+  "created": "2026-09-23T15:16:24Z",
+  "title": "solvely/daily/experiment-measurement-20260920",
+  "original_name": "evidence.md",
+  "curation": "queued",
+  "started": "2026-09-23T15:16:24Z",
+  "agent": {
+    "runtime": "codex",
+    "bin": "/home/<user>/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh",
+    "heartbeat_at": "2026-09-23T15:31:34Z",
+    "elapsed_s": 900.1
+  },
+  "base_revision": "06aa628920724056eaa0efd8822a8a12315601df",
+  "base_branch": "main",
+  "phase": "rolled_back",
+  "pre_sync": {
+    "synced": true
+  },
+  "recovery_source": ".okf/recovery/a658b12f157b.source",
+  "error": "curation timed out after 900s",
+  "validation": {
+    "status": "not_run",
+    "reason": "curation timed out"
+  },
+  "finished": "2026-09-23T15:31:48Z"
+}

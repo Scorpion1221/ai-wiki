@@ -18,6 +18,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from aiwiki.version import service_identity
+
 MAX_BYTES = 25_000_000
 _SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
 
@@ -95,6 +97,7 @@ def new_job(bundle: Path, source_rel: str, sha: str, curatable: bool,
         "id": uuid.uuid4().hex[:12], "kind": "ingest", "source": source_rel, "sha256": sha,
         "status": "queued" if curatable else "needs-conversion",
         "created": _now(),
+        "service": service_identity(),
     }
     if title:
         job["title"] = title
@@ -167,6 +170,7 @@ def new_audit_job(bundle: Path, parent_job: str, concept_files: list[str]) -> di
         "concept_files": concept_files,
         "status": "queued",
         "created": _now(),
+        "service": service_identity(),
     }
     if not concept_files:
         job.update({

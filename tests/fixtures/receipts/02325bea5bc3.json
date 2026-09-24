@@ -1,0 +1,41 @@
+{
+  "id": "02325bea5bc3",
+  "kind": "ingest",
+  "source": "sources/inbox/95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d1676-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+  "sha256": "95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900",
+  "status": "failed",
+  "created": "2026-09-20T20:07:11Z",
+  "title": "solvely/daily/experiment-measurement-20260920",
+  "original_name": "95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md",
+  "curation": "queued",
+  "started": "2026-09-20T20:07:11Z",
+  "agent": {
+    "runtime": "codex",
+    "bin": "/home/<user>/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh",
+    "heartbeat_at": "2026-09-20T20:15:13Z",
+    "elapsed_s": 465.0,
+    "finished_at": "2026-09-20T20:15:24Z"
+  },
+  "base_revision": "aaf93bcdb44eeb98255a87d4007a2a7f6ab5c270",
+  "base_branch": "main",
+  "phase": "rolled_back",
+  "pre_sync": {
+    "synced": true
+  },
+  "recovery_source": ".okf/recovery/02325bea5bc3.source",
+  "returncode": 0,
+  "summary": "<agent summary redacted>",
+  "error": "bundle validation failed with 3 error(s)",
+  "validation": {
+    "status": "failed",
+    "error_count": 3,
+    "errors": [
+      "experiments/ai-study-deferred-login-ab.md: invalid YAML frontmatter: while parsing a block mapping\n  in \"<unicode string>\", line 1, column 1:\n    type: Experiment\n    ^\nexpected <block end>, but found '-'\n  in \"<unicode string>\", line 35, column 1:\n    - id: dated-source-20260920-9549 ... \n    ^",
+      "experiments/web-home-writing-bubble-ab.md: invalid YAML frontmatter: while parsing a block mapping\n  in \"<unicode string>\", line 1, column 1:\n    type: Experiment\n    ^\nexpected <block end>, but found '-'\n  in \"<unicode string>\", line 23, column 1:\n    - id: dated-source-20260920-9549 ... \n    ^",
+      "experiments/web-landing-page-aio-ab.md: invalid YAML frontmatter: while parsing a block mapping\n  in \"<unicode string>\", line 1, column 1:\n    type: Experiment\n    ^\nexpected <block end>, but found '-'\n  in \"<unicode string>\", line 47, column 1:\n    - id: dated-source-20260920-9549 ... \n    ^"
+    ]
+  },
+  "finished": "2026-09-20T20:15:39Z"
+}

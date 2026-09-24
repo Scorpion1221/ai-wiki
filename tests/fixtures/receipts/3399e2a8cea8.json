@@ -1,0 +1,42 @@
+{
+  "id": "3399e2a8cea8",
+  "kind": "ingest",
+  "source": "sources/inbox/1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd29-1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd295836.md.source",
+  "sha256": "1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd295836",
+  "status": "failed",
+  "created": "2026-09-20T20:42:36Z",
+  "title": "solvely/daily/h5-checkout-recovery-20260920",
+  "original_name": "1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd295836.md",
+  "curation": "queued",
+  "started": "2026-09-20T20:42:36Z",
+  "agent": {
+    "runtime": "codex",
+    "bin": "/home/<user>/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh",
+    "heartbeat_at": "2026-09-20T20:46:09Z",
+    "elapsed_s": 210.0,
+    "finished_at": "2026-09-20T20:46:17Z"
+  },
+  "base_revision": "d2da1d0d7cb0b0c51378c26265296fec0d90f79d",
+  "base_branch": "main",
+  "phase": "rolled_back",
+  "pre_sync": {
+    "synced": true
+  },
+  "recovery_source": ".okf/recovery/3399e2a8cea8.source",
+  "returncode": 0,
+  "summary": "<agent summary redacted>",
+  "error": "bundle validation failed with 4 error(s)",
+  "validation": {
+    "status": "failed",
+    "error_count": 4,
+    "errors": [
+      "references/h5-billing-copy-dev1-delivery-open-question-2026-09.md: sources[0].resource does not resolve to a local file: '/sources/1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd29-1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd295836.md.source' -> 'sources/1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd29-1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd295836.md.source'",
+      "risks/h5-hosted-to-elements-recovery-and-acceptance-2026-09.md: sources[0].resource does not resolve to a local file: '/sources/1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd29-1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd295836.md.source' -> 'sources/1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd29-1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd295836.md.source'",
+      "references/h5-billing-copy-dev1-delivery-open-question-2026-09.md: changed concepts must cite current ingest snapshot 'sources/1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd29-1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd295836.md.source'",
+      "risks/h5-hosted-to-elements-recovery-and-acceptance-2026-09.md: changed concepts must cite current ingest snapshot 'sources/1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd29-1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd295836.md.source'"
+    ]
+  },
+  "finished": "2026-09-20T20:46:26Z"
+}

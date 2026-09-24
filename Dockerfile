@@ -26,6 +26,11 @@ ENV AIWIKI_BUNDLES=/bundles \
     AIWIKI_PORT=8787 \
     AIWIKI_CURATE=off \
     AIWIKI_DISABLE=ingest,audit,create,delete
+# Deployed revision reported as /health "build"; declared after `uv sync` so a new revision
+# keeps the dependency layer cached:
+#   docker build --build-arg AIWIKI_BUILD_COMMIT=$(git rev-parse HEAD) -t ai-wiki .
+ARG AIWIKI_BUILD_COMMIT=
+ENV AIWIKI_BUILD_COMMIT=${AIWIKI_BUILD_COMMIT}
 EXPOSE 8787
 
 CMD ["uv", "run", "--no-dev", "python", "-m", "aiwiki.service"]
