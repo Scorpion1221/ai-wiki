@@ -105,8 +105,11 @@ def main(argv: list[str] | None = None) -> int:
         default=Path(os.environ.get("AIWIKI_SKILLS_HOME", "~/.agents/skills")).expanduser(),
         help="runtime skills directory (default: ~/.agents/skills)",
     )
-    parser.add_argument("skills", nargs="*", choices=SKILLS, help="subset (default: all)")
+    # No choices= here: Python 3.11's argparse checks an empty nargs="*" default against them.
+    parser.add_argument("skills", nargs="*", metavar="SKILL", help=f"subset of {', '.join(SKILLS)} (default: all)")
     args = parser.parse_args(argv)
+    if unknown := [name for name in args.skills if name not in SKILLS]:
+        parser.error(f"unknown skill(s): {', '.join(unknown)} (choose from {', '.join(SKILLS)})")
 
     names = args.skills or list(SKILLS)
     failed = False
