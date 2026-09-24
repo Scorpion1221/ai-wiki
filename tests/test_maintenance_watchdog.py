@@ -264,6 +264,23 @@ def test_writer_failures_resolved_by_later_attempts_do_not_alert(tmp_path: Path)
     assert facts["status_counts"] == {"failed": 5, "done": 2}
 
 
+def test_newer_version_of_the_same_identity_resolves_an_old_failure(tmp_path: Path) -> None:
+    # 2026-09-24: maintain superseded 3399e2a8cea8 (h5 old bytes) and ingested the newer
+    # version as f45f96502984 under the same identity; the old failure is no longer actionable.
+    newer = {"id": "f45f96502984", "kind": "ingest", "status": "done",
+             "title": "solvely/daily/h5-checkout-recovery-20260920", "sha256": "c8ccdc14" + "0" * 56,
+             "created": "2026-09-24T04:54:26Z", "finished": "2026-09-24T05:04:29Z"}
+    other = {"id": "0000aaaa0000", "kind": "ingest", "status": "done", "title": "another/identity",
+             "sha256": "d" * 64, "created": "2026-09-24T05:00:00Z", "finished": "2026-09-24T05:05:00Z"}
+    jobs = real_jobs()
+    bundle = make_bundle(tmp_path, "2026-09-24T05:04:30Z", jobs + [other])
+    code, result = run("--bundle", str(bundle), "--now", "2026-09-24T06:00:00Z")
+    assert "job_failed:solvely-wiki:3399e2a8cea8" in keys(result)  # a different identity resolves nothing
+    bundle = make_bundle(tmp_path / "b", "2026-09-24T05:04:30Z", jobs + [newer])
+    code, result = run("--bundle", str(bundle), "--now", "2026-09-24T06:00:00Z")
+    assert "job_failed:solvely-wiki:3399e2a8cea8" not in keys(result)
+
+
 def test_writer_alerts_on_unresolved_failures_inside_the_window(tmp_path: Path) -> None:
     bundle = make_bundle(tmp_path, "2026-09-20T12:00:00Z", real_jobs())
     # 17:20Z: e94c8b707aea had failed and f7dddac6e389 was not yet created.

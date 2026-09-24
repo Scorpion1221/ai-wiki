@@ -334,6 +334,15 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
         kind = job.get("kind", "ingest")
         return kind, job.get("parent_job") if kind == "audit" else job.get("sha256")
 
+    def resolves(later: dict, job: dict) -> bool:
+        if subject(later) == subject(job):
+            return True
+        # ai-wiki maintain supersedes an unfinished older version of a source identity (the
+        # ingest title) with a newer one; that newer version's success resolves the old failure.
+        title = job.get("title")
+        return (job.get("kind", "ingest") == "ingest" and later.get("kind", "ingest") == "ingest"
+                and isinstance(title, str) and bool(title.strip()) and later.get("title") == title)
+
     counts: dict[str, int] = {}
     for _created, job in jobs:
         counts[str(job.get("status"))] = counts.get(str(job.get("status")), 0) + 1
@@ -346,8 +355,9 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
         finished = parse_ts(job.get("finished")) or created
         if job.get("status") != "failed" or not alert_start <= finished <= now:
             continue
-        # A later attempt on the same source (ingest) or parent (audit) that is done or in flight resolves it.
-        retry = next((j for c, j in jobs if c > created and subject(j) == subject(job)
+        # A later attempt on the same source (ingest), a newer version of the same source identity
+        # (ingest title), or the same parent (audit) that is done or in flight resolves it.
+        retry = next((j for c, j in jobs if c > created and resolves(j, job)
                       and j.get("status") in ("done", "queued", "running")), None)
         failure = job.get("failure") if isinstance(job.get("failure"), dict) else {}
         row = {"id": job.get("id"), "kind": job.get("kind", "ingest"), "finished": iso(finished),
