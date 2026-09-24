@@ -521,17 +521,16 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
                                   "active": until is not None and now < until}
         if until is None:
             continue  # no lease, or one the writer would not honour either
-        run = lease.get("run")
-        if now < until:
-            held = age_h(now, acquired)
-            if held is not None and held > args.stuck_hours:
-                alerts.append(alert(check, f"maint_lease_stuck:{name}:{role}:{run}:held",
-                                    f"maint {name}：run {run} 持有 {role} lease 已 {held}h"
-                                    f"（阈值 {args.stuck_hours:g}h）"))
-        elif age_h(now, until) > args.stuck_hours:
-            alerts.append(alert(check, f"maint_lease_stuck:{name}:{role}:{run}:expired",
-                                f"maint {name}：run {run} 的 {role} lease 于 {iso(until)} 过期，已 {age_h(now, until)}h"
-                                f" 没有 maint end，也没有新 run 接手（阈值 {args.stuck_hours:g}h）"))
+        # One condition for as long as the file names this run: `maint end` deletes it and the
+        # next `maint begin` rewrites it. A dead run's lease stays live up to 3h after its last
+        # renewal, so its lapse alone must not read as a recovery.
+        run, held = lease.get("run"), age_h(now, acquired or parse_ts(lease.get("renewed_at")))
+        if held > args.stuck_hours:
+            state = (f"有效至 {iso(until)}，最后续期 {iso(parse_ts(lease.get('renewed_at')))}" if now < until
+                     else f"于 {iso(until)} 过期，没有 maint end，也没有新 run 接手")
+            alerts.append(alert(check, f"maint_lease_stuck:{name}:{role}:{run}",
+                                f"maint {name}：run {run} 持有 {role} lease 已 {held}h"
+                                f"（阈值 {args.stuck_hours:g}h），{state}"))
 
     oldest = ready[0] if ready else None
     facts = {"path": str(root), "items": counts, "corrupt_items": corrupt, "needs_human": needs_human,

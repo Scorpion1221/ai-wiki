@@ -399,6 +399,10 @@ def test_missing_job_directory_is_an_error(tmp_path: Path) -> None:
     assert "job directory" in result["errors"][0]["error"]
 
 
+def card_text_of(card: dict) -> str:
+    return "\n".join(e["content"] for e in card["body"]["elements"] if e["tag"] == "markdown")
+
+
 # --- maintainer queue (<bundle>/.okf/maint, written by service/maint_state.py) ------------------
 
 MAINTAINER = "process:ai-wiki-maintainer"
@@ -446,7 +450,7 @@ def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) 
     M.resolve(bundle, a, {"outcome": "parked", "class": "input", "reason": "binary evidence"},
               principal=MAINTAINER, run="WAIO-1")  # not retryable: needs_human at once
     clock[0] = t0 + timedelta(hours=2)
-    M.renew(bundle, principal=MAINTAINER, run="WAIO-1")  # live until +5h, held since +0h
+    M.renew(bundle, principal=MAINTAINER, run="WAIO-1")  # live until +5h, held since +0h; then it dies
 
     def at(hours: float) -> dict:
         _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=hours)))
@@ -454,24 +458,26 @@ def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) 
         return result
 
     human = f"maint_needs_human:solvely-wiki:{a}"
-    expired = "maint_lease_stuck:solvely-wiki:maintainer:WAIO-1:expired"
+    lease = "maint_lease_stuck:solvely-wiki:maintainer:WAIO-1"
     cursor_stale = "maint_cursor_stale:solvely-wiki:repos"  # never issues: that cursor does not exist
     assert maint_keys(at(2.5)) == {human}
-    assert maint_keys(at(4)) == {human, "maint_lease_stuck:solvely-wiki:maintainer:WAIO-1:held"}
-    assert maint_keys(at(7)) == {human}  # the lease lapsed at +5h, only 2h ago
-    assert maint_keys(at(9)) == {human, expired}
-    assert maint_keys(at(31)) == {human, expired, cursor_stale}
+    held = at(4)
+    assert maint_keys(held) == {human, lease}
+    # Its lapse at +5h fixed nothing: the same key stays, so no recovery card goes out.
+    assert maint_keys(at(7)) == {human, lease}
+    assert maint_keys(at(31)) == {human, lease, cursor_stale}
     stale = at(73)
-    assert maint_keys(stale) == {human, expired, cursor_stale, "maint_ready_stale:solvely-wiki"}
+    assert maint_keys(stale) == {human, lease, cursor_stale, "maint_ready_stale:solvely-wiki"}
     facts = stale["checks"]["maint:solvely-wiki"]
     assert facts["needs_human"] == [{"id": a, "topic_key": "repo:x#a", "since": iso(t0),
                                      "reason": "not_retryable/input"}]
     assert (facts["oldest_ready"], facts["ready_stale"]) == ({"id": b, "since": iso(t0), "age_hours": 73.0}, 1)
 
-    card = load_script().render_card("alert", "aliyun-jp-writer", stale, {})
-    text = "\n".join(e["content"] for e in card["body"]["elements"] if e["tag"] == "markdown")
+    script = load_script()
+    assert "有效至 10-17 09:00，最后续期 10-17 06:00" in card_text_of(script.render_card("alert", "w", held, {}))
+    text = card_text_of(script.render_card("alert", "aliyun-jp-writer", stale, {}))
     assert "**🧭 Maintainer 队列**" in text and "POST /admin/items/<id>/retry" in text
-    assert "lease 于 10-17 09:00 过期" in text  # +5h in Beijing time
+    assert "lease 已 73.0h（阈值 3h），于 10-17 09:00 过期，没有 maint end" in text  # +5h in Beijing time
 
     # The next run takes over the lapsed lease, collects and closes b; the owner reopens a.
     clock[0] = t0 + timedelta(hours=80)
