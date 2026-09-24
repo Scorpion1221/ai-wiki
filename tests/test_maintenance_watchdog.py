@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from aiwiki.service import maint_state as M
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "maintenance_watchdog.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "maintenance_watchdog"
@@ -395,6 +397,93 @@ def test_missing_job_directory_is_an_error(tmp_path: Path) -> None:
     code, result = run("--bundle", str(bundle))
     assert code == 2
     assert "job directory" in result["errors"][0]["error"]
+
+
+# --- maintainer queue (<bundle>/.okf/maint, written by service/maint_state.py) ------------------
+
+MAINTAINER = "process:ai-wiki-maintainer"
+
+
+def maint_item(topic: str, priority: int) -> dict:
+    return {"origin": {"kind": "repo"}, "topic_key": topic, "priority": priority,
+            "files": [{"name": "S1-README.md", "content_b64": base64.b64encode(topic.encode()).decode()}]}
+
+
+def maint_keys(result: dict) -> set[str]:
+    return {k for k in keys(result) if k.startswith("maint_")}
+
+
+def test_maint_queue_is_quiet_before_phase_2(tmp_path: Path) -> None:
+    bundle = make_bundle(tmp_path, iso(datetime.now(UTC)), [])  # production today: no .okf/maint at all
+    code, result = run("--bundle", str(bundle))
+    assert (code, result["alerts"], result["errors"]) == (0, [], [])
+    facts = result["checks"]["maint:solvely-wiki"]
+    assert (facts["items"], facts["cursors"], facts["leases"]) == (
+        {}, {"repos": None, "issues": None}, {"maintainer": None, "auditor": None})
+
+    # Items without any cursor (say import-ledger before the first collect) and a torn item.
+    M.enqueue(bundle, [maint_item("repo:x#a", 40)], principal=MAINTAINER)
+    (bundle / ".okf" / "maint" / "items" / "it_000000000000").mkdir()
+    (bundle / ".okf" / "maint" / "items" / "it_000000000000" / "item.json").write_text("{")
+    code, result = run("--bundle", str(bundle))
+    assert (code, result["alerts"], result["errors"]) == (0, [], [])
+    facts = result["checks"]["maint:solvely-wiki"]
+    assert (facts["items"], facts["corrupt_items"]) == ({"ready": 1}, ["it_000000000000"])
+
+
+def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) -> None:
+    t0 = datetime(2026, 10, 16, 20, 0, tzinfo=UTC)
+    clock = [t0]
+    monkeypatch.setattr(M, "_now", lambda: clock[0])
+    monkeypatch.setattr(M, "build", lambda: "build-1")
+    bundle = make_bundle(tmp_path, iso(t0), [])
+    a, b = (row["id"] for row in M.enqueue(bundle, [maint_item("repo:x#a", 100), maint_item("repo:x#b", 40)],
+                                           principal=MAINTAINER)["items"])
+    repos = {"https://git.invalid/x.git": {"branch": "main", "sha": "0" * 40, "stale_since": None, "error": None}}
+    cursor = M.put_cursor(bundle, "repos", repos, if_match=None, if_none_match="*", principal=MAINTAINER, run="WAIO-1")
+    M.acquire_lease(bundle, "maintainer", principal=MAINTAINER, run="WAIO-1")
+    assert M.next_item(bundle, principal=MAINTAINER, run="WAIO-1")["item"]["id"] == a
+    M.resolve(bundle, a, {"outcome": "parked", "class": "input", "reason": "binary evidence"},
+              principal=MAINTAINER, run="WAIO-1")  # not retryable: needs_human at once
+    clock[0] = t0 + timedelta(hours=2)
+    M.renew(bundle, principal=MAINTAINER, run="WAIO-1")  # live until +5h, held since +0h
+
+    def at(hours: float) -> dict:
+        _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=hours)))
+        assert result["errors"] == []
+        return result
+
+    human = f"maint_needs_human:solvely-wiki:{a}"
+    expired = "maint_lease_stuck:solvely-wiki:maintainer:WAIO-1:expired"
+    cursor_stale = "maint_cursor_stale:solvely-wiki:repos"  # never issues: that cursor does not exist
+    assert maint_keys(at(2.5)) == {human}
+    assert maint_keys(at(4)) == {human, "maint_lease_stuck:solvely-wiki:maintainer:WAIO-1:held"}
+    assert maint_keys(at(7)) == {human}  # the lease lapsed at +5h, only 2h ago
+    assert maint_keys(at(9)) == {human, expired}
+    assert maint_keys(at(31)) == {human, expired, cursor_stale}
+    stale = at(73)
+    assert maint_keys(stale) == {human, expired, cursor_stale, "maint_ready_stale:solvely-wiki"}
+    facts = stale["checks"]["maint:solvely-wiki"]
+    assert facts["needs_human"] == [{"id": a, "topic_key": "repo:x#a", "since": iso(t0),
+                                     "reason": "not_retryable/input"}]
+    assert (facts["oldest_ready"], facts["ready_stale"]) == ({"id": b, "since": iso(t0), "age_hours": 73.0}, 1)
+
+    card = load_script().render_card("alert", "aliyun-jp-writer", stale, {})
+    text = "\n".join(e["content"] for e in card["body"]["elements"] if e["tag"] == "markdown")
+    assert "**🧭 Maintainer 队列**" in text and "POST /admin/items/<id>/retry" in text
+    assert "lease 于 10-17 09:00 过期" in text  # +5h in Beijing time
+
+    # The next run takes over the lapsed lease, collects and closes b; the owner reopens a.
+    clock[0] = t0 + timedelta(hours=80)
+    M.acquire_lease(bundle, "maintainer", principal=MAINTAINER, run="WAIO-2")
+    M.put_cursor(bundle, "repos", repos, if_match=cursor["etag"], if_none_match=None, principal=MAINTAINER,
+                 run="WAIO-2")
+    assert M.next_item(bundle, principal=MAINTAINER, run="WAIO-2")["item"]["id"] == b
+    M.resolve(bundle, b, {"outcome": "skipped", "reason": "no_durable_knowledge"}, principal=MAINTAINER, run="WAIO-2")
+    M.admin_retry(bundle, a, principal="human:owner", reason="evidence converted to text")
+    recovered = at(81)
+    assert maint_keys(recovered) == set()  # a waits in ready since its reopen, not since t0
+    assert recovered["checks"]["maint:solvely-wiki"]["oldest_ready"]["age_hours"] == 1.0
 
 
 # --- Feishu notification and deduplication ----------------------------------------------------
