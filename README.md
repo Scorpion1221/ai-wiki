@@ -244,7 +244,8 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_BUNDLES` | dir holding one bundle per subdirectory; each writable bundle owns its Git repo |
 | `AIWIKI_BUNDLE` | a single bundle dir; it must be the Git repo root when writes are enabled |
 | `AIWIKI_DEFAULT_BUNDLE` | bundle used when a request omits `?bundle=` (optional) |
-| `AIWIKI_TOKEN` | bearer token clients must present |
+| `AIWIKI_TOKEN` | legacy shared bearer token with every scope; with `AIWIKI_PRINCIPALS` it is honoured only through the principal holding its sha256 (`provision_principals.py add-legacy`) |
+| `AIWIKI_PRINCIPALS` | principals file: per-principal token sha256, scopes, bundles, limits (`src/aiwiki/service/auth.py`); edit it with `scripts/provision_principals.py`, SIGHUP reloads it |
 | `AIWIKI_PORT` | service port (default 8787) |
 | `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`) |
 | `AIWIKI_CURATE` | `auto` (default) or `off` to disable the curation trigger |
