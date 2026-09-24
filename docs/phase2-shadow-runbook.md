@@ -17,16 +17,125 @@ What changes, in order:
 | 7 | Cloudflare ingress: writer routes for the gate | `/whoami` now answered by the writer; `/ingest`, `/jobs` as before |
 | 8 | Watchdog: second `--bundle` | one more check |
 | 9 | Shadow audit timer (12:00 CST, oldest 5) | Codex time, 5 audits a day at most |
+| 10a | Principal `process:ai-wiki-maintainer`; its token in the production maintainer's Multica env | the production maintainer authenticates as itself, with the scopes its legacy flow uses |
+| 11 | Shadow agent, skills and autopilot in Multica (W13) | none: production's agent, prompt and skills are not touched |
 
 §10 verifies the whole path, including a production dry-run over a sample of concepts
-with the owner token and zero 5xx. §11 hands the shadow over to its Multica agent. §12
-rolls back any step or all of them.
+with the owner token and zero 5xx. §10a closes Phase 1 on the production maintainer. §11
+hands the shadow over to its Multica agent. §12 rolls back any step or all of them. §13 is
+the standing procedure for later principal edits and incident response.
 
 Requires: writer and mirror deployed from a build that contains the linked-bundle fix
 (`service/bundle.py:discover`), `scripts/dry_run_sample.py`,
 `scripts/provision_principals.py` and the mirror image's `safe.directory` for `/bundles/*`
 (`Dockerfile`: the container runs Git as root, and the shadow's read clone is admin's); §1 P1
 checks it.
+
+## Production plan: every Phase 2 prep unit, in order
+
+`claude/phase2-prep` merges four units: `w12-watchdog-maint` (the watchdog's maintainer-queue
+checks), `w12-principals` (`scripts/provision_principals.py`), `w12-shadow-runbook` (this
+runbook, the linked-bundle fix, `scripts/dry_run_sample.py`, the image's `safe.directory`) and
+`w13-curating-maintainer` (the curating skill, the shadow agent's prompts, `doctor`). Their
+operator steps are merged here into one order, each once. The sections below hold the paste
+blocks; a step that fails its verification is rolled back alone, and §12 removes everything.
+
+Where: **laptop** is the owner's machine with the merged checkout and `multica` logged in;
+**host** is aliyun-jp as root in bash, with the §1 helpers defined; **runtime** is
+ip-10-2-192-225 as the user all seven agents on runtime `df0fb673` share. Work outside
+03:30–06:30 CST, with the owner online.
+
+1. **Merge** (laptop). Review and merge `claude/phase2-prep` into `main`; the owner pushes.
+   `MERGE_SHA=$(git rev-parse origin/main)`.
+   Verify: `shasum -a 256 scripts/maintenance_watchdog.py` prints
+   `7a9a8c72e26fc613099e15bddd2d2d5d121b7e913754788f0877f77e1578071d`.
+   Rollback: `git revert -m 1 <merge sha>`; production has not changed yet.
+2. **Deploy procedure** (laptop). Save `deploy_aliyun.sh` as `deploy_aliyun.sh.pre-phase2`,
+   then apply §6 "Deploys from now on": the idle guard also globs the shadow's
+   `.okf/jobs/*.json`, and the mirror's `docker run` carries the live container's mounts, read
+   before it is stopped. Both are no-ops before step 12 and after §12.
+   Verify: `grep -c 'solvely-wiki-shadow/.okf/jobs' deploy_aliyun.sh` prints 1 and the mirror
+   run passes `"${mounts[@]}"`.
+   Rollback: restore `deploy_aliyun.sh.pre-phase2`, but never deploy with it while step 12's
+   mirror runs (it crash-loops the mirror).
+3. **Deploy writer and mirror** (laptop to host). `deploy_aliyun.sh <checkout> $MERGE_SHA`; it
+   refuses while a writer job is active and rebuilds the mirror image, which now trusts
+   `/bundles/*`. Production behaviour is unchanged: single-bundle mode never reaches the
+   linked-bundle code, and the rest is scripts or client-side (`doctor`).
+   Verify: `DEPLOYED <MERGE_SHA>`; on the host
+   `docker exec ai-wiki git config --system --get-all safe.directory` prints `/bundles/*`.
+   Rollback: `deploy_aliyun.sh <checkout> 63041f7`, the build it replaced.
+4. **Watchdog script** (laptop to host; the unit and its flags stay as they are):
+
+   ```bash
+   scp scripts/maintenance_watchdog.py aliyun-jp:/tmp/ai-wiki-watchdog.new
+   ssh aliyun-jp 'sha256sum /tmp/ai-wiki-watchdog.new'                              # 7a9a8c72…, as step 1
+   ssh aliyun-jp 'cp -p /usr/local/bin/ai-wiki-watchdog /usr/local/bin/ai-wiki-watchdog.bak-4a48c57'
+   ssh aliyun-jp 'cd /tmp && sudo -u admin env -u AIWIKI_WATCHDOG_FEISHU_WEBHOOK -u AIWIKI_WATCHDOG_FEISHU_SECRET \
+     HOME=/home/admin /home/admin/app/.venv/bin/python /tmp/ai-wiki-watchdog.new \
+     --bundle /home/admin/solvely-wiki --label aliyun-jp-writer; echo exit=$?'           # dry run: sends and saves nothing
+   ssh aliyun-jp 'install -m 0755 -o root -g root /tmp/ai-wiki-watchdog.new /usr/local/bin/ai-wiki-watchdog \
+     && rm /tmp/ai-wiki-watchdog.new'
+   ssh aliyun-jp 'systemctl start ai-wiki-watchdog.service; systemctl is-failed ai-wiki-watchdog.service; \
+     cat /var/lib/ai-wiki-watchdog/writer.json'
+   ```
+
+   Verify: the dry run prints `exit=0`, and `checks."maint:solvely-wiki"` shows items `{}`,
+   corrupt_items `[]`, cursors `{repos: null, issues: null}` and leases
+   `{maintainer: null, auditor: null}`; any `maint_*` alert before Phase 3a is unexpected, so
+   stop. The real run ends `inactive`, status ok, fingerprint null, and posts no card.
+   Rollback: `ssh aliyun-jp 'install -m 0755 -o root -g root /usr/local/bin/ai-wiki-watchdog.bak-4a48c57
+   /usr/local/bin/ai-wiki-watchdog && systemctl start ai-wiki-watchdog.service'`. With `maint_*`
+   alerts active, one card then goes out for the change.
+5. **Runtime CLI** (runtime). Pin the shared CLI to the merge; every agent on `df0fb673` uses
+   it, production's maintainer included:
+
+   ```bash
+   ai-wiki --version; find "$(uv tool dir)/ai-wiki" -path '*ai_wiki-*.dist-info/direct_url.json' -exec cat {} \;
+   #   note its commit_id as PREV_CLI
+   uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@$MERGE_SHA" && hash -r
+   ai-wiki --version; ai-wiki maint begin --help | grep -e --config -e --max-items   # 0.3.0; both flags
+   ```
+
+   Against 63041f7 only `doctor` changed. If `PREV_CLI` is older, this is also the production
+   maintainer's CLI upgrade: its next scheduled run must complete as usual before step 16.
+   Rollback: `uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@$PREV_CLI" && hash -r`.
+6. **Pre-flight** (host): §1, including its backups into `$P2`. Rollback: none, it only reads.
+7. **Principals file** (host): §2. Legacy, owner, shadow maintainer and shadow audit; the
+   legacy token is restricted to `solvely-wiki`; nothing loads the file yet. The owner copies
+   the owner token into the password manager. Rollback: §2.
+8. **Shadow origin** (host): §3. Rollback: §3.
+9. **Writer clone and link** (host): §4. Rollback: §4, after step 11's.
+10. **Writer principals** (host): §5a, one restart when idle. Rollback: §5a (step 16's first,
+    if it ran).
+11. **Writer shadow mode** (host): §5b, one restart when idle. Rollback: §5b.
+12. **Read mirror** (host): §6, including its reload check. This is also W13's mirror
+    prerequisite (the shadow served with the principals file, default bundle `solvely-wiki`).
+    Rollback: §6's rollback block (step 16's first, if it ran).
+13. **Tunnel** (laptop): §7, the writer routes the gate and `doctor` need. Rollback: §7.
+14. **Shadow audit timer** (host): §9. Rollback: §9.
+15. **Verification** (laptop and host): §10, then `docker rm` the previous mirror. Rollback:
+    none of its own; a failed check rolls back the step it names.
+16. **Phase 1 exit** (host, laptop, runtime): §10a mints the production maintainer's token,
+    reloads both services, puts the token in the production agent's Multica env and runs
+    `doctor --role curator` there. Gate: production's next scheduled run completes as usual.
+    Rollback: §10a.
+17. **Shadow token and skills on the laptop**: §11.1 (the shadow token into the password
+    manager), §11.2. Rollback: §11.2.
+18. **Skills in Multica**: §11.3. Rollback: §11.3.
+19. **Shadow preflight** (runtime): §11.4. Rollback: none, it only reads.
+20. **Shadow agent** (laptop): §11.5. Rollback: `multica agent archive $SHADOW_AGENT_ID`.
+21. **Shadow cursors** (runtime): §11.6, `maint import-v4` from production's latest v4
+    checkpoint. Rollback: §11.6.
+22. **Tokens off the host** (host): §11.7. Rollback: none; a lost token is re-minted (§13).
+23. **Watchdog on the shadow** (host), the day of the first run: §8. Rollback: §8.
+24. **Autopilot** (laptop): §11.9. Rollback: `multica autopilot delete $AP_ID`.
+25. **First run** (laptop, runtime), owner online: §11.10, then its per-run checks for the rest
+    of Phase 2. Rollback: §12, the design's Phase 2 rollback.
+
+Not part of this rollout: after a Phase 3a rollback, archive production's `.okf/maint`
+(`docs/maintenance-watchdog.md`, "Maintainer queue across the migration"); later principal
+edits, rotation and incident response are §13.
 
 ## 0. Layout: why production is linked, not moved
 
@@ -305,7 +414,8 @@ journalctl -u ai-wiki-worker --since -10min --no-pager | grep -iE 'traceback|err
 
 Rollback: `rm /etc/systemd/system/ai-wiki-worker.service.d/phase1-principals.conf &&
 systemctl daemon-reload && systemctl restart ai-wiki-worker` (idle first). The legacy token
-then authenticates alone again; the aiw_ tokens stop working.
+then authenticates alone again; the aiw_ tokens stop working, so roll §10a back first if it
+ran, or the production maintainer gets 401.
 
 ### 5b. Multi-bundle mode with the shadow
 
@@ -431,6 +541,17 @@ ls -A $READCLONE | grep -c '^.okf$'                                             
 A null `git_revision` means the image lacks the `/bundles/*` `safe.directory` (P1): Git in the
 container runs as root and refuses the admin-owned clone.
 
+Both services now start with the file, so SIGHUP reloads it (§13 and design §8.5 depend on
+this; a service started without it would exit). Prove it once:
+
+```bash
+docker exec ai-wiki uv run --no-dev python -m aiwiki.service.auth /etc/ai-wiki/principals.json   # ok: 4 principals, as the mirror sees it
+kill -HUP "$(pgrep -P "$(systemctl show -p MainPID --value ai-wiki-worker)" -f aiwiki.service)"
+docker kill -s HUP ai-wiki
+curl -s -H @$P2/owner.h http://127.0.0.1:8788/whoami | jq -c '.auth | {loaded_at, reload_error}'   # a newer loaded_at, null
+docker logs --since 2m ai-wiki 2>&1 | grep -c 'principals reloaded'                                  # 1
+```
+
 Keep `ai-wiki-prev-$TS` until §10 passes, then `docker rm ai-wiki-prev-$(cat $P2/mirror-TS)`.
 
 **Deploys from now on.** The mirror's environment now names `AIWIKI_PRINCIPALS`, and the
@@ -463,7 +584,8 @@ jobs now. Until §12 has run, every deploy must:
 Rollback: recreate the mirror from the build it runs now, with the production mount only and
 no principals. This works whether or not `ai-wiki-prev-*` still exists (§10 removes it) and
 whatever a deploy has changed since §6; the shadow's pull timer and read clone go only once
-the single-mount mirror answers.
+the single-mount mirror answers. Without principals the mirror answers aiw_ tokens 401, so
+roll §10a back first if it ran: the production maintainer reads through the mirror.
 
 ```bash
 RTS=$(date -u +%Y%m%dT%H%M%SZ)
@@ -569,15 +691,21 @@ curl -fsS -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: appl
 Do this on the day the shadow agent's first run is scheduled: the shadow's newest commit
 is R0 until then, and the commit-age check alerts after 48h.
 
+The drop-in repeats the unit's live command line with one more `--bundle`, so every other flag
+(interpreter, state file, label, thresholds) stays exactly as installed:
+
 ```bash
 mkdir -p /etc/systemd/system/ai-wiki-watchdog.service.d
-cat > /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf <<'EOF'
-[Service]
-ExecStart=
-ExecStart=/home/admin/app/.venv/bin/python /usr/local/bin/ai-wiki-watchdog --bundle /home/admin/solvely-wiki --bundle /var/lib/ai-wiki/bundles/solvely-wiki-shadow --state-file /var/lib/ai-wiki-watchdog/writer.json --label aliyun-jp-writer
-EOF
-systemctl daemon-reload
-systemctl show ai-wiki-watchdog -p ExecStart --value | grep -o -- '--bundle [^ ]*'
+live=$(systemctl show ai-wiki-watchdog -p ExecStart --value | sed -n 's/.*argv\[\]=\([^;]*[^; ]\) *;.*/\1/p')
+echo "$live"    # e.g. /home/admin/app/.venv/bin/python /usr/local/bin/ai-wiki-watchdog --bundle /home/admin/solvely-wiki ...
+case "$live" in
+  *solvely-wiki-shadow*) echo 'STOP: the watchdog already watches the shadow' ;;
+  *'--bundle /home/admin/solvely-wiki'*)
+    printf '[Service]\nExecStart=\nExecStart=%s --bundle /var/lib/ai-wiki/bundles/solvely-wiki-shadow\n' "$live" \
+      > /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf && systemctl daemon-reload ;;
+  *) echo 'STOP: the live ExecStart does not watch /home/admin/solvely-wiki; nothing was written' ;;
+esac
+systemctl show ai-wiki-watchdog -p ExecStart --value | grep -o -- '--bundle [^ ]*'   # production, then the shadow
 ```
 
 Verify with a replay at the current instant, which never notifies:
@@ -631,6 +759,8 @@ After=ai-wiki-worker.service
 Type=oneshot
 User=admin
 Environment=HOME=/home/admin
+# the deployed build's CLI first: systemd's PATH has no ~/.local/bin, and it matches the writer
+Environment=PATH=/home/admin/app/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=AIWIKI_CONFIG=/var/lib/ai-wiki/shadow-audit/config.json
 EnvironmentFile=/etc/ai-wiki-shadow-audit.env
 ExecStart=/usr/local/sbin/ai-wiki-shadow-audit
@@ -649,6 +779,7 @@ systemctl daemon-reload && systemctl enable --now ai-wiki-shadow-audit.timer
 Verify:
 
 ```bash
+test -x /home/admin/app/.venv/bin/ai-wiki && echo cli-present    # the CLI the unit runs
 systemctl list-timers ai-wiki-shadow-audit.timer --no-pager      # next 12:00 CST
 systemctl start ai-wiki-shadow-audit.service; systemctl is-failed ai-wiki-shadow-audit.service   # "inactive"
 journalctl -u ai-wiki-shadow-audit -n 20 --no-pager              # nothing to audit yet, or one line per request
@@ -751,23 +882,194 @@ scheduled production run completes as usual.
 
 When V1–V5 pass: `docker rm ai-wiki-prev-$(cat $P2/mirror-TS)`.
 
+## 10a. Phase 1 exit: the production maintainer's own token
+
+Design §9 closes Phase 1 with the production maintainer on its own `aiw_c_` token and
+`doctor --role curator` passing on its real runtime. Its legacy flow needs `read`, `submit`
+(ingest) and `curate` (`POST /jobs/{id}/audit` accepts it), exactly the curator role. The
+principal may touch both bundles (§8.2); the agent names only `solvely-wiki`, where
+`AIWIKI_CHANGESETS_COMMIT` does not commit. Change nothing else on the production agent the
+same day, and run this after §10 has passed.
+
+On aliyun-jp, mint the principal and reload both services, the first reload of a changed file:
+
+```bash
+( umask 077; set -o noclobber; pp add maintainer > $P2/maintainer.token )   # process:ai-wiki-maintainer, aiw_c_
+( umask 077; printf 'Authorization: Bearer %s\n' "$(cat $P2/maintainer.token)" > $P2/maintainer.h )
+AIWIKI_TOKEN="$(legacy_token)" pp check      # ok: 5 principals, ... process:ai-wiki-maintainer; held by member:legacy-token
+kill -HUP "$(pgrep -P "$(systemctl show -p MainPID --value ai-wiki-worker)" -f aiwiki.service)"
+docker kill -s HUP ai-wiki
+```
+
+Verify:
+
+```bash
+curl -s -H @$P2/owner.h http://127.0.0.1:8788/whoami | jq -c '.auth'           # five ids, a newer loaded_at, reload_error null
+curl -s -H @$P2/maintainer.h http://127.0.0.1:8788/whoami | jq -c '{principal, role, bundles}'
+#   {"principal":"process:ai-wiki-maintainer","role":"curator","bundles":["solvely-wiki","solvely-wiki-shadow"]}
+curl -s -o /dev/null -w '%{http_code}\n' -H @$P2/maintainer.h http://127.0.0.1:8787/health   # 200: the mirror reloaded too
+```
+
+On the laptop, put the token into the production agent's custom env. `env set` replaces the
+whole map, and `****` keeps an existing entry; the token passes through the environment, never
+argv:
+
+```bash
+PROD_AGENT=1dcccd34-e9e4-48c7-a0a3-32c061d4c284          # AI Wiki Maintainer, runtime df0fb673
+read -rs MAINT_TOKEN && export MAINT_TOKEN               # ssh aliyun-jp cat /root/ai-wiki-phase2/maintainer.token
+multica agent env get $PROD_AGENT | jq -c 'map_values("****") + {AIWIKI_TOKEN: $ENV.MAINT_TOKEN}' \
+  | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null
+multica agent env get $PROD_AGENT | jq -c keys           # the previous keys and AIWIKI_TOKEN
+```
+
+On the runtime host, as the runtime user (plan step 5 put the merge's CLI there), the Phase 1
+exit check. Leave out `--skills-dir`: the production agent keeps its legacy skills until
+Phase 3a, and `--skills-dir` checks the curating pair.
+
+```bash
+read -rs AIWIKI_TOKEN && export AIWIKI_TOKEN             # the same maintainer token
+ai-wiki -b solvely-wiki doctor --role curator --json | jq -c '{ok, failed: [.checks[] | select(.ok | not)]}'
+#   {"ok":true,"failed":[]}
+unset AIWIKI_TOKEN
+```
+
+Then `unset MAINT_TOKEN` on the laptop and `shred -u $P2/maintainer.token $P2/maintainer.h` on
+aliyun-jp. Gate: the next scheduled production run completes as usual (issue done, no 401 or
+403 in its log) before §11.
+
+Rollback, in this order (the agent first, or its next run gets 401):
+
+```bash
+multica agent env get $PROD_AGENT | jq -c 'del(.AIWIKI_TOKEN) | map_values("****")' \
+  | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null     # laptop: the CLI falls back to its saved legacy token
+pp remove process:ai-wiki-maintainer                                    # aliyun-jp, then the two HUP lines above
+```
+
 ## 11. Hand-over to the shadow agent
 
-The shadow agent itself (prompt, skills, schedule 05:30 and 13:30 CST) is W13's. What this
-deployment hands it:
+The shadow agent, its prompt and skills are W13's (`skills/ai-wiki-curating-maintainer`,
+`docs/prompts/shadow-agent-instructions.md`, `docs/prompts/shadow-autopilot-prompt.md`).
+Production's agent, prompt and skills are never touched. Its prerequisites are in place after
+§2–§7 (the shadow principal, the writer hosting the shadow, the mirror serving it with the
+principals file, the writer routes) and plan step 5 (the runtime CLI). Keep the ids as you go:
+`NEW_SKILL_ID`, `SHADOW_AGENT_ID`, `AP_ID`; laptop files go to `~/ai-wiki-phase2`.
 
-1. Tokens leave the host. The owner token is already in the password manager (§2); the owner
-   copies `$P2/shadow-maintainer.token` into the "AI Wiki Maintainer (shadow)" agent's
-   Multica custom env as `AIWIKI_TOKEN`. Then on aliyun-jp:
-   `shred -u $P2/*.token $P2/owner.h $P2/shadow-maintainer.h $P2/shadow-audit.h`
-   (`legacy.h` stays for the rollback checks; the legacy token is in the unit file anyway).
-2. On the runtime host (ip-10-2-192-225), with that token:
-   `ai-wiki -b solvely-wiki-shadow doctor --role curator` passes every check.
-3. The shadow's cursors start from production's latest v4 checkpoint, so both process the
-   same window: `ai-wiki -b solvely-wiki-shadow maint import-v4 <checkpoint.json>` (design §9).
-4. Record R0 (`cat $P2/R0`): `ai-wiki admin compare --live solvely-wiki --shadow
-   solvely-wiki-shadow --since <R0>` compares from it.
-5. Enable §8 on the day of the first shadow run.
+11.1. Tokens. The owner token is in the password manager (§2). The owner copies the shadow
+token there too (`ssh aliyun-jp cat /root/ai-wiki-phase2/shadow-maintainer.token`); the steps
+below paste it with `read -rs`.
+
+11.2. Skills on the laptop, from the merged checkout. Only the two the shadow uses: production
+runs `ai-wiki-maintainer` and `ai-wiki`.
+
+```bash
+python3 scripts/sync_skills.py --apply ai-wiki-curating-maintainer okf-knowledge-curator
+python3 scripts/sync_skills.py --check ai-wiki-curating-maintainer okf-knowledge-curator     # both OK
+```
+
+Rollback: `rm -rf ~/.agents/skills/ai-wiki-curating-maintainer`, and apply
+`okf-knowledge-curator` again from a checkout at 63041f7.
+
+11.3. Skills in Multica. The live `okf-knowledge-curator` copy differs from the repository,
+and no agent attaches it today, so snapshot it first:
+
+```bash
+OKF_SKILL=356d20e4-07cc-4f15-91b7-6d081dc43625
+multica skill get $OKF_SKILL --with-content --output json > ~/ai-wiki-phase2/okf-prev.json
+multica skill create --name ai-wiki-curating-maintainer --description "<description from its SKILL.md frontmatter>" \
+  --content-file ~/.agents/skills/ai-wiki-curating-maintainer/SKILL.md                       # NEW_SKILL_ID
+multica skill update $OKF_SKILL --content-file ~/.agents/skills/okf-knowledge-curator/SKILL.md
+```
+
+Rollback:
+
+```bash
+multica skill delete $NEW_SKILL_ID
+python3 -c 'import json,os;d=json.load(open(os.path.expanduser("~/ai-wiki-phase2/okf-prev.json")))
+open(os.path.expanduser("~/ai-wiki-phase2/okf-prev.md"),"w").write(d["content"]);print(d["description"])'
+multica skill update $OKF_SKILL --content-file ~/ai-wiki-phase2/okf-prev.md --description "<printed description>"
+```
+
+11.4. Shadow preflight on the runtime host, as the runtime user:
+
+```bash
+read -rs AIWIKI_TOKEN && export AIWIKI_TOKEN                                  # the shadow token
+ai-wiki -b solvely-wiki-shadow health --json | jq -c '{bundle, okf_version}'   # solvely-wiki-shadow, "0.2"
+ai-wiki -b solvely-wiki-shadow doctor --role curator --json; echo "exit $?"   # exit 0
+unset AIWIKI_TOKEN
+```
+
+The whoami, api, scopes (exactly read, submit, curate), actor, writer and okf_version rows
+must be ok. An okf_version 404 saying the read mirror must serve the bundle means §6 is
+missing; a `writer` failure means §7 is.
+
+11.5. The agent, on the laptop:
+
+```bash
+awk 'f;/^---$/{f=1}' docs/prompts/shadow-agent-instructions.md > ~/ai-wiki-phase2/shadow-instructions.md
+read -rs SHADOW_TOKEN
+printf '{"AIWIKI_TOKEN":"%s"}' "$SHADOW_TOKEN" | multica agent create --name "AI Wiki Maintainer (shadow)" \
+  --runtime-id df0fb673-5552-4c64-9b9a-3bb95937ca83 --model claude-opus-5-5-combos --max-concurrent-tasks 1 \
+  --visibility workspace --instructions "$(cat ~/ai-wiki-phase2/shadow-instructions.md)" --custom-env-stdin   # SHADOW_AGENT_ID
+unset SHADOW_TOKEN
+multica agent skills add $SHADOW_AGENT_ID --skill-ids $NEW_SKILL_ID,$OKF_SKILL   # not ai-wiki (e49bcda9): legacy flow
+```
+
+Set `max_attempts=2` and a 3 h task timeout in the UI or runtime config, if exposed.
+Rollback: `multica agent archive $SHADOW_AGENT_ID`.
+
+11.6. The shadow's cursors start from production's latest v4 checkpoint, so both process the
+same window (design §9). On the runtime host, with `SKILL_DIR` the legacy
+`ai-wiki-maintainer` skill's directory:
+
+```bash
+python3 "$SKILL_DIR/scripts/checkpoint.py" find --autopilot 5c80732b-67a6-4e33-ba22-c620a94e27c1 \
+  --cache-dir /tmp/w13-find --output /tmp/w13-find.json
+read -rs AIWIKI_TOKEN && export AIWIKI_TOKEN                                  # the shadow token
+ai-wiki -b solvely-wiki-shadow maint import-v4 /tmp/w13-find.json
+unset AIWIKI_TOKEN
+```
+
+Record R0 next to it (`cat $P2/R0` on aliyun-jp): `ai-wiki admin compare --live solvely-wiki
+--shadow solvely-wiki-shadow --since <R0>` compares from it. Rollback: the cursors live only
+in the shadow's `.okf/maint` and go with the shadow (§12 R4). To seed again, once `maint
+status` shows no lease: `as_admin mv $SHADOW/.okf/maint $SHADOW/.okf/maint.unseeded-$(date +%F)`
+on aliyun-jp, then rerun this step.
+
+11.7. Tokens leave the host. On aliyun-jp:
+`shred -u $P2/*.token $P2/owner.h $P2/shadow-maintainer.h $P2/shadow-audit.h`. `legacy.h`
+stays for the rollback checks (the legacy token is in the unit file anyway); the shadow-audit
+token lives on only in `/etc/ai-wiki-shadow-audit.env` (§9).
+
+11.8. On the day of the first run, before 11.9: §8.
+
+11.9. The autopilot, on the laptop:
+
+```bash
+sed "s/<影子 agent id>/$SHADOW_AGENT_ID/" docs/prompts/shadow-autopilot-prompt.md > ~/ai-wiki-phase2/shadow-prompt.md
+grep -c '<影子' ~/ai-wiki-phase2/shadow-prompt.md                              # 0
+multica autopilot create --title "AI Wiki shadow sync" --agent $SHADOW_AGENT_ID --mode create_issue \
+  --issue-title-template "[AUTO] AI Wiki shadow sync {{date}}" \
+  --description "$(cat ~/ai-wiki-phase2/shadow-prompt.md)"                    # AP_ID
+multica autopilot trigger-add $AP_ID --kind schedule --cron "30 5,13 * * *" --timezone Asia/Shanghai \
+  --label "Shadow 05:30/13:30 Asia/Shanghai"
+```
+
+The prompt's maint config sets `audits.resubmit: false`: §9's timer, not the agent, requests
+the shadow's Codex audits. Rollback: `multica autopilot delete $AP_ID`.
+
+11.10. First run, with the owner online: `multica autopilot trigger $AP_ID`. Expect the issue
+to carry `ai_wiki_shadow_run=true` before `doctor` runs; `doctor` passes; `begin` exits 0 or 5;
+each item ends curated, skipped or parked; the `maint end` report is posted and the issue is
+done (`--no-start`). Then:
+
+- `ai-wiki -b solvely-wiki-shadow maint status --json` on the runtime host, with the shadow token;
+- production's HEAD, agent, prompt and skills are unchanged;
+- the watchdog's next hourly run shows `writer:solvely-wiki-shadow` and `maint:solvely-wiki-shadow`
+  with both cursors, and no alert.
+
+For the rest of Phase 2, after each scheduled run check `multica autopilot runs $AP_ID`, and
+before production's next run tag any shadow issue left untagged (a run that never started):
+`multica issue metadata set <issue> --key ai_wiki_shadow_run --value true`.
 
 ## 12. Rollback
 
@@ -777,20 +1079,41 @@ removes what was added, in reverse order.
 
 | Step | Rollback | Needs |
 |---|---|---|
+| §11 shadow agent (W13) | `multica autopilot delete $AP_ID`, `multica agent archive $SHADOW_AGENT_ID`, `multica skill delete $NEW_SKILL_ID`, the okf skill from its snapshot (§11.3), the laptop skills (§11.2); cursors go with R4 | laptop |
+| §10a production maintainer token | remove `AIWIKI_TOKEN` from the production agent's env, then `pp remove process:ai-wiki-maintainer` + SIGHUP | laptop first |
 | §9 audit timer | disable the timer, remove its units, script, env file, config; `pp remove process:ai-wiki-shadow-audit` + SIGHUP | — |
 | §8 watchdog | remove `ai-wiki-watchdog.service.d/phase2-shadow.conf`, daemon-reload | — |
 | §7 tunnel | PUT `tunnel-before.json`'s config back | laptop, CF token |
-| §6 mirror | §6's rollback block: the live build again, production mount only, no principals; then shadow pull timer off, read clone removed | — |
+| §6 mirror | §6's rollback block: the live build again, production mount only, no principals; then shadow pull timer off, read clone removed | §10a rolled back |
 | §5b shadow mode | remove `phase2-shadow.conf`, daemon-reload, restart | idle |
-| §5a principals | remove `phase1-principals.conf`, daemon-reload, restart | idle |
+| §5a principals | remove `phase1-principals.conf`, daemon-reload, restart | idle, §10a rolled back |
 | §4 clone + link | `rm $ROOT/solvely-wiki; rm -rf $SHADOW` | §5b rolled back (`/whoami` check) |
 | §3 origin | `rm -rf $ORIGIN` | §4, §6 rolled back |
 | §2 principals | remove the file, `/etc/ai-wiki` back to root:root 0700 | §5a, §6 rolled back |
+| plan step 5 runtime CLI | `uv tool install --force` at `PREV_CLI` | runtime host |
+| plan step 4 watchdog script | install `ai-wiki-watchdog.bak-4a48c57` back | — |
+| plan steps 1–3 code and deploy | none needed: single-bundle mode never reaches the new code; otherwise redeploy 63041f7 | idle |
 
 Full rollback (the design's Phase 2 rollback: remove the shadow; production was never
-touched). Stop the shadow agent in Multica first, then on the laptop run §7's rollback. Then
-on aliyun-jp, four blocks in order; each one that prints `STOP` changed nothing that a rerun
-cannot finish, and the next block waits until it has not.
+touched). First, on the laptop, R0 in Multica, then §7's rollback. Then on aliyun-jp, four
+blocks in order; each one that prints `STOP` changed nothing that a rerun cannot finish, and
+the next block waits until it has not. The merged code, the deploy procedure's changes and
+the watchdog script stay: each is a no-op without the shadow.
+
+R0. Multica (laptop). Stop the shadow, and put the production maintainer back on the legacy
+token before R2 and R3 take the principals away from the mirror and the writer:
+
+```bash
+multica autopilot delete $AP_ID
+multica agent archive $SHADOW_AGENT_ID
+multica skill delete $NEW_SKILL_ID
+PROD_AGENT=1dcccd34-e9e4-48c7-a0a3-32c061d4c284
+multica agent env get $PROD_AGENT | jq -c 'del(.AIWIKI_TOKEN) | map_values("****")' \
+  | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null      # only if §10a ran
+```
+
+Then restore the okf skill from its snapshot and the laptop skills (§11.3 and §11.2
+rollbacks). The runtime CLI can stay at the merge; plan step 5 has its rollback.
 
 R1. The shadow's audit timer and the watchdog's second bundle:
 
@@ -825,7 +1148,7 @@ curl -s -H @$P2/legacy.h http://127.0.0.1:8788/health | jq -c '{bundle, concepts
 `member:legacy-token` is the legacy token's id with and without a principals file, so the
 principal alone cannot show the restart. `bundles` `null`, `commit` `[]` and the one
 principal can: the old process still answers `["solvely-wiki"]`, `["solvely-wiki-shadow"]`
-and four principals.
+and four principals (five after §10a).
 
 R4. Remove the shadow's state, only once neither service still uses it: a writer still in
 multi-bundle mode would find no bundles and answer 503 on every production route, and a
@@ -848,6 +1171,43 @@ fi
 
 The linked-bundle fix itself needs no rollback: in single-bundle mode it is never reached.
 
+## 13. Later principal edits, rotation and incident response
+
+In a new root shell on aliyun-jp, define the §1 helpers and these two, and leave
+`AIWIKI_TOKEN` unset (`pp` refuses an aiw_ token there):
+
+```bash
+mirror_token() { docker inspect ai-wiki --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^AIWIKI_TOKEN=//p'; }
+pcheck() { AIWIKI_TOKEN="$(legacy_token)" pp check && AIWIKI_TOKEN="$(mirror_token)" pp check; }
+```
+
+1. Edit: `pp remove <id>...`; rotate a token with `pp remove <id>` and then `pp add <preset>`
+   into a fresh file under `umask 077; set -o noclobber`, as in §2.
+2. `pcheck` must pass for both services' tokens. A bare `pp check` does not test the
+   legacy-token startup invariant.
+3. Reload both services with the two HUP lines of §10a, and confirm `.auth` in the owner's
+   `/whoami` on 127.0.0.1:8788: the new principal list and `reload_error` null.
+4. Incident response (design §8.5): the same, removing the affected principal first; then
+   `ai-wiki admin changesets --principal P --since T` and `ai-wiki admin revert`.
+
+Dropping `member:legacy-token` (the shared token leaked): `pp remove` warns but does not
+refuse, and `pcheck` fails until neither service is given `AIWIKI_TOKEN`. Before either
+restarts:
+
+- writer: `cp -a /etc/systemd/system/ai-wiki-worker.service /root/ai-wiki-worker.service.pre-legacy &&
+  sed -i '/^Environment=AIWIKI_TOKEN=/d' /etc/systemd/system/ai-wiki-worker.service && systemctl daemon-reload`
+  (no restart: the HUP already applied the file);
+- mirror: recreate it as in §6, with an env file without `AIWIKI_TOKEN` and the live mounts;
+- `pcheck` then prints `legacy token not given` twice and exits 0. Members still on the shared
+  token get 401 from then on, as intended. `legacy.h` and the §12 R3/R4 gates assume the legacy
+  token; use the owner's header for those checks instead.
+
+Rollback: restore `/root/ai-wiki-worker.service.pre-legacy` and daemon-reload, recreate the
+mirror with the previous env file, and add the legacy principal back only if its token was not
+compromised. A rotated legacy value (`pp remove member:legacy-token`, then `add-legacy`) must
+replace `AIWIKI_TOKEN` in the unit and the mirror's env before either restarts, and gets §2's
+`solvely-wiki` restriction again.
+
 ## Open risks
 
 - **One writer process for both bundles.** A shadow the startup recovery cannot reconcile
@@ -861,3 +1221,11 @@ The linked-bundle fix itself needs no rollback: in single-bundle mode it is neve
 - **Codex time.** Shadow audits run at most five a day, at 12:00; production's audits keep
   their own queue order.
 - The shadow's read clone lags its origin by up to five minutes, as production's does.
+- **The production maintainer on principals.** After §10a its token exists only in the
+  principals file, so any rollback that takes the file away from the writer (§5a) or the
+  mirror (§6, R2, R3) must first remove `AIWIKI_TOKEN` from its Multica env, or its runs get
+  401. §12 R0 does this.
+- **One CLI for seven agents.** Plan step 5 pins the runtime's shared CLI to the merge; a
+  later reinstall there changes every agent on `df0fb673`, production's maintainer included.
+- **The deploy procedure lives outside this repository** (`deploy_aliyun.sh`). Plan step 2
+  must be applied before the first deploy after §6.
