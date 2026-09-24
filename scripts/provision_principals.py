@@ -11,7 +11,9 @@ old for auth.py) and -B, so no root-owned bytecode lands in admin's tree:
 Commands:
   add PRESET    generate a token for a canonical role (below), store only its sha256 and print
                 the token once: it is the only thing written to stdout, so capture it straight
-                into the secret store. --id (same kind: process:, human: or member:), --bundle,
+                into the secret store, under `set -o noclobber` so a rerun cannot empty a token
+                file it then fails to refill. A token lost before it was stored: remove its id,
+                then add it again. --id (same kind: process:, human: or member:), --bundle,
                 --limit NAME=N and --expires adjust it.
   add-legacy    register the legacy shared token, read from $AIWIKI_TOKEN (--token-env), as
                 member:legacy-token with every scope, as it authenticates without a file; the
@@ -21,6 +23,15 @@ Commands:
                 the service sees neither edit until it reloads.
   check         validate the file through the service's own startup path, including the
                 legacy-token invariant when $AIWIKI_TOKEN is set. Exit 0 ok, 1 refused.
+
+$AIWIKI_TOKEN (--token-env) here is the legacy token the services are started with, never a
+principal's own aiw_ token (the CLI's $AIWIKI_TOKEN): that is refused. Check with each
+service's own, since a bare `check` cannot see what they are given:
+
+    AIWIKI_TOKEN="$(systemctl show -p Environment --value ai-wiki-worker | tr ' ' '\\n' \\
+        | sed -n 's/^AIWIKI_TOKEN=//p')" provision_principals.py check
+    AIWIKI_TOKEN="$(docker inspect ai-wiki --format '{{range .Config.Env}}{{println .}}{{end}}' \\
+        | sed -n 's/^AIWIKI_TOKEN=//p')" provision_principals.py check
 
 Presets (the id is also the actor stamped into generated.by / verified[].by; a member never is):
   owner              human:guobaoqi                     aiw_h_  every scope, every bundle
@@ -32,12 +43,18 @@ Presets (the id is also the actor stamped into generated.by / verified[].by; a m
   watchdog           process:ai-wiki-watchdog           aiw_r_  read
   member             member:<name> (--id required)      aiw_m_  read, submit
 
-Every edit is validated with auth.parse before it is written, so whatever the service would
-refuse at startup (a process holding curate and audit, admin or human_verify; a duplicate id
-or digest; an unknown limit) is refused here and the file is left as it was. The file is
-replaced atomically (the mirror mounts the directory, never the file) with mode 0640, keeping
-its owner and group; a new file takes its directory's group, so keep /etc/ai-wiki at
-root:<writer user> 0750.
+Every edit is validated with auth.parse before it is written, so whatever the file itself
+makes the service refuse at startup (a process holding curate and audit, admin or
+human_verify; a duplicate id or digest; an unknown limit) is refused here and the file is
+left as it was. The one startup rule that depends on the services' environment is only
+warned about: while they are started with AIWIKI_TOKEN, a principal must hold its sha256.
+`add` and `remove` warn when an edit leaves the legacy token without one (§8.5 must be able
+to drop it); then drop AIWIKI_TOKEN from ai-wiki-worker's unit and the ai-wiki container
+before either restarts, or neither starts again.
+
+The file is replaced atomically (the mirror mounts the directory, never the file) with mode
+0640, keeping its owner and group; a new file takes its directory's group, so keep
+/etc/ai-wiki at root:<writer user> 0750.
 
 After an edit, `check` it, then reload each service and confirm in an admin's GET /whoami
 ("auth"): a refused reload only logs. SIGHUP reloads only a service started with
@@ -92,7 +109,7 @@ def _read(path: Path, *, create: bool = False) -> dict:
 
 
 def _write(path: Path, data: dict) -> None:
-    auth.parse(data)  # anything the service would refuse at startup is refused before a byte is written
+    auth.parse(data)  # whatever the file makes the service refuse at startup is refused before a byte is written
     old = path.stat() if path.exists() else None
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -174,9 +191,30 @@ def check(path: Path, token: str | None) -> str:
     principals = auth.Registry.from_env(env).principals
     line = f"ok: {len(principals)} principals: {', '.join(p.id for p in principals)}"
     if not token:
-        return line + "\nlegacy token not given: the AIWIKI_TOKEN startup invariant was not checked"
+        return line + ("\nlegacy token not given: the AIWIKI_TOKEN startup invariant was not checked; "
+                       "check again with each service's own (see --help)")
     holder = next(p.id for p in principals if p.token_sha256 == auth.token_sha256(token))
     return line + f"\nlegacy token: held by {holder}"
+
+
+def legacy_token(value: str | None, name: str = "AIWIKI_TOKEN") -> str | None:
+    """The legacy token the services are started with, as read from $name; never a principal's own."""
+    if value and value.startswith("aiw_"):
+        raise auth.PrincipalsError(f"${name} holds a principal's own aiw_ token (the CLI's), not the legacy token the "
+                                   "services are started with: unset it, or set it to the services' (see --help)")
+    return value or None
+
+
+def unheld_warning(path: Path, token: str | None, removed: tuple[str, ...] = ()) -> str | None:
+    """Why the services, still started with the legacy token, would refuse the edited file at their next start."""
+    if token:
+        if any(p.token_sha256 == auth.token_sha256(token) for p in auth.load(path)):
+            return None
+    elif auth.LEGACY_ID not in removed:
+        return None
+    return (f"warning: no principal in {path} holds the legacy token any more, so ai-wiki-worker (AIWIKI_TOKEN in its "
+            "unit) and the ai-wiki container, which are still started with it, will refuse to start on this file. "
+            "Drop AIWIKI_TOKEN from both before either restarts (recreate the container without it), or add-legacy.")
 
 
 def _limit(value: str) -> tuple[str, int]:
@@ -191,8 +229,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--file", type=Path, default=Path(os.environ.get("AIWIKI_PRINCIPALS") or DEFAULT_FILE),
                         help=f"principals file (default: $AIWIKI_PRINCIPALS or {DEFAULT_FILE})")
+    legacy = argparse.ArgumentParser(add_help=False)
+    legacy.add_argument("--token-env", default="AIWIKI_TOKEN", metavar="VAR",
+                        help="variable holding the legacy token the services are started with (default: AIWIKI_TOKEN)")
     commands = parser.add_subparsers(dest="command", required=True)
-    p_add = commands.add_parser("add", help="add a principal from a preset; print its token once")
+    p_add = commands.add_parser("add", parents=[legacy], help="add a principal from a preset; print its token once")
     p_add.add_argument("preset", choices=PRESETS)
     p_add.add_argument("--id", dest="pid", help="principal id instead of the preset's (required for member)")
     p_add.add_argument("--bundle", action="append", dest="bundles", help="bundle it may touch, instead of "
@@ -200,27 +241,29 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--limit", action="append", type=_limit, default=[], metavar="NAME=N",
                        help="override one of the preset's limits (repeatable)")
     p_add.add_argument("--expires", metavar="YYYY-MM-DD")
-    p_legacy = commands.add_parser("add-legacy", help="register the legacy shared token as member:legacy-token")
-    p_legacy.add_argument("--token-env", default="AIWIKI_TOKEN", help="variable holding it (default: AIWIKI_TOKEN)")
+    p_legacy = commands.add_parser("add-legacy", parents=[legacy],
+                                   help="register the legacy shared token as member:legacy-token")
     p_legacy.add_argument("--expires", metavar="YYYY-MM-DD")
     commands.add_parser("list", help="show the principals without digests")
-    p_remove = commands.add_parser("remove", help="drop principals")
+    p_remove = commands.add_parser("remove", parents=[legacy], help="drop principals")
     p_remove.add_argument("ids", nargs="+", metavar="ID")
-    p_check = commands.add_parser("check", help="validate the file as the service loads it at startup")
-    p_check.add_argument("--token-env", default="AIWIKI_TOKEN",
-                         help="variable holding the legacy token the service is still given (default: AIWIKI_TOKEN)")
+    commands.add_parser("check", parents=[legacy], help="validate the file as the service loads it at startup")
     args = parser.parse_args(argv)
 
     path = args.file.expanduser()
+    warning = None
     try:
+        # Read before any edit, so a principal's own token in $AIWIKI_TOKEN refuses the command, not half of it.
+        token = legacy_token(os.environ.get(args.token_env), args.token_env) if args.command != "list" else None
         if args.command == "add":
-            token = add(path, args.preset, pid=args.pid, bundles=args.bundles, limits=dict(args.limit),
-                        expires=args.expires)
-            print(token)
+            new = add(path, args.preset, pid=args.pid, bundles=args.bundles, limits=dict(args.limit),
+                      expires=args.expires)
+            print(new)
             print(f"added {args.pid or PRESETS[args.preset]['id']} to {path}; the token above is shown once and "
                   "stored only as its sha256. Check the file, then reload (see --help).", file=sys.stderr)
+            warning = unheld_warning(path, token)
         elif args.command == "add-legacy":
-            add_legacy(path, os.environ.get(args.token_env), expires=args.expires)
+            add_legacy(path, token, expires=args.expires)
             print(f"added {auth.LEGACY_ID} (sha256 of ${args.token_env}, every scope) to {path}", file=sys.stderr)
         elif args.command == "list":
             print(json.dumps(listing(path), indent=2))
@@ -228,13 +271,15 @@ def main(argv: list[str] | None = None) -> int:
             remove(path, *args.ids)
             print(f"removed {', '.join(args.ids)} from {path}; each authenticates until the services reload "
                   "(see --help)", file=sys.stderr)
+            warning = unheld_warning(path, token, tuple(args.ids))
         else:
-            print(check(path, os.environ.get(args.token_env)))
+            print(check(path, token))
     except (auth.PrincipalsError, OSError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
+    if warning:
+        print(warning, file=sys.stderr)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

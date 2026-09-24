@@ -129,6 +129,54 @@ def test_remove_can_repair_a_file_the_service_would_refuse(tmp_path: Path) -> No
         prov.remove(path, "process:hand-edited")
 
 
+def test_edits_that_strand_the_legacy_token_warn(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The services keep AIWIKI_TOKEN in their own environment, so the file alone cannot show that
+    dropping its principal makes their next start fail: add and remove warn, and check (given the
+    services' token) refuses."""
+    path = tmp_path / "principals.json"
+
+    def cli(*argv: str) -> tuple[int, str]:
+        code = prov.main(["--file", str(path), *argv])
+        return code, capsys.readouterr().err
+
+    monkeypatch.setenv("AIWIKI_TOKEN", LEGACY)
+    code, err = cli("add", "owner")  # a new file without the legacy principal
+    assert code == 0 and "warning: no principal" in err and "add-legacy" in err
+    code, err = cli("add-legacy")
+    assert code == 0 and "warning" not in err
+    code, err = cli("add", "maintainer")
+    assert code == 0 and "warning" not in err
+    code, err = cli("remove", "process:ai-wiki-maintainer")
+    assert code == 0 and "warning" not in err
+
+    # §8.5 must be able to drop it, so remove succeeds, but says what the services still need.
+    code, err = cli("remove", auth.LEGACY_ID)
+    assert code == 0 and "Drop AIWIKI_TOKEN from both before either restarts" in err
+    code, err = cli("check")  # as the runbook runs it, with the unit's and the container's token
+    assert code == 1 and err.startswith("refused: AIWIKI_TOKEN is set, but no principal")
+
+    # Without the token in the shell (the 02:00 incident), the legacy id alone still warns.
+    monkeypatch.delenv("AIWIKI_TOKEN")
+    prov.add_legacy(path, LEGACY)
+    code, err = cli("remove", auth.LEGACY_ID)
+    assert code == 0 and "warning: no principal" in err
+
+
+def test_a_principals_own_token_is_not_the_legacy_token(tmp_path: Path, monkeypatch, capsys) -> None:
+    """$AIWIKI_TOKEN is also the CLI's own token (design §8.2): an aiw_ one there must not pass for
+    the legacy token the services are started with."""
+    path = tmp_path / "principals.json"
+    prov.add_legacy(path, LEGACY)
+    owner = prov.add(path, "owner")
+    prov.remove(path, auth.LEGACY_ID)
+    before = path.read_bytes()
+    monkeypatch.setenv("AIWIKI_TOKEN", owner)  # as the owner's shell holds it for admin commands
+    for argv in (["check"], ["add-legacy"], ["remove", "human:guobaoqi"], ["add", "watchdog"]):
+        assert prov.main(["--file", str(path), *argv]) == 1, argv
+        assert capsys.readouterr().err.startswith("refused: $AIWIKI_TOKEN holds a principal's own aiw_ token")
+    assert path.read_bytes() == before  # refused before any edit
+
+
 def test_writes_are_atomic_0640_and_keep_owner_and_group(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "principals.json"
     prov.add(path, "owner")
