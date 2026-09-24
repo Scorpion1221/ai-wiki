@@ -23,8 +23,10 @@ with the owner token and zero 5xx. §11 hands the shadow over to its Multica age
 rolls back any step or all of them.
 
 Requires: writer and mirror deployed from a build that contains the linked-bundle fix
-(`service/bundle.py:discover`), `scripts/dry_run_sample.py` and
-`scripts/provision_principals.py`; §1 P1 checks it.
+(`service/bundle.py:discover`), `scripts/dry_run_sample.py`,
+`scripts/provision_principals.py` and the mirror image's `safe.directory` for `/bundles/*`
+(`Dockerfile`: the container runs Git as root, and the shadow's read clone is admin's); §1 P1
+checks it.
 
 ## 0. Layout: why production is linked, not moved
 
@@ -113,6 +115,7 @@ grep -q 'target.name == p.name' /home/admin/app/src/aiwiki/service/bundle.py && 
 ls /home/admin/app/scripts/provision_principals.py /home/admin/app/scripts/dry_run_sample.py
 cat /home/admin/app/.ai-wiki-deployed-revision                     # BUILD
 docker inspect ai-wiki --format '{{.Config.Image}}'                # ai-wiki:0.3.x-<BUILD short>
+docker exec ai-wiki git config --system --get-all safe.directory   # /bundles/*
 
 # P2. The writer is in the state this runbook starts from.
 systemctl show ai-wiki-worker -p DropInPaths --value              # codex-runtime.conf okf-v02.conf zz-agent-config.conf
@@ -171,7 +174,7 @@ straight into a root-only file.
 ```bash
 chgrp admin /etc/ai-wiki && chmod 0750 /etc/ai-wiki      # the writer (admin) reads the file
 AIWIKI_TOKEN="$(legacy_token)" pp add-legacy              # eb17 keeps working, as member:legacy-token
-( umask 077
+( umask 077; set -o noclobber                            # a rerun never empties a captured token
   pp add owner             > $P2/owner.token              # human:guobaoqi, aiw_h_, every scope
   pp add shadow-maintainer > $P2/shadow-maintainer.token  # process:ai-wiki-maintainer-shadow, aiw_c_, shadow only
   pp add auditor --id process:ai-wiki-shadow-audit --bundle solvely-wiki-shadow \
@@ -187,6 +190,10 @@ mv /etc/ai-wiki/.principals.json.new /etc/ai-wiki/principals.json
     printf 'Authorization: Bearer %s\n' "$(cat $P2/$name.token)" > $P2/$name.h
   done )
 ```
+
+On a rerun, `noclobber` refuses each redirect whose token file exists, so that `add` never
+runs. An empty token file means its `add` failed after the shell created the file: remove the
+id if `pp list` shows it, delete the empty file, and rerun.
 
 Verify:
 
@@ -207,15 +214,25 @@ Rollback: `rm /etc/ai-wiki/principals.json; chgrp root /etc/ai-wiki; chmod 0700 
 
 ## 3. Shadow bare origin
 
-R0 is production's HEAD now; the shadow is never reset to another baseline.
+R0 is production's published HEAD now; the shadow is never reset to another baseline. §1's
+P3 and P7 ran a while ago, so the seeding checks again that no production job can move HEAD
+and that HEAD is what GitHub serves: a local commit a curation has not pushed yet may still
+be rebased or reset, and a baseline production never publishes breaks `admin compare --since`.
 
 ```bash
 install -d -o admin -g admin -m 0750 $BASE $ROOT $BASE/mirror
-R0=$(as_admin git -C $PROD rev-parse HEAD); echo "$R0" > $P2/R0
-as_admin git clone -q --bare --no-local $PROD $ORIGIN           # packed copy; shares no files with production
-as_admin git -C $ORIGIN remote remove origin                    # never fetch from production again
-as_admin git -C $ORIGIN config receive.denyNonFastForwards true # like a protected main
-as_admin git -C $ORIGIN config receive.denyDeletes true
+R0=$(as_admin git -C $PROD rev-parse HEAD)
+if [ "$(active_jobs $PROD)" = 0 ] && [ -z "$(as_admin git -C $PROD status --porcelain)" ] \
+   && [ "$R0" = "$(as_admin git -C $PROD ls-remote origin refs/heads/main | cut -f1)" ]; then
+  echo "$R0" > $P2/R0
+  as_admin git clone -q --bare --no-local $PROD $ORIGIN           # packed copy; shares no files with production
+  as_admin git -C $ORIGIN update-ref refs/heads/main "$R0"        # R0, even if production committed meanwhile
+  as_admin git -C $ORIGIN remote remove origin                    # never fetch from production again
+  as_admin git -C $ORIGIN config receive.denyNonFastForwards true # like a protected main
+  as_admin git -C $ORIGIN config receive.denyDeletes true
+else
+  echo 'STOP: production has a job or an unpublished HEAD; nothing was seeded, rerun when idle'
+fi
 ```
 
 Verify:
@@ -252,8 +269,10 @@ as_admin git -C $PROD status --porcelain | wc -l               # 0: production u
 The shadow's commits carry the writer's identity from `/home/admin/.gitconfig`
 (`ai-wiki-worker`), as production's do.
 
-Rollback: `rm $ROOT/solvely-wiki && rm -rf $SHADOW` (after §5b is rolled back). `rm` of the
-link removes the link only; never `rm -rf $ROOT/solvely-wiki/`.
+Rollback: `rm $ROOT/solvely-wiki && rm -rf $SHADOW`, only after §5b is rolled back (its
+`/whoami` check): a writer still in multi-bundle mode finds no bundles without the root and
+answers 503 on every production route. `rm` of the link removes the link only; never
+`rm -rf $ROOT/solvely-wiki/`.
 
 ## 5. Writer drop-ins
 
@@ -331,7 +350,9 @@ journalctl -u ai-wiki-worker --since -10min --no-pager | grep -iE 'traceback|err
 
 Rollback: `rm /etc/systemd/system/ai-wiki-worker.service.d/phase2-shadow.conf &&
 systemctl daemon-reload && systemctl restart ai-wiki-worker` (with `active_jobs $PROD $SHADOW`
-at 0). The writer is back on `AIWIKI_BUNDLE=/home/admin/solvely-wiki`. Production lost
+at 0). The writer is back on `AIWIKI_BUNDLE=/home/admin/solvely-wiki` once the legacy
+`/whoami` shows `.modes.changesets_commit` `[]`; a restart skipped while busy still shows
+`["solvely-wiki-shadow"]`. Production lost
 nothing: its jobs were written to its own `.okf/jobs` all along. Shadow state stays on disk
 until §4 is rolled back.
 
@@ -376,6 +397,8 @@ ENVFILE=/root/ai-wiki/.mirror-env-$TS
 docker inspect ai-wiki --format '{{range .Config.Env}}{{println .}}{{end}}' \
   | grep '^AIWIKI_' | grep -v '^AIWIKI_BUILD_COMMIT=' > $ENVFILE
 echo 'AIWIKI_PRINCIPALS=/etc/ai-wiki/principals.json' >> $ENVFILE
+# With two bundles mounted, a read that names none (eb17's) needs the default.
+grep -q '^AIWIKI_DEFAULT_BUNDLE=solvely-wiki$' $ENVFILE || echo 'AIWIKI_DEFAULT_BUNDLE=solvely-wiki' >> $ENVFILE
 chmod 600 $ENVFILE; grep -o '^AIWIKI_[A-Z_]*' $ENVFILE
 #   AIWIKI_BUNDLES AIWIKI_DEFAULT_BUNDLE AIWIKI_HOST AIWIKI_PORT AIWIKI_DISABLE AIWIKI_CURATE AIWIKI_TOKEN AIWIKI_PRINCIPALS
 docker stop ai-wiki >/dev/null && docker rename ai-wiki ai-wiki-prev-$TS
@@ -399,29 +422,78 @@ Verify:
 curl -s -H @$P2/legacy.h http://127.0.0.1:8787/health | jq -c '{bundle, concepts, build}'    # production, as before
 curl -s -H @$P2/legacy.h http://127.0.0.1:8787/bundles | jq -c .                               # solvely-wiki only
 curl -s -H @$P2/owner.h  http://127.0.0.1:8787/bundles | jq -c .                               # both, default solvely-wiki
-curl -s -H @$P2/shadow-maintainer.h 'http://127.0.0.1:8787/health?bundle=solvely-wiki-shadow' | jq -c '{bundle, okf_version}'
+curl -s -H @$P2/shadow-maintainer.h 'http://127.0.0.1:8787/health?bundle=solvely-wiki-shadow' \
+  | jq -c '{bundle, okf_version, git_revision}'   # git_revision: $(as_admin git -C $ORIGIN rev-parse main), never null
 curl -s -H @$P2/owner.h  http://127.0.0.1:8787/whoami | jq -c '{writer, principal}'           # writer false: the mirror
 ls -A $READCLONE | grep -c '^.okf$'                                                            # 0: no writer state in the read clone
 ```
 
+A null `git_revision` means the image lacks the `/bundles/*` `safe.directory` (P1): Git in the
+container runs as root and refuses the admin-owned clone.
+
 Keep `ai-wiki-prev-$TS` until §10 passes, then `docker rm ai-wiki-prev-$(cat $P2/mirror-TS)`.
 
-**Deploys from now on** must recreate the mirror with the same three `-v` mounts; a
-`docker run` with only the production mount silently drops the shadow and the principals
-(the env file is carried over by `docker inspect`, the mounts are not).
+**Deploys from now on.** The mirror's environment now names `AIWIKI_PRINCIPALS`, and the
+deploy procedure carries the environment over from `docker inspect` but not the mounts. A
+`docker run` with only the production mount therefore cannot read
+`/etc/ai-wiki/principals.json`: the service refuses to import (`PrincipalsError`), and the
+container crash-loops, which takes all public reads down. The writer also serves the shadow's
+jobs now. Until §12 has run, every deploy must:
 
-Rollback:
+1. count the shadow's jobs in its writer idle guard, next to production's:
+
+   ```python
+   paths = glob.glob("/home/admin/solvely-wiki/.okf/jobs/*.json") \
+       + glob.glob("/var/lib/ai-wiki/bundles/solvely-wiki-shadow/.okf/jobs/*.json")
+   ```
+
+2. recreate the mirror with the live container's mounts, read before the old container is
+   stopped and renamed:
+
+   ```bash
+   mounts=(); while read -r m; do [ -n "$m" ] && mounts+=("$m"); done \
+     < <(docker inspect ai-wiki --format '{{range .Mounts}}--volume={{.Source}}:{{.Destination}}:ro{{println}}{{end}}')
+   docker run -d --name ai-wiki --restart unless-stopped -p 127.0.0.1:8787:8787 "${mounts[@]}" \
+     --env-file "$ENVFILE" "$IMAGE"
+   ```
+
+   Afterwards `docker inspect ai-wiki --format '{{json .Mounts}}'` lists the three mounts.
+   Both changes do nothing before §6 and after §12, so the deploy procedure can keep them.
+
+Rollback: recreate the mirror from the build it runs now, with the production mount only and
+no principals. This works whether or not `ai-wiki-prev-*` still exists (§10 removes it) and
+whatever a deploy has changed since §6; the shadow's pull timer and read clone go only once
+the single-mount mirror answers.
 
 ```bash
-TS=$(cat $P2/mirror-TS)
-docker rm -f ai-wiki && docker rename ai-wiki-prev-$TS ai-wiki && docker start ai-wiki   # while it exists
-# after it was removed: rerun the old command with the old env file
-#   docker run -d --name ai-wiki --restart unless-stopped -p 127.0.0.1:8787:8787 \
-#     -v /root/ai-wiki-bundles:/bundles/solvely-wiki:ro --env-file <previous .mirror-env-*> "$(cat $P2/mirror-image)"
-systemctl disable --now ai-wiki-shadow-pull.timer
-rm /etc/systemd/system/ai-wiki-shadow-pull.{service,timer} && systemctl daemon-reload
-rm -rf $READCLONE
+RTS=$(date -u +%Y%m%dT%H%M%SZ)
+IMAGE=$(docker inspect ai-wiki --format '{{.Config.Image}}')
+ENVFILE=/root/ai-wiki/.mirror-env-$RTS
+docker inspect ai-wiki --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^AIWIKI_' \
+  | grep -v -e '^AIWIKI_BUILD_COMMIT=' -e '^AIWIKI_PRINCIPALS=' > $ENVFILE; chmod 600 $ENVFILE
+if [ -n "$IMAGE" ] && grep -q '^AIWIKI_TOKEN=.' $ENVFILE; then
+  docker stop ai-wiki >/dev/null && docker rename ai-wiki ai-wiki-shadow-$RTS
+  docker run -d --name ai-wiki --restart unless-stopped -p 127.0.0.1:8787:8787 \
+    -v /root/ai-wiki-bundles:/bundles/solvely-wiki:ro --env-file $ENVFILE "$IMAGE"
+  for i in $(seq 60); do curl -fsS -o /dev/null -H @$P2/legacy.h http://127.0.0.1:8787/health && break; sleep 2; done
+  if curl -fsS -o /dev/null -H @$P2/legacy.h http://127.0.0.1:8787/health; then
+    docker rm ai-wiki-shadow-$RTS >/dev/null; docker rm ai-wiki-prev-$(cat $P2/mirror-TS) 2>/dev/null
+    systemctl disable --now ai-wiki-shadow-pull.timer
+    rm -f /etc/systemd/system/ai-wiki-shadow-pull.{service,timer} && systemctl daemon-reload
+    rm -rf $READCLONE
+    echo mirror-rolled-back
+  else
+    docker rm -f ai-wiki; docker rename ai-wiki-shadow-$RTS ai-wiki; docker start ai-wiki
+    echo 'STOP: the single-mount mirror did not answer; the three-mount mirror is back'
+  fi
+else
+  echo 'STOP: cannot read the live mirror image or its legacy token; nothing was changed'
+fi
 ```
+
+Verify: `mirror-rolled-back` printed, `docker inspect ai-wiki --format '{{json .Mounts}}'`
+shows the production mount only, and the legacy `/health` on 8787 answers `solvely-wiki` with
+production's concept count.
 
 ## 7. Cloudflare ingress
 
@@ -438,8 +510,6 @@ API=https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/cfd_tunnel/$TUN
 mkdir -p ~/ai-wiki-phase2 && cd ~/ai-wiki-phase2
 curl -fsS -H "Authorization: Bearer $CF_API_TOKEN" "$API" | jq .result > tunnel-before.json
 jq -c '{version, config}' tunnel-before.json
-jq -e '.config.ingress | map(select(.service == "http://localhost:8788")) | length == 1 and .[0].path == "^/(ingest|jobs)"' \
-   tunnel-before.json                                  # true: exactly one writer rule, today's path
 jq '{config: (.config | .ingress |= map(if .service == "http://localhost:8788"
       then .path = "^/(ingest|jobs|whoami|workspace|changesets|maint|audit/backlog|admin)" else . end))}' \
    tunnel-before.json > tunnel-put.json
@@ -451,15 +521,24 @@ cat > tunnel-expected.json <<'EOF'
   {"service": "http_status:404"}],
   "warp-routing": {"enabled": false}}}
 EOF
-diff <(jq -S . tunnel-put.json) <(jq -S . tunnel-expected.json) && echo reviewed-body
-curl -fsS -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' \
-     --data @tunnel-put.json "$API" | jq -c '{success, version: .result.version}'
+# Sent only when there is exactly one writer rule on today's path and the derived body is the
+# reviewed one (an empty originRequest is the API's rule without origin settings; it is sent back as is).
+if jq -e '.config.ingress | map(select(.service == "http://localhost:8788")) | length == 1 and .[0].path == "^/(ingest|jobs)"' \
+      tunnel-before.json >/dev/null \
+   && diff <(jq -S 'del(.config.ingress[].originRequest | select(. == {}))' tunnel-put.json) <(jq -S . tunnel-expected.json); then
+  curl -fsS -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' \
+       --data @tunnel-put.json "$API" | jq -c '{success, version: .result.version}'
+else
+  echo 'STOP: the live ingress is not the reviewed one; nothing was sent'
+fi
 ```
 
 `tunnel-expected.json` is the body derived from the configuration read on 2026-09-25
-(version 2). If the diff shows anything else, the configuration changed since: review the
-difference before sending the derived body. Only the writer rule's `path` changes; both
-rules keep `hostname`, and the mirror still answers everything else, `/health` included.
+(version 2). Only the writer rule's `path` changes; both rules keep `hostname`, and the mirror
+still answers everything else, `/health` included. On `STOP`, the configuration changed since,
+or the API spells it differently (for example `"warp-routing": {}` for `{"enabled": false}`):
+compare `tunnel-put.json` with `tunnel-before.json`, and only once the sole change is the
+writer rule's `path`, send that body with the same `curl -X PUT` line.
 
 Verify on aliyun-jp (cloudflared picks up the new version within seconds) and from the laptop:
 
@@ -517,7 +596,12 @@ systemctl daemon-reload`.
 
 The shadow's Codex audits are not queued by its changesets (`AIWIKI_CODEX_AUDIT_MANUAL`).
 At 12:00 CST this requests the audit of the five oldest unaudited shadow changesets, with a
-token that may only read and audit the shadow.
+token that may only read and audit the shadow. A failed audit leaves its changeset pending
+and among the oldest, so a changeset whose audit already failed three times (`AUDIT_ATTEMPTS`
+of `ai-wiki maint`) is skipped rather than retried every day ahead of newer ones: it needs a
+human. The script lists those in its journal, and the watchdog's
+`writer:solvely-wiki-shadow` check (§8) alerts on each failed audit that no later attempt
+resolved, for a week.
 
 ```bash
 ( umask 077; printf 'AIWIKI_TOKEN=%s\n' "$(cat $P2/shadow-audit.token)" > /etc/ai-wiki-shadow-audit.env )
@@ -528,7 +612,10 @@ cat > /usr/local/sbin/ai-wiki-shadow-audit <<'EOF'
 #!/bin/bash
 # Phase 2 (design §9): Codex audits of the 5 oldest unaudited solvely-wiki-shadow changesets.
 set -uo pipefail
-ids=$(ai-wiki -b solvely-wiki-shadow jobs --pending-audit --older-than-hours 0 --json | jq -r '.jobs[:5][].id') || exit 1
+pending=$(ai-wiki -b solvely-wiki-shadow jobs --pending-audit --older-than-hours 0 --json) || exit 1
+stuck=$(jq -r '.jobs[] | select((.failed_audit_attempts | length) >= 3) | .id' <<<"$pending")
+[ -z "$stuck" ] || echo "needs a human, audit failed 3 times:" $stuck
+ids=$(jq -r '[.jobs[] | select((.failed_audit_attempts | length) < 3)][:5][].id' <<<"$pending")
 failed=0
 for id in $ids; do  # a refused request fails the unit but never holds back the others
   ai-wiki -b solvely-wiki-shadow audit "$id" --json | jq -c '{id, parent_job, status, deduplicated}' || failed=1
@@ -693,34 +780,70 @@ removes what was added, in reverse order.
 | §9 audit timer | disable the timer, remove its units, script, env file, config; `pp remove process:ai-wiki-shadow-audit` + SIGHUP | — |
 | §8 watchdog | remove `ai-wiki-watchdog.service.d/phase2-shadow.conf`, daemon-reload | — |
 | §7 tunnel | PUT `tunnel-before.json`'s config back | laptop, CF token |
-| §6 mirror | previous container back (or the old `docker run`), shadow pull timer off, read clone removed | — |
+| §6 mirror | §6's rollback block: the live build again, production mount only, no principals; then shadow pull timer off, read clone removed | — |
 | §5b shadow mode | remove `phase2-shadow.conf`, daemon-reload, restart | idle |
 | §5a principals | remove `phase1-principals.conf`, daemon-reload, restart | idle |
-| §4 clone + link | `rm $ROOT/solvely-wiki; rm -rf $SHADOW` | §5b rolled back |
+| §4 clone + link | `rm $ROOT/solvely-wiki; rm -rf $SHADOW` | §5b rolled back (`/whoami` check) |
 | §3 origin | `rm -rf $ORIGIN` | §4, §6 rolled back |
 | §2 principals | remove the file, `/etc/ai-wiki` back to root:root 0700 | §5a, §6 rolled back |
 
 Full rollback (the design's Phase 2 rollback: remove the shadow; production was never
-touched). Stop the shadow agent in Multica first, then on the laptop run §7's rollback, then
-on aliyun-jp:
+touched). Stop the shadow agent in Multica first, then on the laptop run §7's rollback. Then
+on aliyun-jp, four blocks in order; each one that prints `STOP` changed nothing that a rerun
+cannot finish, and the next block waits until it has not.
+
+R1. The shadow's audit timer and the watchdog's second bundle:
 
 ```bash
-systemctl disable --now ai-wiki-shadow-audit.timer ai-wiki-shadow-pull.timer
-rm -f /etc/systemd/system/ai-wiki-shadow-audit.{service,timer} /etc/systemd/system/ai-wiki-shadow-pull.{service,timer} \
-      /usr/local/sbin/ai-wiki-shadow-audit /etc/ai-wiki-shadow-audit.env \
-      /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf
-# mirror: the previous container if it still exists, else the single-mount command of §6's rollback
-TS=$(cat $P2/mirror-TS); docker rm -f ai-wiki && docker rename ai-wiki-prev-$TS ai-wiki && docker start ai-wiki
-rm /etc/systemd/system/ai-wiki-worker.service.d/phase2-shadow.conf \
-   /etc/systemd/system/ai-wiki-worker.service.d/phase1-principals.conf
+systemctl disable --now ai-wiki-shadow-audit.timer
+rm -f /etc/systemd/system/ai-wiki-shadow-audit.{service,timer} /usr/local/sbin/ai-wiki-shadow-audit \
+      /etc/ai-wiki-shadow-audit.env /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf
 systemctl daemon-reload
-[ "$(active_jobs $PROD $SHADOW)" = 0 ] && systemctl restart ai-wiki-worker || echo 'writer busy: rerun when idle'
-sleep 10; curl -s -H @$P2/legacy.h http://127.0.0.1:8788/whoami | jq -c '{principal, writer}'   # legacy-token, writer true
-curl -s -H @$P2/legacy.h http://127.0.0.1:8788/health | jq -c '{bundle, concepts, build}'
-# keep the shadow's history for later comparison, then remove it
-tar -C /var/lib -czf $P2/ai-wiki-shadow-$(date -u +%Y%m%dT%H%M%SZ).tgz ai-wiki
-rm $ROOT/solvely-wiki && rm -rf $BASE
-rm -f /etc/ai-wiki/principals.json && chgrp root /etc/ai-wiki && chmod 0700 /etc/ai-wiki
+```
+
+R2. The mirror: run §6's rollback block, until it prints `mirror-rolled-back`. It also stops
+the shadow's pull timer and removes its read clone.
+
+R3. The writer, back on the single bundle and the legacy token alone, when idle:
+
+```bash
+rm -f /etc/systemd/system/ai-wiki-worker.service.d/phase2-shadow.conf \
+      /etc/systemd/system/ai-wiki-worker.service.d/phase1-principals.conf
+systemctl daemon-reload
+if [ "$(active_jobs $PROD $SHADOW)" = 0 ]; then
+  systemctl restart ai-wiki-worker
+  for i in $(seq 60); do curl -fsS -o /dev/null -H @$P2/legacy.h http://127.0.0.1:8788/health && break; sleep 2; done
+else
+  echo 'STOP: the writer has a job; rerun R3 when idle'
+fi
+curl -s -H @$P2/legacy.h http://127.0.0.1:8788/whoami \
+  | jq -c '{principal, writer, bundles, commit: .modes.changesets_commit, principals: .auth.principals}'
+#   {"principal":"member:legacy-token","writer":true,"bundles":null,"commit":[],"principals":["member:legacy-token"]}
+curl -s -H @$P2/legacy.h http://127.0.0.1:8788/health | jq -c '{bundle, concepts, build}'   # production
+```
+
+`member:legacy-token` is the legacy token's id with and without a principals file, so the
+principal alone cannot show the restart. `bundles` `null`, `commit` `[]` and the one
+principal can: the old process still answers `["solvely-wiki"]`, `["solvely-wiki-shadow"]`
+and four principals.
+
+R4. Remove the shadow's state, only once neither service still uses it: a writer still in
+multi-bundle mode would find no bundles and answer 503 on every production route, and a
+mirror still started with `AIWIKI_PRINCIPALS` could not start again.
+
+```bash
+if curl -fsS -H @$P2/legacy.h http://127.0.0.1:8788/whoami | jq -e '.writer and .bundles == null
+       and .modes.changesets_commit == [] and .auth.principals == ["member:legacy-token"]' >/dev/null \
+   && ! docker inspect ai-wiki --format '{{range .Config.Env}}{{println .}}{{end}}{{range .Mounts}}{{println .Source}}{{end}}' \
+        | grep -q -e '^AIWIKI_PRINCIPALS=' -e '^/var/lib/ai-wiki' -e '^/etc/ai-wiki'; then
+  # keep the shadow's history for later comparison, then remove it
+  tar -C /var/lib -czf $P2/ai-wiki-shadow-$(date -u +%Y%m%dT%H%M%SZ).tgz ai-wiki \
+    && rm $ROOT/solvely-wiki && rm -rf $BASE \
+    && rm -f /etc/ai-wiki/principals.json && chgrp root /etc/ai-wiki && chmod 0700 /etc/ai-wiki \
+    && echo shadow-removed
+else
+  echo 'STOP: the writer or the mirror still runs the shadow configuration; finish R2 and R3 first'
+fi
 ```
 
 The linked-bundle fix itself needs no rollback: in single-bundle mode it is never reached.
@@ -731,8 +854,10 @@ The linked-bundle fix itself needs no rollback: in single-bundle mode it is neve
   keeps the writer from starting, production included. Its origin is local, so remote
   containment is always decidable; if it ever happens, §5b's rollback restores production
   in one restart.
-- **Mirror deploys** must keep the three mounts of §6; the current deploy procedure
-  recreates the container with only the production mount.
+- **Mirror deploys** must carry the live container's mounts and count the shadow's jobs (§6,
+  "Deploys from now on"). A deploy that recreates the mirror with only the production mount
+  crash-loops it on the missing principals file, a public read outage, and one that counts
+  only production's jobs can restart the writer in the middle of a shadow changeset or audit.
 - **Codex time.** Shadow audits run at most five a day, at 12:00; production's audits keep
   their own queue order.
 - The shadow's read clone lags its origin by up to five minutes, as production's does.
