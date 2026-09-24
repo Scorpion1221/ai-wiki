@@ -479,7 +479,8 @@ def maint_item_ok(item: dict | None, item_id: str) -> bool:
 
 def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[dict, list[dict]]:
     """The writer's maintainer queue in <bundle>/.okf/maint (service/maint_state.py), design §7 SLOs.
-    Before Phase 2 the directory is missing or holds no cursor: that is quiet, not an error."""
+    Until the bundle's cursors are seeded the directory is missing or holds no cursor: that is
+    quiet, not an error."""
     name, root = bundle.name, bundle / ".okf" / "maint"
     check = f"maint:{name}"
     try:
