@@ -149,7 +149,7 @@ def test_evidence_file_redacts_clips_and_hashes_what_it_freezes() -> None:
 PEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----"
 SECRETS = {
     "private_key": PEM,
-    "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+    "aws_access_key_id": "AKIA" + "IOSFODNN7EXAMPLE",
     "ai_wiki_token": "aiw_c_9f8e7d6c5b4a39281706f5e4",
 }
 

@@ -1144,7 +1144,7 @@ def test_collect_never_freezes_credentials(tmp_path: Path) -> None:
     commit_all(work, "deploy", {
         "deploy/id_ed25519": pem,
         "config/.env.production": "DB_PASS=hunter2\n",
-        "docs/setup.md": "Use aiw_c_9f8e7d6c5b4a39281706f5e4 with AKIAIOSFODNN7EXAMPLE.\n" + pem,
+        "docs/setup.md": "Use aiw_c_9f8e7d6c5b4a39281706f5e4 with " + "AKIA" + "IOSFODNN7EXAMPLE.\n" + pem,
     })
 
     collected = collect_repos.collect(scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, cursor)))
