@@ -198,7 +198,8 @@ replace the worker-specific ones above:
    `ai-wiki maint add-evidence`, never from your own text.
 2. Cite the item's one evidence packet as `{id: <evidence-id>, resource: evidence:packet}` with
    `[^<evidence-id>]` footnotes; the gate rewrites the resource to the final `/sources/`
-   snapshot. Every changed concept cites it (else `uncited_change`); keep existing `sources`.
+   snapshot. Every changed concept cites it (else `uncited_change`); keep existing `sources`,
+   and pick an `<evidence-id>` none of them uses (else `invalid_value`).
 3. Omit `status`, `generated` and `verified`: the gate stamps them (new concepts become
    `draft`) and overwrites any you write. Start new concepts with `ai-wiki concept new`.
 4. Never delete or rename a concept: retire it with `ai-wiki propose --deprecate

@@ -28,14 +28,13 @@ one host (production and its shadow) apart. `$WS` is the `workspace` path `maint
 ai-wiki -b "$bundle" doctor --role curator
 ```
 
-- Exit `0`: continue. Exit `4` lists the failed checks.
-- `api` failed (this CLI is older than the writer's `client.min`), or `doctor` is an unknown
-  command (exit `2`): run `uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r`
-  once, then rerun doctor.
-- Any other failed check (`config`, `whoami`, `scopes` must be exactly read, submit, curate;
-  `actor`; `writer`, i.e. a read mirror answered; `okf_version`; `state_dir`; `disk`;
-  `tool:git|uv|multica`): stop and report it (§5, blocked). Never swap tokens or edit
-  `~/.ai-wiki/config.json` to get past a check.
+- Exit `0`: continue. Exit `4` lists the failed checks (`config`; `whoami`; `api`, this CLI
+  is older than the writer's `client.min`; `scopes`, exactly read, submit, curate; `actor`;
+  `writer`, a read mirror answered `/whoami`; `okf_version`, from `/health`, which the read
+  mirror answers, so it must serve the bundle; `state_dir`; `disk`; `tool:git|uv|multica`). An
+  unknown `doctor` (exit `2`) is an `api` failure. Stop and report it (§5, blocked).
+- Never reinstall or upgrade the `ai-wiki` CLI (other agents on this host share it), swap
+  tokens or edit `~/.ai-wiki/config.json` to get past a check; the operator fixes the host.
 
 ## 2. Begin: deterministic collection
 
@@ -48,6 +47,7 @@ sweeps the last run's leftovers (its in-progress items return as `interrupted`, 
 become ready), resubmits failed Codex audits unless the config says `audits.resubmit: false`,
 pulls the workspace, runs the repos and issues collectors, freezes their evidence on the
 writer and only then moves the cursors. Cursors never wait for audits. You judge none of this.
+Run `begin` and `propose` with a 600 s tool timeout; a `begin` cut off is safe to rerun.
 
 - Exit `0`: go to §3. Exit `5`: a collector was partial or failed and kept what it could not
   collect; still run §3 (the report decides whether that blocks the issue).
@@ -79,13 +79,18 @@ Read the evidence in `evidence_dir` with `head`, `sed -n` or `rg`, never whole b
 knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a dated Reference.
 
 - None: `ai-wiki -b "$bundle" maint skip <item> --reason no_durable_knowledge`. Reasons are
-  `no_durable_knowledge`, `insufficient_evidence`, `out_of_scope` or `duplicate_of:<path>` (the
-  wiki already says exactly this); add `--note "<why>"` when it helps a reader.
-- Too large for one pass: `ai-wiki -b "$bundle" maint split <item> --group <file>,<file> --group <file>`.
+  `no_durable_knowledge`, `insufficient_evidence`, `out_of_scope` or `duplicate_of:<path>` (a
+  concept path of the bundle that already says exactly this); add `--note "<why>"` when it helps.
+- Too large for one pass (too much to read, or more than 20 concept files to change):
+  `ai-wiki -b "$bundle" maint split <item> --group <file>,<file> --group <file>`, 2 to 20 groups
+  placing every file of the item exactly once.
 - A file is missing: `ai-wiki -b "$bundle" maint add-evidence <item> <remote>@<commit>:<path>#L<x>-<y> --config "$cfg"`
   (a tracked repository; drop `#L…` for the whole file) or with `issue:<identifier>#<comment-id>`
   in place of the Git ref (a collectable issue). Evidence comes only from this deterministic
-  extraction, never from your own text.
+  extraction, never from your own text. It prints the new file's name.
+- A `rebaseline:<remote>` item holds only `baseline.md`, a new or re-based repository's summary:
+  freeze the files worth reading with `add-evidence` at its `commit`, then curate them here or
+  split with `baseline.md` in one group. Skip it only when nothing in the baseline is durable.
 
 **Evidence boundary.** Task logs are signals, not pages to mirror: prefer a task root's current
 README, status, PRD, report or diagnosis, durable docs, shared memory and solution docs.
@@ -98,11 +103,12 @@ evidence; never bulk-renew. On a genuine conflict keep both claims, mark both co
 ### 3.3 Curate in the workspace
 
 Follow okf-knowledge-curator in its remote maintainer mode. One item, one evidence id `<eid>`:
-1 to 80 of `A-Z a-z 0-9 _ -`, starting alphanumeric, naming the topic (e.g.
-`h5-checkout-recovery-status`).
+1 to 80 of `A-Z a-z 0-9 _ -`, starting alphanumeric, naming the topic and the date (topics
+recur: `h5-checkout-recovery-status-2026-10-17`), and unused by the `sources` of every concept
+you touch (else `invalid_value`).
 
-- Deduplicate first with `grep -ril --include='*.md' '<term>' "$WS"`; update an existing concept
-  rather than create a near-duplicate (`duplicate_title` refuses a second concept of one name).
+- Deduplicate first with `grep -ril --include='*.md' --exclude-dir=.ai-wiki '<term>' "$WS"`;
+  update an existing concept rather than create a near-duplicate (`duplicate_title`).
 - New concept: `ai-wiki -b "$bundle" concept new <dir>/<name>.md --dir "$WS" --type <Type> --title "<Title>" --description "<one sentence>" --tags <a>,<b> --source-id <eid>`,
   then write the body. Types come from `SCHEMA.md`.
 - Existing concept: append `{id: <eid>, resource: evidence:packet}` to its `sources`, keep every
@@ -115,7 +121,7 @@ Follow okf-knowledge-curator in its remote maintainer mode. One item, one eviden
 
 ```sh
 ai-wiki -b "$bundle" validate --dir "$WS" --item <item>
-ai-wiki -b "$bundle" propose --dir "$WS" --item <item> --json
+ai-wiki -b "$bundle" propose --dir "$WS" --item <item> --wait 480 --json
 ```
 
 Pass the same extra flags to both, and only when true:
@@ -127,16 +133,15 @@ Pass the same extra flags to both, and only when true:
 - `--deprecate <path>:<superseded_by>:<reason>`: retire a concept in favour of an existing or
   same-changeset successor (at most 3 per changeset). Never delete or rename a file.
 
-`propose` alone takes `--no-close`: pass it on every changeset but the last when an item needs
-several (at most 20 files each).
-
 | Result | Action | Cap |
 |---|---|---|
 | validate exit `6` | fix by each error's `code`, `path`, `line` and `hint`; validate again | 5 rounds, then park `model_output` |
 | propose exit `0` | committed; the item is closed and the workspace re-pulled. Keep one line (item, changeset id, files) and forget the rest; back to §3.1 | - |
-| propose exit `6` (422) | fix as above, validate, propose again | 2 re-proposals, then park `model_output` |
-| propose exit `7` (409) | `ai-wiki -b "$bundle" workspace pull --dir "$WS"` (exit `7` lists the `<path>.mine` copies); re-apply your intent from each to the new file; validate; propose | 2, then park `conflict` |
-| propose exit `8` | no final answer after retries: the CLI already parked it (`transient`) and reverted its edits | back to §3.1 |
+| propose exit `6` (400/413/422) | fix as above, validate, propose again | 2 re-proposals, then park `model_output` |
+| propose exit `7` (409), `conflict` or `unknown_base` | `ai-wiki -b "$bundle" workspace pull --dir "$WS"` (exit `7` lists the `<path>.mine` copies); re-apply your intent from each to the new file; validate; propose | 2, then park `conflict` |
+| exit `7`, `lease_required` or `work_item_closed` | rerun the §2 `begin` command, then §3.1: an item still yours comes back (exit `12`); `begin` resets the edits of one already committed or taken back | - |
+| propose exit `8` | the writer was busy past `--wait`: the CLI parked it `transient` (uncounted) and reverted its edits | back to §3.1 |
+| the tool call timed out | never rerun it: `maint park <item> --class timeout --detail "propose cut off"`; a park refused as not in progress means it committed: as the row above | back to §3.1 |
 | propose exit `11` (429) | park `capacity`, then §5; the rest waits in the queue | - |
 | propose exit `4` | the token lost its rights: go to §5 | - |
 
@@ -145,8 +150,9 @@ the frontmatter; `uncited_change`, `unknown_evidence_ref`, `resource_unresolvabl
 `evidence:packet` or revert the file; `broken_link`, `dangling_contradiction`, `duplicate_title`
 fix the link or update the existing concept; `body_shrink`, `identity_locked` restore the content
 or pass the allow flag with a true reason; `path_forbidden`, `service_owned_path`,
-`delete_forbidden` drop that file or change. `secret_detected` never echoes the value: remove it
-from your text; if the rule matched the evidence itself, park `model_output` naming the rule.
+`delete_forbidden` drop that file or change; `too_large` shorten the concept or split the item.
+`secret_detected` never echoes the value: remove it from your text; if the rule matched the
+evidence itself, park `model_output` naming the rule.
 `service_owned_key_ignored` is a warning: nothing to do.
 
 ```sh
@@ -162,12 +168,12 @@ current item and go to §5.
 ## 4. Failures and resuming
 
 - Progress lives on the writer (items, cursors, receipts); this host keeps only the run
-  directory under `~/.ai-wiki/state`. Any attempt with the same run id resumes: run the §2
-  `begin` command again, then §3. Never edit or delete the state directory or `$WS/.ai-wiki`.
+  directory under `~/.ai-wiki/state`, `$WS` included: edit only concept files in `$WS`, nothing
+  else there. Any attempt with the same run id resumes: rerun the §2 `begin`, then §3.
 - A resumed item with edits: inspect them with `ai-wiki -b "$bundle" workspace status --dir "$WS"`
   and `ai-wiki -b "$bundle" workspace diff --dir "$WS"`, then finish or park it.
-- A verb exits `1` (writer unreachable, unexpected answer): retry it once after a minute. A lost
-  lease (`lease_required`) needs the §2 `begin` command again. A second failure: go to §5.
+- A verb exits `1` (writer unreachable, unexpected answer): retry it once after a minute. A
+  second failure: go to §5.
 - `propose` resends identical bytes itself and the writer dedupes them: never re-POST, curl, poll
   jobs or resubmit by hand.
 - A run that dies needs no cleanup: the lease expires within 3 h and the next `begin` returns
