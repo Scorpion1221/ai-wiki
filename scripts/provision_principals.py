@@ -17,7 +17,7 @@ Commands:
                 member:legacy-token with every scope, as it authenticates without a file; the
                 service refuses to start on a file that leaves out a token it is still given.
   list          the principals in force after the next reload, without digests.
-  remove ID     drop a principal (incident response, §8.5). Rotate a token with remove + add:
+  remove ID...  drop principals (incident response, §8.5). Rotate a token with remove + add:
                 the service sees neither edit until it reloads.
   check         validate the file through the service's own startup path, including the
                 legacy-token invariant when $AIWIKI_TOKEN is set. Exit 0 ok, 1 refused.
@@ -157,11 +157,14 @@ def listing(path: Path) -> list[dict]:
              "expires": p.expires.isoformat() if p.expires else None} for p in auth.load(path)]
 
 
-def remove(path: Path, pid: str) -> None:
+def remove(path: Path, *pids: str) -> None:
+    """Drop principals; only the result is validated, so one call can drop every entry the service refuses."""
     data = _read(path)
-    kept = [entry for entry in data["principals"] if not (isinstance(entry, dict) and entry.get("id") == pid)]
-    if len(kept) == len(data["principals"]):
-        raise auth.PrincipalsError(f"{pid}: no such principal in {path}")
+    present = [entry.get("id") for entry in data["principals"] if isinstance(entry, dict)]
+    missing = [pid for pid in pids if pid not in present]
+    if missing:
+        raise auth.PrincipalsError(f"{', '.join(missing)}: no such principal in {path}")
+    kept = [entry for entry in data["principals"] if not (isinstance(entry, dict) and entry.get("id") in pids)]
     _write(path, {**data, "principals": kept})
 
 
@@ -201,8 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     p_legacy.add_argument("--token-env", default="AIWIKI_TOKEN", help="variable holding it (default: AIWIKI_TOKEN)")
     p_legacy.add_argument("--expires", metavar="YYYY-MM-DD")
     commands.add_parser("list", help="show the principals without digests")
-    p_remove = commands.add_parser("remove", help="drop a principal")
-    p_remove.add_argument("id")
+    p_remove = commands.add_parser("remove", help="drop principals")
+    p_remove.add_argument("ids", nargs="+", metavar="ID")
     p_check = commands.add_parser("check", help="validate the file as the service loads it at startup")
     p_check.add_argument("--token-env", default="AIWIKI_TOKEN",
                          help="variable holding the legacy token the service is still given (default: AIWIKI_TOKEN)")
@@ -222,9 +225,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "list":
             print(json.dumps(listing(path), indent=2))
         elif args.command == "remove":
-            remove(path, args.id)
-            print(f"removed {args.id} from {path}; it authenticates until the services reload (see --help)",
-                  file=sys.stderr)
+            remove(path, *args.ids)
+            print(f"removed {', '.join(args.ids)} from {path}; each authenticates until the services reload "
+                  "(see --help)", file=sys.stderr)
         else:
             print(check(path, os.environ.get(args.token_env)))
     except (auth.PrincipalsError, OSError) as exc:

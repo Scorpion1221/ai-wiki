@@ -110,14 +110,19 @@ def test_remove_can_repair_a_file_the_service_would_refuse(tmp_path: Path) -> No
     path = tmp_path / "principals.json"
     token = prov.add(path, "owner")
     data = json.loads(path.read_text(encoding="utf-8"))
-    data["principals"].append({"id": "process:hand-edited", "token_sha256": "0" * 64,
-                               "scopes": ["read", "curate", "audit"]})
+    for pid, digit in (("process:hand-edited", "0"), ("process:also-edited", "1")):
+        data["principals"].append({"id": pid, "token_sha256": digit * 64, "scopes": ["read", "curate", "audit"]})
     path.write_text(json.dumps(data), encoding="utf-8")
-    for refused in (lambda: prov.check(path, None), lambda: prov.listing(path), lambda: prov.add(path, "watchdog")):
+    for refused in (lambda: prov.check(path, None), lambda: prov.listing(path), lambda: prov.add(path, "watchdog"),
+                    lambda: prov.remove(path, "process:hand-edited")):  # the other bad entry still refuses it
         with pytest.raises(auth.PrincipalsError, match="must not hold both curate and audit"):
             refused()
+    before = path.read_bytes()
+    with pytest.raises(auth.PrincipalsError, match="process:gone: no such principal"):
+        prov.remove(path, "process:hand-edited", "process:gone")  # all or nothing
+    assert path.read_bytes() == before
 
-    prov.remove(path, "process:hand-edited")
+    prov.remove(path, "process:hand-edited", "process:also-edited")  # only the result is validated
     assert prov.check(path, None).startswith("ok: 1 principals: human:guobaoqi\n")
     assert _registry(path).authorize(f"Bearer {token}", "admin").id == "human:guobaoqi"
     with pytest.raises(auth.PrincipalsError, match="process:hand-edited: no such principal"):
