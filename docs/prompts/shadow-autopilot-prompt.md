@@ -14,7 +14,7 @@ cfg="$HOME/.ai-wiki/maint-solvely-wiki-shadow.json"      # 采集参数，内容
 ```
 
 - 日程：每天 05:30、13:30 CST，错开生产。没做完的条目由下一次 `maint begin` 接上，不要补跑。
-- 每次 begin 之前先做两件事：
+- 任何操作（包括 doctor 预检）之前先做两件事：
   1. 给本 issue 打标：`multica issue metadata set "$MULTICA_ISSUE_ID" --key ai_wiki_shadow_run --value true`。生产旧流程的 issue delta 只排除生产 autopilot 的 issue，靠这个 `ai_wiki_*` 标记才会跳过影子的 issue 和报告。
   2. 把下面的 JSON 原样写入 `$cfg`（覆盖旧文件，不改其他配置文件）：
 
@@ -45,5 +45,5 @@ cfg="$HOME/.ai-wiki/maint-solvely-wiki-shadow.json"      # 采集参数，内容
 
 - 按 `maint end --json` 的 `issue_status` 设置 issue（`--no-start`）：`blocked` 只出现在预检或 begin 退出 4、或采集失败时，写明原因；其他情况都是 `done`。
 - parked、needs_human、被拒的条目只写进报告，不影响结项，watchdog 负责告警。
-- 不要手工 POST changeset，不要改 `~/.ai-wiki/state`，不要为一次失败写长篇恢复计划：下一次运行自动续跑。
+- 不要手工 POST changeset；`~/.ai-wiki/state` 里只改 `$WS` 下的概念文件，其他文件和 `$WS/.ai-wiki/` 都不碰；不要为一次失败写长篇恢复计划：下一次运行自动续跑。
 - 评论先原样贴 `maint end` 的确定性报告（英文，不翻译），再用中文补最多 5 行知识变化。collection_mode=serial，不创建子 agent。
