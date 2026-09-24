@@ -10,8 +10,9 @@ Each check group is opt-in:
                    needs_repair entries.
   --bundle PATH    Writer host bundle (repeatable): last Git commit age, the worker's job files in
                    <bundle>/.okf/jobs (unresolved failures, queue depth, stuck jobs), and the
-                   maintainer queue in <bundle>/.okf/maint (needs_human items, stale ready items,
-                   collector cursors that stopped advancing once they exist, stuck run leases).
+                   maintainer queue in <bundle>/.okf/maint (needs_human and corrupt items, stale
+                   ready items, collector cursors that stopped advancing once they exist, stuck
+                   run leases).
 
 Prints one JSON document. Exit 0 = ok, 1 = alert, 2 = error (a check or the notification
 failed, or bad usage). With --feishu-webhook, a Feishu card (red alert, grouped by check, with
@@ -59,6 +60,10 @@ LEASE_CLOCK_SKEW = timedelta(minutes=5)
 MAINT_ROLES = ("maintainer", "auditor")
 MAINT_CURSORS = ("repos", "issues")
 MAINT_ITEM = re.compile(r"it_[0-9a-f]{12}")
+# service/maint_state._valid: an item.json that fails it is invisible to the writer.
+MAINT_FIELDS = {"id": str, "status": str, "origin": dict, "topic_key": str, "item_key": str, "priority": int,
+                "brief": str, "files": list, "attempts": dict, "versions": list, "created_at": str}
+SHA256 = re.compile(r"[0-9a-f]{64}")
 CLOSED_ISSUE_STATUSES = ("done", "cancelled", "canceled")
 MAX_MESSAGE_LINES = 12
 CST = timezone(timedelta(hours=8))
@@ -454,6 +459,22 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
 # --- maintainer queue ----------------------------------------------------------------------
 
 
+def maint_item_ok(item: dict | None, item_id: str) -> bool:
+    """The writer's own item check (maint_state._valid), plus a created_at the watchdog can age."""
+    if not item or item.get("id") != item_id or not all(
+            isinstance(item.get(key), kind) for key, kind in MAINT_FIELDS.items()):
+        return False
+    attempts = item["attempts"]
+    return (isinstance(item["origin"].get("kind"), str)
+            and all(isinstance(f, dict) and isinstance(f.get("name"), str) and isinstance(f.get("bytes"), int)
+                    and isinstance(f.get("sha256"), str) and SHA256.fullmatch(f["sha256"]) for f in item["files"])
+            and all(isinstance(v, dict) for v in item["versions"])
+            and isinstance(attempts.get("started"), int) and isinstance(attempts.get("counted"), int)
+            and isinstance(attempts.get("history"), list) and all(isinstance(h, dict) for h in attempts["history"])
+            and isinstance(item.get("resolution") or {}, dict) and isinstance(item.get("reopened", []), list)
+            and parse_ts(item["created_at"]) is not None)
+
+
 def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[dict, list[dict]]:
     """The writer's maintainer queue in <bundle>/.okf/maint (service/maint_state.py), design §7 SLOs.
     Before Phase 2 the directory is missing or holds no cursor: that is quiet, not an error."""
@@ -463,17 +484,21 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
         dirs = sorted((root / "items").iterdir()) if (root / "items").is_dir() else []
     except OSError as exc:
         raise CheckError(f"cannot list {root / 'items'}: {exc}") from None
-    items, corrupt = [], []
+    items, corrupt, alerts = [], [], []
     for path in dirs:
         if not MAINT_ITEM.fullmatch(path.name) or not (path / "item.json").exists():
             continue  # an interrupted create, which the writer ignores too
-        item = read_json(path / "item.json") or {}
-        if item.get("id") == path.name and isinstance(item.get("status"), str) and parse_ts(item.get("created_at")):
+        item = read_json(path / "item.json")
+        if maint_item_ok(item, path.name):
             items.append(item)
-        else:
-            corrupt.append(path.name)
+            continue
+        # The writer skips it (maint next, maint status) and its admin routes answer 500
+        # item_corrupt: the item has left the queue, which must not read as a recovery.
+        corrupt.append(path.name)
+        alerts.append(alert(check, f"maint_item_corrupt:{name}:{path.name}",
+                            f"maint {name}：条目 {path.name} 的 item.json 已损坏，writer 不再处理它"))
 
-    alerts, counts, needs_human, ready = [], {}, [], []
+    counts, needs_human, ready = {}, [], []
     for item in items:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
         if item["status"] == "needs_human":

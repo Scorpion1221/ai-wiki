@@ -417,7 +417,7 @@ def maint_keys(result: dict) -> set[str]:
     return {k for k in keys(result) if k.startswith("maint_")}
 
 
-def test_maint_queue_is_quiet_before_phase_2(tmp_path: Path) -> None:
+def test_maint_queue_is_quiet_before_cursors_exist(tmp_path: Path) -> None:
     bundle = make_bundle(tmp_path, iso(datetime.now(UTC)), [])  # production today: no .okf/maint at all
     code, result = run("--bundle", str(bundle))
     assert (code, result["alerts"], result["errors"]) == (0, [], [])
@@ -425,14 +425,12 @@ def test_maint_queue_is_quiet_before_phase_2(tmp_path: Path) -> None:
     assert (facts["items"], facts["cursors"], facts["leases"]) == (
         {}, {"repos": None, "issues": None}, {"maintainer": None, "auditor": None})
 
-    # Items without any cursor (say import-ledger before the first collect) and a torn item.
+    # Items without any cursor, say import-ledger before the first collect.
     M.enqueue(bundle, [maint_item("repo:x#a", 40)], principal=MAINTAINER)
-    (bundle / ".okf" / "maint" / "items" / "it_000000000000").mkdir()
-    (bundle / ".okf" / "maint" / "items" / "it_000000000000" / "item.json").write_text("{")
     code, result = run("--bundle", str(bundle))
     assert (code, result["alerts"], result["errors"]) == (0, [], [])
     facts = result["checks"]["maint:solvely-wiki"]
-    assert (facts["items"], facts["corrupt_items"]) == ({"ready": 1}, ["it_000000000000"])
+    assert (facts["items"], facts["corrupt_items"]) == ({"ready": 1}, [])
 
 
 def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) -> None:
@@ -490,6 +488,59 @@ def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) 
     recovered = at(81)
     assert maint_keys(recovered) == set()  # a waits in ready since its reopen, not since t0
     assert recovered["checks"]["maint:solvely-wiki"]["oldest_ready"]["age_hours"] == 1.0
+
+
+def corrupt(bundle: Path, item_id: str, text: str) -> None:
+    (bundle / ".okf" / "maint" / "items" / item_id / "item.json").write_text(text)
+
+
+def test_the_watchdog_flags_exactly_the_items_the_writer_cannot_read(tmp_path: Path) -> None:
+    bundle = make_bundle(tmp_path, iso(datetime.now(UTC)), [])
+    damage = {
+        "torn": lambda item: "{",
+        "not_an_object": lambda item: "[1]",
+        "empty": lambda item: "{}",
+        "other_id": lambda item: {**item, "id": "it_000000000000"},
+        "reopened_int": lambda item: {**item, "reopened": 1},
+        "resolution_str": lambda item: {**item, "resolution": "done"},
+        "priority_str": lambda item: {**item, "priority": "high"},
+        "file_without_sha": lambda item: {**item, "files": [{"name": "S1-README.md", "bytes": 1}]},
+        "history_str": lambda item: {**item, "attempts": {**item["attempts"], "history": "x"}},
+        "version_int": lambda item: {**item, "versions": [1]},
+        "origin_without_kind": lambda item: {**item, "origin": {}},
+    }
+    rows = M.enqueue(bundle, [maint_item(f"repo:x#{label}", 40) for label in [*damage, "healthy"]],
+                     principal=MAINTAINER)["items"]
+    for spoil, row in zip(damage.values(), rows, strict=False):  # the last row stays healthy
+        spoiled = spoil(M.get_item(bundle, row["id"]))
+        corrupt(bundle, row["id"], spoiled if isinstance(spoiled, str) else json.dumps(spoiled))
+
+    code, result = run("--bundle", str(bundle))
+    assert (code, result["errors"]) == (1, [])  # reopened: 1 no longer crashes the whole check
+    writer = M.status(bundle)["corrupt_items"]
+    assert len(writer) == len(damage)
+    assert result["checks"]["maint:solvely-wiki"]["corrupt_items"] == writer
+    assert maint_keys(result) == {f"maint_item_corrupt:solvely-wiki:{item_id}" for item_id in writer}
+    assert result["checks"]["maint:solvely-wiki"]["items"] == {"ready": 1}
+
+
+def test_a_corrupted_needs_human_item_alerts_instead_of_reading_as_recovered(tmp_path: Path) -> None:
+    bundle = make_bundle(tmp_path, iso(datetime.now(UTC)), [])
+    [row] = M.enqueue(bundle, [maint_item("repo:x#a", 40)], principal=MAINTAINER)["items"]
+    M.acquire_lease(bundle, "maintainer", principal=MAINTAINER, run="WAIO-1")
+    M.next_item(bundle, principal=MAINTAINER, run="WAIO-1")
+    M.resolve(bundle, row["id"], {"outcome": "parked", "class": "auth", "reason": "401"}, principal=MAINTAINER,
+              run="WAIO-1")
+    M.release_lease(bundle, "maintainer", principal=MAINTAINER, run="WAIO-1")
+    args = ("--bundle", str(bundle), "--state-file", str(tmp_path / "state.json"))
+
+    code, first = run(*args)
+    assert (code, maint_keys(first), first["notify"]["action"]) == (
+        1, {f"maint_needs_human:solvely-wiki:{row['id']}"}, "alert")
+    corrupt(bundle, row["id"], "{}")  # e.g. an in-place Codex audit wrote .okf
+    code, second = run(*args)
+    assert (code, maint_keys(second), second["notify"]["action"]) == (
+        1, {f"maint_item_corrupt:solvely-wiki:{row['id']}"}, "alert")
 
 
 # --- Feishu notification and deduplication ----------------------------------------------------
