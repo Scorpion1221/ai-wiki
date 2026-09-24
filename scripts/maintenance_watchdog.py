@@ -12,9 +12,10 @@ Each check group is opt-in:
                    files in <bundle>/.okf/jobs (unresolved failures, queue depth, stuck jobs).
 
 Prints one JSON document. Exit 0 = ok, 1 = alert, 2 = error (a check or the notification
-failed, or bad usage). With --feishu-webhook, a short Chinese text message is posted only when
-the alert fingerprint changes (deduplicated through --state-file), plus one recovery message
-when every alert clears.
+failed, or bad usage). With --feishu-webhook, a Feishu card (red alert, grouped by check, with
+Beijing times) is posted only when the alert fingerprint changes (deduplicated through
+--state-file), plus one green recovery card when every alert clears. If Feishu rejects the
+card itself, the same content is sent as plain text.
 
 --now replays the Multica checks at a past instant: runs created later are ignored, runs that
 completed later count as still open, checkpoints written later are ignored, and issue status
@@ -30,6 +31,7 @@ import hmac
 import http.client
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -50,6 +52,20 @@ DEFAULT_CHECKPOINT_KEY = "ai_wiki_incremental_checkpoint_v4"
 STUCK_ISSUE_STATUSES = ("todo", "in_progress")
 CLOSED_ISSUE_STATUSES = ("done", "cancelled", "canceled")
 MAX_MESSAGE_LINES = 12
+CST = timezone(timedelta(hours=8))
+RUNBOOK_URL = "https://github.com/Scorpion1221/ai-wiki/blob/main/docs/maintenance-watchdog.md"
+# Card sections by alert-key prefix: (prefixes, title, what to do). Order is display order.
+CARD_GROUPS = (
+    (("checkpoint_", "latest_run_failed", "run_", "runs_missing", "issue_stuck"), "🗓️ 每日维护",
+     "看当天 autopilot issue 的报告；下一次定时运行会从 ledger 自动续跑"),
+    (("ledger_",), "📒 待处理来源",
+     "pending 会跨天自动重试；needs_repair 需要新证据、新 build，或由 owner 执行 maintain --drop"),
+    (("job_",), "✍️ Writer 任务",
+     "maintain 管理的来源会自动重试；成员手动 ingest 的失败需要重新提交"),
+    (("bundle_commit_",), "📦 Bundle 提交", "确认 writer 服务和每日维护是否仍在产出提交"),
+    (("error:",), "⚠️ 检查本身失败", "watchdog 无法完成这项检查，先修复访问或权限"),
+)
+_ISO = re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)")
 
 
 class CheckError(RuntimeError):
@@ -334,6 +350,15 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
         kind = job.get("kind", "ingest")
         return kind, job.get("parent_job") if kind == "audit" else job.get("sha256")
 
+    def resolves(later: dict, job: dict) -> bool:
+        if subject(later) == subject(job):
+            return True
+        # ai-wiki maintain supersedes an unfinished older version of a source identity (the
+        # ingest title) with a newer one; that newer version's success resolves the old failure.
+        title = job.get("title")
+        return (job.get("kind", "ingest") == "ingest" and later.get("kind", "ingest") == "ingest"
+                and isinstance(title, str) and bool(title.strip()) and later.get("title") == title)
+
     counts: dict[str, int] = {}
     for _created, job in jobs:
         counts[str(job.get("status"))] = counts.get(str(job.get("status")), 0) + 1
@@ -346,8 +371,9 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
         finished = parse_ts(job.get("finished")) or created
         if job.get("status") != "failed" or not alert_start <= finished <= now:
             continue
-        # A later attempt on the same source (ingest) or parent (audit) that is done or in flight resolves it.
-        retry = next((j for c, j in jobs if c > created and subject(j) == subject(job)
+        # A later attempt on the same source (ingest), a newer version of the same source identity
+        # (ingest title), or the same parent (audit) that is done or in flight resolves it.
+        retry = next((j for c, j in jobs if c > created and resolves(j, job)
                       and j.get("status") in ("done", "queued", "running")), None)
         failure = job.get("failure") if isinstance(job.get("failure"), dict) else {}
         row = {"id": job.get("id"), "kind": job.get("kind", "ingest"), "finished": iso(finished),
@@ -400,14 +426,86 @@ def render(kind: str, label: str, result: dict, previous: dict) -> str:
     return "\n".join(lines)
 
 
+def cst(value: str | None) -> str:
+    """UTC ISO timestamp -> short Beijing time for people reading the card."""
+    ts = parse_ts(value) if value else None
+    return ts.astimezone(CST).strftime("%m-%d %H:%M") if ts else "未知"
+
+
+def _card_line(message: str) -> str:
+    return _ISO.sub(lambda m: cst(m.group(1)), message)
+
+
+def render_card(kind: str, label: str, result: dict, previous: dict) -> dict:
+    """A Feishu interactive card (schema 2.0) for an alert or recovery."""
+    now = result["now"]
+    footer = f"{label or 'watchdog'} · 检查于 {cst(now)}（北京时间） · 同一组告警只在变化时推送"
+    if kind == "recovery":
+        since = previous.get("alerting_since")
+        start, end = parse_ts(since) if since else None, parse_ts(now)
+        lasted = f"约 {round((end - start).total_seconds() / 3600, 1)} 小时" if start and end else "未知时长"
+        keys = previous.get("keys") or []
+        elements = [
+            {"tag": "markdown",
+             "content": f"**此前 {len(keys)} 项告警已全部解除**\n持续{lasted}（{cst(since)} → {cst(now)}）"},
+            {"tag": "hr"},
+            {"tag": "markdown", "content": "**已解除**\n" + "\n".join(f"- `{k}`" for k in keys[:MAX_MESSAGE_LINES])
+             + (f"\n- ……另有 {len(keys) - MAX_MESSAGE_LINES} 项" if len(keys) > MAX_MESSAGE_LINES else "")},
+        ]
+        header = {"title": "✅ AI Wiki 维护已恢复", "template": "green"}
+    else:
+        items = [(a["key"], a["message"]) for a in result["alerts"]]
+        items += [(f"error:{e['check']}", f"{e['check']}：{short(e['error'], 100)}") for e in result["errors"]]
+        since = previous.get("alerting_since") if previous.get("fingerprint") else now
+        elements = [{"tag": "markdown", "content": f"**{len(items)} 项需要关注** · 首次发现 {cst(since)}"}]
+        shown = 0
+        for prefixes, title, hint in CARD_GROUPS + (((), "其他", ""),):
+            group = [m for k, m in items if (k.startswith(prefixes) if prefixes else
+                                            not any(k.startswith(p) for g in CARD_GROUPS for p in g[0]))]
+            group = group[:max(0, MAX_MESSAGE_LINES - shown)]
+            if not group:
+                continue
+            shown += len(group)
+            text = f"**{title}**\n" + "\n".join(f"- {_card_line(m)}" for m in group)
+            if hint:
+                text += f"\n<font color='grey'>处理：{hint}</font>"
+            elements += [{"tag": "hr"}, {"tag": "markdown", "content": text}]
+        if len(items) > shown:
+            elements.append({"tag": "markdown", "content": f"……另有 {len(items) - shown} 项，详见 watchdog JSON 输出"})
+        elements.append({"tag": "button", "text": {"tag": "plain_text", "content": "处理指南"}, "type": "default",
+                         "behaviors": [{"type": "open_url", "default_url": RUNBOOK_URL}]})
+        header = {"title": "🚨 AI Wiki 维护告警", "template": "red"}
+    elements.append({"tag": "markdown", "content": f"<font color='grey'>{footer}</font>", "text_size": "notation"})
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": header["title"]},
+                   "subtitle": {"tag": "plain_text", "content": label or "AI Wiki watchdog"},
+                   "template": header["template"]},
+        "body": {"elements": elements},
+    }
+
+
 def redact(text: str, *secrets: str | None) -> str:
     for secret in filter(None, secrets):
         text = text.replace(secret, "<redacted>")
     return text
 
 
-def post_feishu(url: str, secret: str | None, text: str) -> None:
-    body: dict = {"msg_type": "text", "content": {"text": text}}
+def post_feishu(url: str, secret: str | None, text: str, card: dict | None = None) -> str:
+    """Post the card; if Feishu rejects the card itself, fall back to the plain-text alert."""
+    if card is not None:
+        try:
+            _post_feishu(url, secret, {"msg_type": "interactive", "card": card})
+            return "card"
+        except CheckError as exc:
+            if "rejected the message" not in str(exc) or re.search(r"code 190(?:21|22|24)\b", str(exc)):
+                raise  # transport or signature failures would hit the text message too
+    _post_feishu(url, secret, {"msg_type": "text", "content": {"text": text}})
+    return "text"
+
+
+def _post_feishu(url: str, secret: str | None, body: dict) -> None:
     if secret:  # Feishu custom bot signature: HMAC-SHA256 keyed by "timestamp\nsecret" over an empty message
         stamp = str(int(time.time()))
         digest = hmac.new(f"{stamp}\n{secret}".encode(), b"", hashlib.sha256).digest()
@@ -447,7 +545,9 @@ def notify(args: argparse.Namespace, result: dict) -> dict:
     outcome: dict = {"fingerprint": fingerprint, "action": action, "sent": False}
     if action in ("alert", "recovery") and args.feishu_webhook:
         try:
-            post_feishu(args.feishu_webhook, args.feishu_secret, render(action, args.label, result, previous))
+            outcome["format"] = post_feishu(args.feishu_webhook, args.feishu_secret,
+                                            render(action, args.label, result, previous),
+                                            render_card(action, args.label, result, previous))
         except CheckError as exc:
             outcome["error"] = str(exc)
             return outcome  # keep the old state so the next run retries the message

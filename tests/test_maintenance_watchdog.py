@@ -264,6 +264,23 @@ def test_writer_failures_resolved_by_later_attempts_do_not_alert(tmp_path: Path)
     assert facts["status_counts"] == {"failed": 5, "done": 2}
 
 
+def test_newer_version_of_the_same_identity_resolves_an_old_failure(tmp_path: Path) -> None:
+    # 2026-09-24: maintain superseded 3399e2a8cea8 (h5 old bytes) and ingested the newer
+    # version as f45f96502984 under the same identity; the old failure is no longer actionable.
+    newer = {"id": "f45f96502984", "kind": "ingest", "status": "done",
+             "title": "solvely/daily/h5-checkout-recovery-20260920", "sha256": "c8ccdc14" + "0" * 56,
+             "created": "2026-09-24T04:54:26Z", "finished": "2026-09-24T05:04:29Z"}
+    other = {"id": "0000aaaa0000", "kind": "ingest", "status": "done", "title": "another/identity",
+             "sha256": "d" * 64, "created": "2026-09-24T05:00:00Z", "finished": "2026-09-24T05:05:00Z"}
+    jobs = real_jobs()
+    bundle = make_bundle(tmp_path, "2026-09-24T05:04:30Z", jobs + [other])
+    code, result = run("--bundle", str(bundle), "--now", "2026-09-24T06:00:00Z")
+    assert "job_failed:solvely-wiki:3399e2a8cea8" in keys(result)  # a different identity resolves nothing
+    bundle = make_bundle(tmp_path / "b", "2026-09-24T05:04:30Z", jobs + [newer])
+    code, result = run("--bundle", str(bundle), "--now", "2026-09-24T06:00:00Z")
+    assert "job_failed:solvely-wiki:3399e2a8cea8" not in keys(result)
+
+
 def test_writer_alerts_on_unresolved_failures_inside_the_window(tmp_path: Path) -> None:
     bundle = make_bundle(tmp_path, "2026-09-20T12:00:00Z", real_jobs())
     # 17:20Z: e94c8b707aea had failed and f7dddac6e389 was not yet created.
@@ -345,12 +362,15 @@ class Webhook:
     def __init__(self) -> None:
         self.messages: list[dict] = []
         self.reply = {"code": 0, "msg": "success"}
+        self.card_reply: dict | None = None  # a different reply for interactive cards
         hook = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802 - http.server API
-                hook.messages.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-                body = json.dumps(hook.reply).encode()
+                message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                hook.messages.append(message)
+                reply = hook.card_reply if message.get("msg_type") == "interactive" and hook.card_reply else hook.reply
+                body = json.dumps(reply).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -376,6 +396,12 @@ def webhook():
     hook.close()
 
 
+def card_text(message: dict) -> str:
+    assert message["msg_type"] == "interactive" and message["card"]["schema"] == "2.0"
+    elements = message["card"]["body"]["elements"]
+    return "\n".join(e["content"] for e in elements if e["tag"] == "markdown")
+
+
 def test_feishu_alert_is_deduplicated_and_recovery_is_sent_once(tmp_path: Path, webhook: Webhook) -> None:
     ledger = write_ledger(tmp_path, datetime.now(UTC))
     state = tmp_path / "watchdog" / "state.json"
@@ -383,11 +409,15 @@ def test_feishu_alert_is_deduplicated_and_recovery_is_sent_once(tmp_path: Path, 
     env = {"AIWIKI_WATCHDOG_FEISHU_WEBHOOK": webhook.url, "AIWIKI_WATCHDOG_FEISHU_SECRET": "s3cret"}
 
     code, first = run(*args, env=env)
-    assert (code, first["notify"]["action"], first["notify"]["sent"]) == (1, "alert", True)
+    assert (code, first["notify"]["action"], first["notify"]["sent"], first["notify"]["format"]) == (
+        1, "alert", True, "card")
     [message] = webhook.messages
-    assert message["msg_type"] == "text"
-    text = message["content"]["text"]
-    assert text.startswith("【AI Wiki 维护告警】runtime\n1. ")
+    header = message["card"]["header"]
+    assert (header["template"], header["title"]["content"], header["subtitle"]["content"]) == (
+        "red", "🚨 AI Wiki 维护告警", "runtime")
+    text = card_text(message)
+    assert "**📒 待处理来源**" in text and "项需要关注" in text
+    assert any(e["tag"] == "button" for e in message["card"]["body"]["elements"])
     # The age is the earlier of real-clock evidence (now - 5 days) and the fixed receipt 3399e2a8cea8
     # created 2026-09-20T20:42:36Z, so it depends on today's date: read it back instead of hardcoding.
     h5_age = next(row["age_hours"] for row in first["checks"]["ledger"]["open"] if row["sha256"] == "1fcfb67cec6e")
@@ -406,19 +436,39 @@ def test_feishu_alert_is_deduplicated_and_recovery_is_sent_once(tmp_path: Path, 
     ledger.write_text(json.dumps(data))
     code, changed = run(*args, env=env)
     assert (code, changed["notify"]["action"], len(webhook.messages)) == (1, "alert", 2)
-    assert "需要人工修复" not in webhook.messages[-1]["content"]["text"]
+    assert "需要人工修复" not in card_text(webhook.messages[-1])
 
     for source in data["sources"]:
         source["status"] = "done"
     ledger.write_text(json.dumps(data))
     code, recovered = run(*args, env=env)
     assert (code, recovered["notify"]["action"], len(webhook.messages)) == (0, "recovery", 3)
-    recovery_text = webhook.messages[-1]["content"]["text"]
-    assert recovery_text.startswith("【AI Wiki 维护恢复】runtime\n之前的告警已全部解除（始于 ")
+    recovery = webhook.messages[-1]
+    assert recovery["card"]["header"]["template"] == "green"
+    assert "告警已全部解除" in card_text(recovery) and "`ledger_pending_stale:" in card_text(recovery)
     assert json.loads(state.read_text())["fingerprint"] is None
 
     code, quiet = run(*args, env=env)
     assert (code, quiet["notify"]["action"], len(webhook.messages)) == (0, "unchanged", 3)
+
+
+def test_a_rejected_card_falls_back_to_the_plain_text_alert(tmp_path: Path, webhook: Webhook) -> None:
+    ledger = write_ledger(tmp_path, datetime.now(UTC))
+    webhook.card_reply = {"code": 11246, "msg": "card content is invalid"}
+    code, result = run("--ledger", str(ledger), "--state-file", str(tmp_path / "s.json"),
+                       "--feishu-webhook", webhook.url, "--label", "runtime")
+    assert (code, result["notify"]["sent"], result["notify"]["format"]) == (1, True, "text")
+    assert [m["msg_type"] for m in webhook.messages] == ["interactive", "text"]
+    assert webhook.messages[1]["content"]["text"].startswith("【AI Wiki 维护告警】runtime\n1. ")
+
+
+def test_card_times_are_beijing_time() -> None:
+    result = {"now": "2026-09-24T08:52:05Z", "errors": [],
+              "alerts": [{"check": "writer:w", "key": "job_failed:w:9b21b986d4df",
+                          "message": "writer w：ingest job 9b21b986d4df 于 2026-09-19T04:49:15Z 失败且未重试成功"}]}
+    card = load_script().render_card("alert", "aliyun-jp-writer", result, {})
+    text = "\n".join(e["content"] for e in card["body"]["elements"] if e["tag"] == "markdown")
+    assert "于 09-19 12:49 失败" in text and "**✍️ Writer 任务**" in text and "检查于 09-24 16:52" in text
 
 
 def test_rejected_webhook_is_an_error_and_retried_next_run(tmp_path: Path, webhook: Webhook) -> None:
