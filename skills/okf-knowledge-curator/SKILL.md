@@ -3,8 +3,9 @@ name: okf-knowledge-curator
 description: >-
   Curate messy source documents into strict Open Knowledge Format v0.2 bundles. Use when
   the AI Wiki worker needs to split sources into durable concepts, preserve structured
-  provenance and per-claim attribution, update generated metadata without faking
-  verification, and hand concept edits back to deterministic service gates.
+  provenance and per-claim attribution, leave generated/verified bookkeeping to the
+  service without faking verification, and hand concept edits back to deterministic
+  service gates.
 ---
 
 # OKF Knowledge Curator
@@ -46,8 +47,8 @@ title: Human-readable title
 description: One sentence
 tags: [searchable-tag]
 status: draft                     # draft | stable | deprecated
-generated:
-  by: ai-wiki-curator/<version>
+generated:                        # service-stamped; never write or edit it
+  by: process:ai-wiki-curator
   at: 2026-08-13T08:00:00Z
 sources:
   - id: stable-source-id
@@ -63,12 +64,14 @@ are deliberately smaller documents whose frontmatter is exactly `type: Contract`
 not pretend to have generated/source metadata for the bundle contract itself.
 
 Each source item requires `resource`; add a stable `id` whenever the body attributes a
-claim. `generated.by` follows the actor convention: `human:<id>`, `process:<id>`, or
-`<producer>/<version>`. `generated.at` is the latest meaningful content change.
-Internal resources resolve from the concept document. Therefore raw snapshots under the
-bundle root must use bundle-root absolute `/sources/<file>` (recommended) or a correctly
-calculated concept-relative path such as `../sources/<file>`; never write bare
-`sources/<file>` from a concept subdirectory.
+claim. Internal resources resolve from the concept document. Cite the current snapshot
+exactly as the ingest prompt names it, as bundle-root absolute `/sources/<snapshot>`
+(recommended) or a correctly calculated concept-relative path such as `../sources/<file>`;
+never write bare `sources/<file>` from a concept subdirectory. When a changed concept does
+not cite the current snapshot but has exactly one unresolvable resource that is a near-miss
+of its name (and of no other snapshot), the service rewrites it to `/sources/<snapshot>` and
+records `normalized sources[i].resource to the current snapshot: <bad> -> <good>` in
+`deterministic_repairs`. Anything else is left to validation, so do not rely on it.
 
 Unknown useful extensions such as `confidence`, `owner`, `contested`, `contradictions`,
 and `source_sha256` may be preserved, but never replace the standard trust and freshness
@@ -96,33 +99,36 @@ The redirect runs before analytics initialization.[^waio-68]
 
 Do not use positional citations (`[1]`) or rely on footnote prose as the source key. A
 claim without adequate evidence stays narrowly worded and transiently `draft`, or is
-omitted. The independent audit later finalizes every retained concept as `stable` or
-`deprecated` without manufacturing verification.
+omitted. When the independent audit completes, the service sets every retained concept
+to `stable` (a `deprecated` one stays `deprecated`) without manufacturing verification.
 
-## Generated is not verified
+## Generated is not verified (both are service-owned)
 
-Normal creation or editing updates only:
+The service owns `generated` and `verified`; never write, edit, refresh, or copy either.
+Editing prose is not verification; a source timestamp and historical `last_verified_at` are
+not verification either.
 
-```yaml
-generated: {by: ai-wiki-curator/<version>, at: <now>}
-```
-
-It must not add, refresh, or copy a `verified` event. Editing prose is not verification;
-a source timestamp and historical `last_verified_at` are not verification either.
-
-Within an ingest pass, **any** edit to an existing concept—including a Related concepts
-backlink, tag, status, structured source metadata, or prose—is a substantive new revision.
-Either leave the file byte-for-byte unchanged, or add the current immutable ingest snapshot
-to `sources`, set `generated.by` to `process:ai-wiki-curator`, and advance `generated.at`
-strictly beyond the prior generation and every retained verification event. Do not add a
-navigation-only backlink when the current source does not support updating that concept.
-
-Only a real review against the cited source/resource may add:
+- On a substantive change the service stamps `generated: {by: process:ai-wiki-curator, at:
+  <trusted pass time>}` (after an audit correction: `process:ai-wiki-adversarial-audit`),
+  strictly after the prior generation and every retained verification event.
+- Edits that only change frontmatter formatting (key order, quoting, YAML layout) or trailing
+  whitespace and blank lines in the body are not substantive: the service restores the file's
+  previous bytes, drops those edits, and records the repair. Any other body change, including
+  indentation or spacing inside a line, is substantive and gets a new `generated` stamp.
+- Verification history is restored byte-for-byte after every pass. The service appends a
+  `verified` event (below) only when the adversarial auditor's verdict lists the concept as
+  verified; the auditor does not write it either.
 
 ```yaml
 verified:
   - {by: process:ai-wiki-adversarial-audit, at: 2026-08-13T08:05:00Z}
 ```
+
+Within an ingest pass, **any** edit to an existing concept—including a Related concepts
+backlink, tag, status, structured source metadata, or prose—is a substantive new revision.
+Either leave the file byte-for-byte unchanged, or add the current immutable ingest snapshot
+to `sources`. Do not add a navigation-only backlink when the current source does not
+support updating that concept. Never move frontmatter or verification lines into the body.
 
 Trust is derived, never stored:
 
@@ -130,11 +136,11 @@ Trust is derived, never stored:
 - non-human verifiers only → machine-confirmed;
 - any `human:<id>` verifier → human-reviewed.
 
-If content changes after an audit, retain historical verification only when the worker's
-review protocol explicitly preserves it as history. Per OKF §5.3, that history still
-determines the displayed trust tier; separately, the changed content remains unconfirmed
-until re-audited (`verification_current: false`). Never present a previous verification as
-confirmation of a new claim.
+If content changes after an audit, the service keeps the historical verification unchanged
+(the curator never decides this). Per OKF §5.3, that history still determines the displayed
+trust tier; separately, the changed content remains unconfirmed until re-audited
+(`verification_current: false`). Never present a previous verification as confirmation of a
+new claim.
 
 ## Lifecycle and freshness
 
@@ -161,8 +167,9 @@ merge; production QA proves availability; mature measurements prove effects.
 3. Analyze candidates, connections, contradictions, and create/update plan before writing.
 4. Search existing concepts and prefer aggregation/update over one-page-per-source mirroring.
 5. New concepts start transiently as `status: draft` and have no `verified` field. The
-   independent audit must remove unsupported claims or bound uncertainty, then finish with
-   `stable`/`deprecated`; only fully supported current revisions receive `verified`.
+   independent audit removes unsupported claims or bounds uncertainty; the service then sets
+   `stable` (or keeps `deprecated`) and appends `verified` only for concepts the auditor's
+   verdict lists as verified.
 6. On genuine conflict, preserve both claims and sources; set reciprocal `contested: true`
    and `contradictions`, and add/update an `OpenQuestion`.
 7. Add precise footnotes and existing related-concept links only.
@@ -173,7 +180,7 @@ merge; production QA proves availability; mature measurements prove effects.
 
 1. Detect a source change and find concepts whose `sources[].resource` points to it.
 2. Re-read both the service snapshot and concept; preserve still-supported provenance and facts.
-3. Update prose and `generated`; do not touch `verified` as a substitute for audit.
+3. Update prose and cite the current snapshot; never touch `generated` or `verified`.
 4. Preserve identity, existing provenance/history, and supported claims; cite the current snapshot.
 5. If evidence is insufficient, keep/demote to transient `draft` for the audit to qualify;
    if superseded, use `deprecated`.
@@ -188,6 +195,7 @@ maintenance session) uses the installed engine CLIs, not copied scripts inside t
 okf-gen-indexes <bundle>
 okf-append-log <bundle> <operation> "<subject>" --files <changed...>
 okf-validate <bundle>                 # official v0.2 + strict AI Wiki profile
+okf-validate <bundle> --changed <rel>...  # also gate the concepts this change wrote
 okf-lint <bundle>
 okf-scan-sources <bundle> --commit    # only after every prior step succeeds
 okf-render-viz <bundle> [out.html]    # when the repository opts into a snapshot
@@ -197,6 +205,12 @@ okf-render-viz <bundle> [out.html]    # when the repository opts into a snapshot
 from prose or filenames. Prefer bundle-root absolute `/sources/*.md.source` resources so
 concept moves do not break the mapping. `okf-validate --conformance-only` is for
 interoperability tests, not an acceptable worker close-out gate.
+
+`--changed` takes bundle-relative concept paths. For those files, frontmatter or
+verification lines spilled at the top of the body are errors, including a stray leading
+`---` followed by spilled lines. The same spill elsewhere in the bundle only prints
+`WARNING:` on stderr and does not change the exit code, so legacy defects never block
+unrelated work.
 
 ## Index and log contract
 

@@ -102,22 +102,29 @@ search/grep/log output includes `shown`, `total`, and `truncated` so callers can
 bounded response for a complete result set.
 
 An ingest is not verification. New/changed concepts are audited separately; a completed
-audit is either `passed` or `needs_attention`. The latter is a valid, non-retryable outcome
-that leaves an explicitly bounded durable concept unverified. A completed audit never leaves
+audit is either `passed` or `needs_attention`. The latter is a valid outcome that leaves an
+explicitly bounded durable concept unverified; it is not retried without new evidence, except
+the single re-review after a verdict slip described below. A completed audit never leaves
 a concept in the transient `draft` state: `passed` is stable and currently verified;
 `needs_attention` is stable/deprecated but unverified. Only technical/validation/Git
 failures produce a failed audit job. If ingest changed no concept files, audit returns an
 immediate idempotent `passed` job with `reason: no_concepts_to_audit` and no audit commit.
-The service also repairs reviewer bookkeeping slips deterministically: it restores the
-pre-audit `sources` provenance, removes a generation refresh when no substantive change
-survives, and promotes a leftover transient `draft` without adding verification; the job
-records these under `deterministic_repairs`.
+Bookkeeping is service-owned. Agents decide content only: the service restores `verified`
+history (and, at audit, `status` and `sources`), stamps `generated` with trusted time only for a
+substantive change, appends a verification event only when the auditor's JSON verdict lists the
+concept as `verified`, and sets `status` to `stable` at audit (`deprecated` stays). Formatting-only
+edits and frontmatter spilled into a body are discarded; each repair is recorded under
+`deterministic_repairs`. An audit whose verdict is missing or unparseable ends `needs_attention`
+with `audit.reason: verdict_missing`/`verdict_invalid`, and one more audit of that ingest is
+allowed.
 Repeating `audit` reuses an audit attempt while it is `queued`, `running`, or successfully
-`done`. A `failed` attempt remains available for diagnosis, but a subsequent call creates
-and queues a new attempt; callers must bound technical retries.
+`done`, except that the first `done` attempt with a verdict slip is not reused: the next call
+queues the one allowed re-review. A `failed` attempt remains available for diagnosis, but a
+subsequent call creates and queues a new attempt; callers must bound technical retries.
 
-Maintenance checkpoints use the durable audit Job as their receipt: `done`, successful
-validation, `passed`/`needs_attention`, and the successful Git result when applicable.
+A source's durable audit Job is its completion receipt: `done`, successful validation,
+`passed`/`needs_attention`, and the successful Git result when applicable. The daily collection
+cursor is separate: it advances once selected sources are frozen into the `maintain` ledger.
 The worker already enforces concept status and verification before committing. Do not
 repeat that gate against live `cat`/`health` results: read mirrors can lag, and later ingests
 can change the same concept. Report mirror visibility separately as a warning; it must not
@@ -136,7 +143,8 @@ profile. Use `--conformance-only` only when testing third-party interoperability
 The canonical query, maintenance, and curation skills live in [`skills/`](skills/):
 
 - `ai-wiki` — read-side status/trust/freshness gates;
-- `ai-wiki-maintainer` — `ingest → poll → audit → poll → checkpoint` orchestration;
+- `ai-wiki-maintainer` — deterministic collection (`checkpoint.py`, `scan_reference_repos.py`,
+  `issue_delta.py`), the `ai-wiki maintain` ledger, and checkpoint orchestration;
 - `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker.
 
 Check an installed runtime for drift, then explicitly synchronize it:
@@ -151,7 +159,9 @@ python3 scripts/sync_skills.py --check --dest /path/to/.agents/skills
 The sync preserves a platform-managed `multica-metadata.json` but replaces every other
 file in these skill directories, so stale bundled scripts cannot silently override the
 repository version. Publish the same directories to Multica and compare them against this
-check before enabling its Maintainer automation.
+check before enabling its Maintainer automation. Sync `ai-wiki-maintainer` only after its
+release is on GitHub `main` and deployed to the writer and read mirror: its preflight needs
+`compatible` from `ai-wiki health --json`, and reinstalling an older client cannot supply it.
 
 The CLI is non-interactive: usage/API failures are structured on stdout with exit code 2/1, and destructive `bundle rm` requires `--yes`. Bare `-v`, `-V`, and `--version` probes return only the version.
 
@@ -197,7 +207,22 @@ To use an existing API wrapper instead, replace only the `agent` object:
   override wrapper defaults. Missing/broken wrappers never fall back to a different account.
 - A missing default config preserves env-only deployments. An explicitly selected missing
   config, invalid JSON, or invalid/unknown `agent` fields fails startup rather than silently
-  choosing defaults. The only supported fields are `bin`, `model`, and `reasoning_effort`.
+  choosing defaults. The supported fields are:
+
+  | `agent` field | Environment override | Default | Meaning |
+  |---|---|---|---|
+  | `bin` | `AIWIKI_AGENT_BIN` | `codex` | Codex executable or compatible wrapper |
+  | `model` | `AIWIKI_AGENT_MODEL` | `gpt-5.6-sol` | curator and auditor model |
+  | `reasoning_effort` | `AIWIKI_AGENT_REASONING_EFFORT` | `high` | curator and auditor effort |
+  | `timeout_s` | `AIWIKI_AGENT_TIMEOUT_S` | `1500` | curation pass wall clock, seconds |
+  | `audit_timeout_s` | `AIWIKI_AGENT_AUDIT_TIMEOUT_S` | `1200` | adversarial audit wall clock, seconds |
+  | `repair_timeout_s` | `AIWIKI_AGENT_REPAIR_TIMEOUT_S` | `600` | bounded curation repair pass, seconds |
+
+  Timeouts must be integers from 60 to 7200; any other value stops the worker at startup.
+  One ingest's agent passes can take up to `timeout_s + repair_timeout_s` (2100 s by default),
+  within the `maintain` default `--wait-seconds 3600`. That wait also counts time queued behind
+  other jobs on the serial worker and Git/validation time, so it can run out; the source then
+  stays `pending` ("poll deadline reached") and the next run resumes the same job.
 - `ai-wiki config set` and `bundle` selection preserve `agent`. `config show` remains a
   connection-only view. On a writer, `ai-wiki health --json` exposes the **running server's**
   `writer_agent` (`runtime`, `bin`, `model`, `reasoning_effort`); jobs record the same settings.
@@ -227,34 +252,115 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_AGENT_BIN` | override `agent.bin`; Codex executable or compatible wrapper (default `codex`) |
 | `AIWIKI_AGENT_MODEL` | override `agent.model` for curator and auditor (default `gpt-5.6-sol`) |
 | `AIWIKI_AGENT_REASONING_EFFORT` | override `agent.reasoning_effort` (default `high`) |
+| `AIWIKI_AGENT_TIMEOUT_S` / `AIWIKI_AGENT_AUDIT_TIMEOUT_S` / `AIWIKI_AGENT_REPAIR_TIMEOUT_S` | override the agent budgets (defaults 1500 / 1200 / 600 s) |
+| `AIWIKI_BUILD_COMMIT` | deployed Git revision reported as `build` by `/health` and stamped on jobs |
 
 Requires Python ≥ 3.11. Licensed under Apache-2.0 (see LICENSE / NOTICE).
+
+### Build identity
+
+`/health` (and `ai-wiki health --json`) reports `build`: `AIWIKI_BUILD_COMMIT` when set, else
+the first line of `<app root>/.ai-wiki-deployed-revision`, else `null`. Jobs record the same
+value as `service.build`. Set it on every deployment from the same revision, for example
+`Environment=AIWIKI_BUILD_COMMIT=<sha>` on the worker unit, and for Docker:
+
+```bash
+docker build --build-arg AIWIKI_BUILD_COMMIT=$(git rev-parse HEAD) -t ai-wiki .
+```
+
+While `build` is `null`, `maintain` never grants its extra attempt for a newly deployed build.
+`ai-wiki health --json` also adds `client_version` and `compatible` (client and service share
+major.minor); maintenance automation fails closed when `compatible` is false.
 
 ## Maintenance recovery
 
 `ai-wiki ingest --json` returns machine-readable submission IDs. `ai-wiki jobs
 --pending-audit --json` discovers successful ingests older than 24 hours without an active
-or completed audit. Use the CLI with a persistent state directory:
+or completed audit. Use `ai-wiki maintain` with a persistent state directory:
 
 ```sh
 ai-wiki -b my-kb maintain --manifest sources.json --state-dir ~/.ai-wiki/maintenance/my-kb --audit-pending
-# Later scheduled runs resume failed work automatically; omit the manifest for recovery only.
+# Later scheduled runs resume saved work; omit the manifest to resume only.
 ai-wiki -b my-kb maintain --state-dir ~/.ai-wiki/maintenance/my-kb
-# Capacity restored early: skip the cooldown once, never the safety gates.
+# Capacity restored early: skip the cooldowns once, never the caps or safety gates.
 ai-wiki -b my-kb maintain --state-dir ~/.ai-wiki/maintenance/my-kb --retry-now --json
+# Inspect the saved ledger offline (no network, no lock).
+ai-wiki maintain --state-dir ~/.ai-wiki/maintenance/my-kb --status
 ```
 
 The manifest is `{"sources":[{"identity":"<stable source identity>","path":"/absolute/evidence.md"}]}`.
-Capacity/rate-limit failures stop the batch and persist a one-hour cooldown; transient
-timeout/network/5xx failures persist a five-minute cooldown. Each invocation makes at most
-one new attempt per stage per source, only after confirmed rollback. Later invocations
-resume eligible attempts without replaying completed work; no background scheduler is added.
-Validation, auth/permission, disk, unknown, or unresolved-rollback failures require repair.
-`--retry-now` cannot override those gates. JSON includes `writer_retry` and source `retry_at`;
-exit 1 means work remains pending, not that successful work was lost. Existing v1 state and
-exact source bytes are reused; the Skill script is now only a CLI forwarding entry point.
-No OKF schema change or platform-specific orchestration service is required.
+Each run leaves every entry `done`, `pending`, `needs_repair`, or `superseded`, and exits:
 
-Verification history is worker-owned: curator edits to `verified` are discarded/restored
-before validation and recorded as `deterministic_repairs`. Generation/source/scope checks
-still run; restoring historical verification never verifies changed knowledge.
+| Exit | Meaning |
+|---|---|
+| `0` | every entry is done or superseded |
+| `1` | work is pending (cooling down, past the poll deadline, blocked behind an older version, or awaiting a re-POST), the runner lock was held or the client config could not be read (an `{"error"}` result; nothing was frozen), or a read failed (listed in `warnings`); normal, resume later |
+| `3` | at least one ledger entry is `needs_repair`, including entries left from earlier runs; outranks `1`; alert on it |
+| `2` | usage or state error; fatal |
+
+- Retries follow the failed job's `failure.class`. Each run makes at most one new attempt
+  per stage per source, only after a confirmed rollback, and waits for `retry_after_s`
+  (capacity 1 h, interrupted 60 s, others 5 min). Capacity failures stop the batch for their
+  first three consecutive occurrences; after that only the entry cools down.
+- Failed non-capacity attempts are counted per source and stage, whatever their class, against
+  the cap of the latest failure's class: 3 for transient, timeout, interrupted, conflict, and
+  model_output; 2 for internal (two transient failures then an internal one reach the cap).
+  Past the cap, or on auth, disk, input, an unconfirmed rollback, or a rejected receipt, the
+  entry becomes `needs_repair`, which never blocks other sources. One extra attempt is allowed
+  for each new `/health` build that differs from the failed receipt's `service.build`.
+- A newer version of the same identity supersedes an older unfinished one that has no ingest
+  attempt or only rolled-back or needs-conversion attempts; its receipts are kept. Give
+  independent deltas distinct identities.
+- Each POST is recorded before it is sent. After an uncertain outcome the next run re-POSTs,
+  and the writer dedupes identical ingest bytes and per-parent audits onto the existing job.
+  A done audit with `audit.reason: verdict_missing`/`verdict_invalid` is re-reviewed once.
+- `--import-only` (needs `--manifest`) freezes the sources and imports any `ingest_job`/
+  `audit_job` created out of band without submitting anything, so a collection checkpoint can
+  advance before a long run. Never edit `state.json`. A `needs_repair` entry is re-checked
+  every run and recovers through a newer version (only while its ingest attempts are all
+  rolled back or needs-conversion), the extra attempt for a new build, or an imported receipt;
+  until then every run exits `3`. An operator (not the agent) can abandon one for good with
+  `--drop SHA256_PREFIX --reason TEXT`: its status becomes `dropped`, receipts are kept, and it
+  no longer affects the exit code.
+
+The JSON summary carries status counts, `writer_retry`, `warnings`, and per-source `identity`,
+`sha256`, `status`, `action`, `error`, and `retry_at`; job IDs, full receipts and the
+pending-audit discovery counts stay in `<state-dir>/state.json`. Existing v1 state and exact
+source bytes are reused; the Skill script is only a CLI forwarding entry point.
+
+### Job receipts
+
+`GET /jobs/{id}` (`ai-wiki jobs <id> --json`) records validation, commit, changed files, and
+`deterministic_repairs`, plus:
+
+- `failure {class, retryable, retry_after_s, stage, detail}` on a failed job. `class` is one
+  of `capacity`, `transient`, `timeout`, `interrupted`, `model_output`, `conflict`, `auth`,
+  `disk`, `input`, or `internal`; `detail` is redacted.
+- `service {version, build}`: the writer that produced the receipt.
+- `agent.output_tail`: the redacted last 4000 characters of the agent's output after a
+  nonzero exit or timeout.
+- On audits that ran a reviewer, `verdict {status: valid|missing|invalid, verified,
+  unverified, corrected}` plus `unknown_paths` (paths outside the scope) and `reason` (on an
+  invalid verdict) when present, and, for a missing or invalid verdict, `audit.reason`.
+  `no_concepts_to_audit` audits and audits that failed before a verdict was read have none.
+
+Receipts written before these fields existed are still classified by the client's legacy
+rules.
+
+### Watchdog
+
+[`docs/maintenance-watchdog.md`](docs/maintenance-watchdog.md) describes
+`scripts/maintenance_watchdog.py`, a read-only, LLM-free check (Python 3.11+ on the host where
+it is installed) that pages Feishu about a stale checkpoint, stuck issues and runs,
+`needs_repair` (`ledger_needs_repair`) or long-pending ledger entries, and writer job failures
+that have no later attempt (`job_failed`, for up to 7 days).
+
+## Development and CI
+
+```bash
+uv run --extra dev ruff check
+uv run --extra dev --extra service pytest -q
+```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs both on every pull request and on pushes to
+`main`, on Python 3.11 and 3.12. Wait for green CI before merging, including hotfixes.

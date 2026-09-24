@@ -1,0 +1,83 @@
+{
+  "id": "6f4b6f97e4b2",
+  "kind": "ingest",
+  "source": "sources/inbox/evidence-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+  "sha256": "95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900",
+  "status": "done",
+  "created": "2026-09-23T15:45:30Z",
+  "title": "solvely/daily/experiment-measurement-20260920",
+  "original_name": "evidence.md",
+  "curation": "queued",
+  "started": "2026-09-23T15:45:30Z",
+  "agent": {
+    "runtime": "codex",
+    "bin": "/home/<user>/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh",
+    "heartbeat_at": "2026-09-23T15:51:35Z",
+    "elapsed_s": 360.0,
+    "finished_at": "2026-09-23T15:51:38Z"
+  },
+  "base_revision": "06aa628920724056eaa0efd8822a8a12315601df",
+  "base_branch": "main",
+  "phase": "done",
+  "pre_sync": {
+    "synced": true
+  },
+  "recovery_source": ".okf/recovery/6f4b6f97e4b2.source",
+  "returncode": 0,
+  "summary": "<agent summary redacted>",
+  "source_snapshot": "sources/evidence-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+  "validation": {
+    "status": "passed",
+    "error_count": 0
+  },
+  "visualization": {
+    "path": "viz.html",
+    "concepts": 300,
+    "edges": 1208,
+    "bytes": 2715746
+  },
+  "git": {
+    "committed": true,
+    "pushed": true,
+    "commit": "3b5731bf80586fc5fa3fb0e3422517fce517ab96",
+    "changed_files": [
+      "experiments/ai-study-deferred-login-ab.md",
+      "experiments/index.md",
+      "experiments/sepa-first-payment-experiment-2026-09.md",
+      "experiments/web-home-writing-bubble-ab.md",
+      "experiments/web-landing-page-aio-ab.md",
+      "index.md",
+      "log.md",
+      "references/index.md",
+      "references/six-landing-pages-direct-home-checkpoint-2026-09.md",
+      "sources/.hashes.yaml",
+      "sources/evidence-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+      "viz.html"
+    ]
+  },
+  "commit": "3b5731bf80586fc5fa3fb0e3422517fce517ab96",
+  "changed_files": [
+    "experiments/ai-study-deferred-login-ab.md",
+    "experiments/index.md",
+    "experiments/sepa-first-payment-experiment-2026-09.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "experiments/web-landing-page-aio-ab.md",
+    "index.md",
+    "log.md",
+    "references/index.md",
+    "references/six-landing-pages-direct-home-checkpoint-2026-09.md",
+    "sources/.hashes.yaml",
+    "sources/evidence-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+    "viz.html"
+  ],
+  "concept_files": [
+    "experiments/ai-study-deferred-login-ab.md",
+    "experiments/sepa-first-payment-experiment-2026-09.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "experiments/web-landing-page-aio-ab.md",
+    "references/six-landing-pages-direct-home-checkpoint-2026-09.md"
+  ],
+  "finished": "2026-09-23T15:52:02Z"
+}

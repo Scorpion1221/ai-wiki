@@ -258,3 +258,21 @@ def test_pending_audits_excludes_active_and_completed_reviews(bundle, monkeypatc
     assert client.get("/jobs/pending-audit").status_code == 401
     assert client.get("/jobs/pending-audit?older_than_hours=-1", headers=AUTH).status_code == 422
     assert json.loads(client.get("/jobs/orphan", headers=AUTH).content)["id"] == "orphan"
+
+
+def test_pending_audits_lists_an_ingest_whose_only_audit_garbled_its_verdict(bundle):
+    (bundle / ".okf/jobs").mkdir(parents=True)
+    garbled = {"status": "needs_attention", "reason": "verdict_missing", "verified_concepts": [],
+               "unverified_concepts": ["a.md"], "corrected_concepts": []}
+    for name, attempts in (("once", 1), ("twice", 2)):
+        I.save_job(bundle, {"id": name, "kind": "ingest", "status": "done", "created": "2020-01-01T00:00:00Z",
+                            "finished": "2020-01-01T00:00:00Z", "validation": {"status": "passed"},
+                            "concept_files": ["a.md"]})
+        for attempt in range(attempts):
+            I.save_job(bundle, {"id": f"audit-{name}-{attempt}", "kind": "audit", "parent_job": name,
+                                "status": "done", "created": f"2020-01-0{attempt + 2}T00:00:00Z",
+                                "audit": garbled})
+    # One re-audit is allowed; after the bound the garbled result is the parent's audit.
+    assert [job["id"] for job in I.pending_audits(bundle)["jobs"]] == ["once"]
+    assert I.find_audit_job(bundle, "once") is None
+    assert I.find_audit_job(bundle, "twice")["parent_job"] == "twice"

@@ -31,7 +31,9 @@ def test_ingest_prompt_treats_backlinks_as_substantive_edits() -> None:
     assert "including a Related concepts/backlink" in curate.INGEST_PROMPT
     assert "leave the file byte-for-byte unchanged" in curate.INGEST_PROMPT
     assert "add this ingest snapshot to `sources`" in curate.INGEST_PROMPT
-    assert "advance `generated.at` strictly beyond the prior generation" in curate.INGEST_PROMPT
+    assert "The service owns `generated` and `verified`" in curate.INGEST_PROMPT
+    assert "The service owns `generated` and" in curate.REPAIR_PROMPT
+    assert "{max_generated_at}" not in curate.INGEST_PROMPT + curate.REPAIR_PROMPT
     assert "Do not add navigation-only backlinks" in curate.INGEST_PROMPT
 
 
@@ -583,7 +585,7 @@ def test_service_owns_source_snapshot_and_applies_only_isolated_concepts(
     assert (bundle / "features" / "x.md").is_file()
 
 
-@pytest.mark.parametrize("defect", ["yaml_indent", "resource_typo"])
+@pytest.mark.parametrize("defect", ["yaml_indent", "unrelated_resource"])
 def test_one_isolated_repair_recovers_invalid_frontmatter_or_source_path(
     tmp_path: Path, monkeypatch, defect: str,
 ) -> None:
@@ -622,7 +624,7 @@ def test_one_isolated_repair_recovers_invalid_frontmatter_or_source_path(
             else:
                 concept.write_text(
                     _policy_concept().replace(
-                        "/sources/s.md.source", "/sources/new.md.souce",
+                        "/sources/s.md.source", "/sources/unrelated-evidence.md.source",
                     ),
                     encoding="utf-8",
                 )
@@ -725,7 +727,7 @@ def test_repair_cannot_delete_first_pass_concepts_to_pass_validation(
         if calls == 1:
             for name in ("x", "y"):
                 (concepts / f"{name}.md").write_text(
-                    _policy_concept().replace("/sources/s.md.source", "/sources/new.md.souce"),
+                    _policy_concept().replace("/sources/s.md.source", "/sources/unrelated-evidence.md.source"),
                     encoding="utf-8",
                 )
         else:
@@ -816,7 +818,7 @@ def test_repair_cannot_add_unrelated_concept_edit(tmp_path: Path, monkeypatch) -
         calls += 1
         concepts = Path(kwargs["cwd"]) / "features"
         concepts.mkdir(exist_ok=True)
-        resource = "/sources/new.md.souce" if calls == 1 else "/sources/new.md.source"
+        resource = "/sources/unrelated-evidence.md.source" if calls == 1 else "/sources/new.md.source"
         (concepts / "x.md").write_text(
             _policy_concept().replace("/sources/s.md.source", resource), encoding="utf-8",
         )
@@ -1121,7 +1123,7 @@ def test_curation_refuses_preexisting_source_drift_without_laundering_baseline(
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_future_generated_at_from_agent_fails_and_rolls_back(
+def test_service_stamps_generated_over_agent_written_future_time(
     tmp_path: Path, monkeypatch, existing: bool,
 ) -> None:
     bundle = tmp_path / "bundle"
@@ -1131,10 +1133,8 @@ def test_future_generated_at_from_agent_fails_and_rolls_back(
     concept.parent.mkdir(parents=True)
     inbox.write_bytes(b"current evidence")
     (bundle / "sources" / "s.md.source").write_bytes(b"old evidence")
-    original = None
     if existing:
-        original = _policy_concept()
-        concept.write_text(original, encoding="utf-8")
+        concept.write_text(_policy_concept(), encoding="utf-8")
     sha = __import__("hashlib").sha256(inbox.read_bytes()).hexdigest()
     job_path = bundle / ".okf" / "jobs" / "j.json"
     job_path.parent.mkdir(parents=True)
@@ -1148,6 +1148,7 @@ def test_future_generated_at_from_agent_fails_and_rolls_back(
         workspace = Path(kwargs["cwd"])
         (workspace / "features" / "x.md").write_text(
             _policy_concept(
+                generated_by="human:ceo",
                 generated_at="2099-01-01T00:00:00Z",
                 body="updated" if existing else "new",
             ).replace("/sources/s.md.source", "/sources/new.md.source"),
@@ -1156,20 +1157,134 @@ def test_future_generated_at_from_agent_fails_and_rolls_back(
         return subprocess.CompletedProcess(command, 0, stdout="curated", stderr="")
 
     monkeypatch.setattr(curate, "_agent_process", future_agent)
+    started = datetime.now(UTC).replace(microsecond=0)
+    curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
+    finished = datetime.now(UTC)
+
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert job["status"] == "done", job.get("validation")
+    frontmatter, body = curate.parse_doc(concept)
+    assert frontmatter["generated"]["by"] == curate.CURATOR_ACTOR
+    stamped = curate._instant(frontmatter["generated"]["at"])
+    assert started <= stamped <= finished
+    assert ("updated" if existing else "new") in body
+    assert "deterministic_repairs" not in job  # stamping is service bookkeeping, not a repair
+
+
+def test_whitespace_only_curation_edit_keeps_concept_and_generation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = tmp_path / "bundle"
+    inbox = bundle / "sources" / "inbox" / "new.md.source"
+    existing = bundle / "features" / "x.md"
+    inbox.parent.mkdir(parents=True)
+    existing.parent.mkdir(parents=True)
+    inbox.write_bytes(b"current evidence")
+    (bundle / "sources" / "s.md.source").write_bytes(b"old evidence")
+    original = _policy_concept()
+    existing.write_text(original, encoding="utf-8")
+    job_path = bundle / ".okf" / "jobs" / "j.json"
+    job_path.parent.mkdir(parents=True)
+    job_path.write_text(json.dumps({
+        "source": inbox.relative_to(bundle).as_posix(),
+        "sha256": __import__("hashlib").sha256(inbox.read_bytes()).hexdigest(),
+        "status": "queued",
+    }))
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(curate, "validate_bundle", lambda _bundle: [])
+    monkeypatch.setattr(
+        curate, "_deterministic_closeout",
+        lambda *_args: {"indexes": [], "log": "log.md", "missing_index_descriptions": []},
+    )
+
+    def whitespace_agent(command, **kwargs):
+        workspace = Path(kwargs["cwd"])
+        (workspace / "features" / "x.md").write_text(
+            original.replace("# Summary\n\nX\n", "# Summary  \n\n\nX   \n\n"), encoding="utf-8",
+        )
+        (workspace / "features" / "y.md").write_text(
+            _policy_concept(body="new").replace("/sources/s.md.source", "/sources/new.md.source"),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="curated", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", whitespace_agent)
     curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
 
     job = json.loads(job_path.read_text(encoding="utf-8"))
-    assert job["status"] == "failed"
-    assert any(
-        "generated.at must not exceed trusted pass time" in error
-        for error in job["validation"]["errors"]
+    assert job["status"] == "done", job.get("validation")
+    assert existing.read_text(encoding="utf-8") == original
+    assert job["concept_files"] == ["features/y.md"]
+    assert job["deterministic_repairs"] == {
+        "features/x.md": ["discarded non-substantive formatting edits"],
+    }
+
+
+# The immutable snapshot and the two mis-copied references from failed ingest 3399e2a8cea8.
+SNAPSHOT_3399 = (
+    "1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd29-"
+    "1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd295836.md.source"
+)
+MISCOPIED_3399 = {
+    "references/h5-billing-copy-dev1-delivery-open-question-2026-09.md": (
+        "/sources/1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd29-"
+        "1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd295836.md.source"
+    ),
+    "risks/h5-hosted-to-elements-recovery-and-acceptance-2026-09.md": (
+        "/sources/1fcfb67cec6e7c96549cae9e278d57134a0ca4e4f0a329764f3b30b3dd29-"
+        "1fcfb67cec6e7c96549cae9e278d57134a0cae4f0a329764f3b30b3dd295836.md.source"
+    ),
+}
+
+
+def test_service_normalizes_3399e2a8cea8_snapshot_copy_errors_without_repair_pass(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """3399e2a8cea8 failed 4 gates because the curator dropped a hex digit when copying."""
+    bundle = tmp_path / "bundle"
+    inbox = bundle / "sources" / "inbox" / SNAPSHOT_3399
+    inbox.parent.mkdir(parents=True)
+    inbox.write_bytes(b"h5 checkout recovery evidence\n")
+    (bundle / "sources" / "s.md.source").write_bytes(b"old evidence")
+    (bundle / "index.md").write_text('---\nokf_version: "0.2"\n---\n# Bundle\n', encoding="utf-8")
+    job_path = bundle / ".okf" / "jobs" / "3399e2a8cea8.json"
+    job_path.parent.mkdir(parents=True)
+    job_path.write_text(json.dumps({
+        "source": inbox.relative_to(bundle).as_posix(),
+        "sha256": __import__("hashlib").sha256(inbox.read_bytes()).hexdigest(),
+        "status": "queued",
+    }))
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(
+        curate, "_deterministic_closeout",
+        lambda *_args: {"indexes": [], "log": "log.md", "missing_index_descriptions": []},
     )
-    assert inbox.read_bytes() == b"current evidence"
-    assert not (bundle / "sources" / "new.md.source").exists()
-    if existing:
-        assert concept.read_text(encoding="utf-8") == original
-    else:
-        assert not concept.exists()
+    calls = []
+
+    def miscopying_agent(command, **kwargs):
+        calls.append(command[-1])
+        workspace = Path(kwargs["cwd"])
+        for rel, resource in MISCOPIED_3399.items():
+            (workspace / rel).parent.mkdir(parents=True, exist_ok=True)
+            (workspace / rel).write_text(
+                _policy_concept(body=rel).replace("/sources/s.md.source", resource), encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="Created two concepts.", stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", miscopying_agent)
+    curate.run(bundle, inbox.relative_to(bundle).as_posix(), job_path)
+
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert len(calls) == 1 and "repair" not in job
+    assert f"cite it as `/sources/{SNAPSHOT_3399}`" in calls[0]
+    assert job["status"] == "done", job.get("validation")
+    assert job["validation"] == {"status": "passed", "error_count": 0}
+    for rel, resource in MISCOPIED_3399.items():
+        assert job["deterministic_repairs"][rel] == [
+            f"normalized sources[0].resource to the current snapshot: {resource!r} -> "
+            f"{'/sources/' + SNAPSHOT_3399!r}"
+        ]
+        assert curate.parse_doc(bundle / rel)[0]["sources"][0]["resource"] == f"/sources/{SNAPSHOT_3399}"
 
 
 def test_agent_cannot_copy_current_source_without_citing_it(
@@ -1806,26 +1921,44 @@ def test_exclude_inbox_handles_bundle_at_repository_root(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_curation_repair_removes_forged_verification_without_changing_body(tmp_path, existing):
+def test_service_bookkeeping_removes_forged_verification(tmp_path, existing):
     concept = tmp_path / "features" / "x.md"
     concept.parent.mkdir()
     original = _policy_concept()
     before = {"features/x.md": original.encode()} if existing else {}
     changed = _policy_concept(verified={"by": "human:fake", "at": "2026-08-13T00:01:00Z"})
-    changed += "\n  whitespace stays  \n\n"
+    changed = changed.replace("\nX\n", "\nX   \n\n  \t\n")  # whitespace-only body edit
     concept.write_text(changed)
-    assert curate._restore_curation_verification(tmp_path, before)
-    assert "verified" not in curate.parse_doc(concept)[0]
-    assert concept.read_text().split("---\n", 2)[2] == changed.split("---\n", 2)[2]
-    assert curate._restore_curation_verification(tmp_path, before) == {}
+    now = datetime(2026, 8, 13, 12, tzinfo=UTC)
+    repairs = curate._service_bookkeeping(tmp_path, before, "sources/new.md.source", now)
+    verification = "restored service-owned verification history without adding verification"
+    if existing:
+        # Nothing but bookkeeping and whitespace changed: the concept stays byte-identical.
+        assert repairs == {"features/x.md": [verification, "discarded non-substantive formatting edits"]}
+        assert concept.read_text() == original
+    else:
+        assert repairs == {"features/x.md": [verification]}
+        frontmatter, _body = curate.parse_doc(concept)
+        assert "verified" not in frontmatter
+        assert frontmatter["generated"] == {"by": curate.CURATOR_ACTOR, "at": "2026-08-13T12:00:00Z"}
+        assert concept.read_text().split("---\n", 2)[2] == changed.split("---\n", 2)[2]
+    assert curate._service_bookkeeping(tmp_path, {"features/x.md": concept.read_bytes()}, "s", now) == {}
 
 
-def test_curation_repair_does_not_make_old_verification_current(tmp_path):
+def test_service_generation_never_leaves_old_verification_current(tmp_path):
     concept = tmp_path / "features" / "x.md"
     concept.parent.mkdir()
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "sources" / "s.md.source").write_text("evidence")
     original = _policy_concept(verified={"by": "human:owner", "at": "2026-08-13T00:02:00Z"})
     concept.write_text(original)
     before = curate._concept_snapshot(tmp_path)
     concept.write_text(_policy_concept(body="new content", generated_at="2026-08-13T00:01:00Z"))
-    curate._restore_curation_verification(tmp_path, {"features/x.md": original.encode()})
-    assert any("retained verification current" in e for e in curate._curation_policy_errors(tmp_path, before))
+    # Trusted time lags the recorded verification: the stamp still moves past it.
+    now = datetime(2026, 8, 13, 0, 1, 30, tzinfo=UTC)
+    curate._service_bookkeeping(tmp_path, {"features/x.md": original.encode()}, "sources/s.md.source", now)
+    frontmatter, _body = curate.parse_doc(concept)
+    assert frontmatter["verified"] == {"by": "human:owner", "at": "2026-08-13T00:02:00Z"}
+    assert frontmatter["generated"] == {"by": curate.CURATOR_ACTOR, "at": "2026-08-13T00:02:01Z"}
+    assert current_verified(frontmatter) == []
+    assert curate._curation_policy_errors(tmp_path, before) == []

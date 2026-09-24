@@ -1,0 +1,81 @@
+{
+  "id": "f7dddac6e389",
+  "kind": "audit",
+  "parent_job": "6f4b6f97e4b2",
+  "concept_files": [
+    "experiments/ai-study-deferred-login-ab.md",
+    "experiments/sepa-first-payment-experiment-2026-09.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "experiments/web-landing-page-aio-ab.md",
+    "references/six-landing-pages-direct-home-checkpoint-2026-09.md"
+  ],
+  "status": "done",
+  "created": "2026-09-23T17:37:04Z",
+  "started": "2026-09-23T17:37:04Z",
+  "agent": {
+    "runtime": "codex",
+    "bin": "/home/<user>/.local/bin/codex-9router",
+    "model": "gpt-6-astra-combos",
+    "reasoning_effort": "xhigh",
+    "role": "adversarial-auditor",
+    "heartbeat_at": "2026-09-23T17:41:52Z",
+    "elapsed_s": 285.0,
+    "finished_at": "2026-09-23T17:42:04Z"
+  },
+  "source": "sources/evidence-95498733626bce82b436b819c0181bd0a55e99db8c6305c977168b6d16764900.md.source",
+  "base_revision": "3b5731bf80586fc5fa3fb0e3422517fce517ab96",
+  "base_branch": "main",
+  "phase": "done",
+  "pre_sync": {
+    "synced": true
+  },
+  "returncode": 0,
+  "summary": "<agent summary redacted>",
+  "validation": {
+    "status": "passed",
+    "error_count": 0
+  },
+  "audit": {
+    "status": "passed",
+    "verified_concepts": [
+      "experiments/ai-study-deferred-login-ab.md",
+      "experiments/sepa-first-payment-experiment-2026-09.md",
+      "experiments/web-home-writing-bubble-ab.md",
+      "experiments/web-landing-page-aio-ab.md",
+      "references/six-landing-pages-direct-home-checkpoint-2026-09.md"
+    ],
+    "unverified_concepts": [],
+    "corrected_concepts": []
+  },
+  "visualization": {
+    "path": "viz.html",
+    "concepts": 300,
+    "edges": 1208,
+    "bytes": 2716231
+  },
+  "git": {
+    "committed": true,
+    "pushed": true,
+    "commit": "a3583950cfd2afe89cca53636d6d24625122adca",
+    "changed_files": [
+      "experiments/ai-study-deferred-login-ab.md",
+      "experiments/sepa-first-payment-experiment-2026-09.md",
+      "experiments/web-home-writing-bubble-ab.md",
+      "experiments/web-landing-page-aio-ab.md",
+      "log.md",
+      "references/six-landing-pages-direct-home-checkpoint-2026-09.md",
+      "viz.html"
+    ]
+  },
+  "commit": "a3583950cfd2afe89cca53636d6d24625122adca",
+  "changed_files": [
+    "experiments/ai-study-deferred-login-ab.md",
+    "experiments/sepa-first-payment-experiment-2026-09.md",
+    "experiments/web-home-writing-bubble-ab.md",
+    "experiments/web-landing-page-aio-ab.md",
+    "log.md",
+    "references/six-landing-pages-direct-home-checkpoint-2026-09.md",
+    "viz.html"
+  ],
+  "finished": "2026-09-23T17:42:15Z"
+}

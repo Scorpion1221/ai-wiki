@@ -443,3 +443,54 @@ def test_read_signal_helpers() -> None:
     assert trust_tier({"verified": [{"by": "human:q", "at": "2026-08-13T00:00:00Z"}]}) == TRUST_HUMAN_REVIEWED
     assert freshness({"stale_after": "2026-08-14"}, date(2026, 8, 13)) == FRESHNESS_FRESH
     assert freshness({"stale_after": "2026-08-13"}, date(2026, 8, 13)) == FRESHNESS_STALE
+
+
+# Production spill: audit a21ce2d wrote its event one line below the closing delimiter of
+# this concept (bundle 3b5731b; fixture prose redacted). Every gate accepted it.
+AUDITOR = "process:ai-wiki-adversarial-audit"
+LIVE = Path(__file__).parent / "fixtures" / "live_bundle"
+ORPHAN_REL = "experiments/web-landing-page-aio-ab.md"
+ORPHAN_LINE = f"  - {{by: {AUDITOR}, at: 2026-09-19T20:56:59Z}}"
+
+
+@pytest.mark.parametrize(
+    ("body", "spilled"),
+    [
+        (f"{ORPHAN_LINE}\n# Summary\n", [ORPHAN_LINE]),
+        (f"\n{ORPHAN_LINE}\n\n# Summary\n", [ORPHAN_LINE]),
+        (f"- by: {AUDITOR}\n  at: 2026-09-19T20:56:59Z\n# Summary\n",
+         [f"- by: {AUDITOR}", "  at: 2026-09-19T20:56:59Z"]),
+        ("status: stable\nverified:\n  - {by: x/y, at: 2026-09-19T20:56:59Z}\n# S\n",
+         ["status: stable", "verified:", "  - {by: x/y, at: 2026-09-19T20:56:59Z}"]),
+        # A stray extra closing delimiter must not hide the spill under it.
+        (f"---\n{ORPHAN_LINE}\n# Summary\n", ["---", ORPHAN_LINE]),
+        ("---\n# Summary\n", []),  # a leading horizontal rule alone is Markdown
+        ("# Summary\n" + ORPHAN_LINE + "\n", []),  # not leading: prose, not bookkeeping
+        ("- by the way\n# Summary\n", []),
+        ("- by: the team\nsomething else\n", []),
+        ("Status: shipped\n", []),
+    ],
+)
+def test_split_body_spill_only_takes_leading_bookkeeping_lines(body: str, spilled: list[str]) -> None:
+    found, rest = validate.split_body_spill(body)
+    assert found == spilled
+    assert rest == (body if not spilled else body[body.index("#"):])
+
+
+def test_body_spill_is_an_error_only_for_changed_files(tmp_path: Path, capsys) -> None:
+    (tmp_path / "index.md").write_text('---\nokf_version: "0.2"\n---\n', encoding="utf-8")
+    concept = tmp_path / ORPHAN_REL
+    concept.parent.mkdir(parents=True)
+    concept.write_text((LIVE / ORPHAN_REL).read_text(encoding="utf-8"), encoding="utf-8")
+    first = ORPHAN_LINE.strip()
+    finding = f"{ORPHAN_REL}: body starts with 1 spilled frontmatter/verification line(s), first {first!r}"
+    assert validate.spill_warnings(tmp_path) == [finding]
+    assert validate.validate_changed(tmp_path, [ORPHAN_REL]) == [finding]
+    assert validate.validate_changed(tmp_path, ["metrics/other.md"]) == []
+
+    assert validate.main([str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("OK:")
+    assert f"WARNING: {finding}" in captured.err
+    assert validate.main([str(tmp_path), "--changed", ORPHAN_REL]) == 1
+    assert f"ERROR: {finding}" in capsys.readouterr().err

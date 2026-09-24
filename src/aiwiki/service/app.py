@@ -23,7 +23,7 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
-from aiwiki.version import VERSION
+from aiwiki.version import VERSION, build
 
 from ..runtime import audit as audit_runtime
 from ..runtime import curate as curate_runtime
@@ -200,7 +200,7 @@ def health(bundle: str | None = None, authorization: str | None = Header(default
     _auth(authorization)
     with _read_window():
         name, BUNDLE = _resolve(bundle)
-        result = {"bundle": name, "service_version": VERSION, **B.health(BUNDLE)}
+        result = {"bundle": name, "service_version": VERSION, "build": build(), **B.health(BUNDLE)}
         if CURATE_ON:
             result["writer_agent"] = curate_runtime._agent_metadata()
         return result
@@ -379,34 +379,46 @@ def audit(ingest_job_id: str, bundle: str | None = None,
     if not CURATE_ON:
         raise HTTPException(status_code=403, detail="audit requires AIWIKI_CURATE to be enabled")
     with worker.serialized_lifecycle():
-        # The no-concept decision reads the live knowledge tree. Keep it in the
-        # same read window as the durable parent check so an in-flight content pass
-        # cannot turn a real audit into a false no-op success.
-        with _read_window():
-            _name, BUNDLE = _resolve(bundle)
-            parent = I.read_job(BUNDLE, ingest_job_id)
-            if parent is None:
-                raise HTTPException(status_code=404, detail=f"no such ingest job: {ingest_job_id}")
-            if parent.get("kind", "ingest") != "ingest":
-                raise HTTPException(status_code=400, detail=f"job is not an ingest job: {ingest_job_id}")
-            if parent.get("status") != "done":
+        _name, BUNDLE = _resolve(bundle)
+        parent = I.read_job(BUNDLE, ingest_job_id)
+        if parent is None:
+            raise HTTPException(status_code=404, detail=f"no such ingest job: {ingest_job_id}")
+        if parent.get("kind", "ingest") != "ingest":
+            raise HTTPException(status_code=400, detail=f"job is not an ingest job: {ingest_job_id}")
+        if parent.get("status") != "done":
+            raise HTTPException(
+                status_code=409,
+                detail=f"ingest job must be done before audit (current: {parent.get('status')})",
+            )
+        if (parent.get("validation") or {}).get("status") != "passed":
+            raise HTTPException(status_code=409, detail="ingest job did not pass deterministic validation")
+        declared = parent.get("concept_files")
+        try:
+            # The no-concept decision reads the live knowledge tree. Keep it in a read
+            # window so an in-flight content pass cannot turn a real audit into a false
+            # no-op success.
+            with worker.serialized_read():
+                concepts = audit_runtime.concept_files(BUNDLE, parent)
+                if isinstance(declared, list) and declared and len(concepts) != len(set(declared)):
+                    missing = sorted(set(str(value) for value in declared) - set(concepts))
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "ingest audit scope is missing or invalid; retry after bundle repair: "
+                            + ", ".join(missing[:10])
+                        ),
+                    )
+                job, deduplicated = I.receive_audit(BUNDLE, ingest_job_id, concepts)
+        except worker.ReadBusy:
+            # A long agent pass owns the live tree. The durable parent receipt already
+            # scopes the audit, and the queued runtime re-checks that scope on the live
+            # tree under its own serialized mutation, so enqueue instead of failing.
+            if not isinstance(declared, list):
                 raise HTTPException(
                     status_code=409,
-                    detail=f"ingest job must be done before audit (current: {parent.get('status')})",
-                )
-            if (parent.get("validation") or {}).get("status") != "passed":
-                raise HTTPException(status_code=409, detail="ingest job did not pass deterministic validation")
-            declared = parent.get("concept_files")
-            concepts = audit_runtime.concept_files(BUNDLE, parent)
-            if isinstance(declared, list) and declared and len(concepts) != len(set(declared)):
-                missing = sorted(set(str(value) for value in declared) - set(concepts))
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "ingest audit scope is missing or invalid; retry after bundle repair: "
-                        + ", ".join(missing[:10])
-                    ),
-                )
+                    detail="bundle mutation in progress; unscoped legacy ingest audit not created; retry",
+                ) from None
+            concepts = sorted({value for value in declared if isinstance(value, str)})
             job, deduplicated = I.receive_audit(BUNDLE, ingest_job_id, concepts)
         if deduplicated:
             return {**job, "deduplicated": True}

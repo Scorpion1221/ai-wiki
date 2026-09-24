@@ -18,6 +18,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from aiwiki.version import service_identity
+
 MAX_BYTES = 25_000_000
 _SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
 
@@ -28,6 +30,10 @@ _READABLE_BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _NEEDS_CONVERSION_EXT = {".pdf"}
 _REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion"}
 _REUSABLE_AUDIT_STATUSES = {"queued", "running", "done"}
+# A done audit whose reviewer omitted or garbled its verdict judged no evidence. It stays a
+# durable receipt, but the parent may be re-audited until this many such attempts exist.
+_VERDICT_FORMAT_REASONS = {"verdict_missing", "verdict_invalid"}
+MAX_VERDICT_FORMAT_AUDITS = 2
 _JOB_LOCK = threading.Lock()
 
 
@@ -95,6 +101,7 @@ def new_job(bundle: Path, source_rel: str, sha: str, curatable: bool,
         "id": uuid.uuid4().hex[:12], "kind": "ingest", "source": source_rel, "sha256": sha,
         "status": "queued" if curatable else "needs-conversion",
         "created": _now(),
+        "service": service_identity(),
     }
     if title:
         job["title"] = title
@@ -133,28 +140,43 @@ def receive_source(bundle: Path, data: bytes, filename: str | None = None,
         return new_job(bundle, source_rel, sha, curatable, title, filename), False
 
 
+def _verdict_format_failure(job: dict) -> bool:
+    audit = job.get("audit") if isinstance(job.get("audit"), dict) else {}
+    return job.get("status") == "done" and audit.get("reason") in _VERDICT_FORMAT_REASONS
+
+
+def _reusable_audit(attempts: list[dict]) -> dict | None:
+    """The attempt a new audit request reuses, given one parent's attempts newest first."""
+    for job in attempts:
+        if job.get("status") not in _REUSABLE_AUDIT_STATUSES:
+            continue
+        if (_verdict_format_failure(job)
+                and sum(map(_verdict_format_failure, attempts)) < MAX_VERDICT_FORMAT_AUDITS):
+            return None
+        return job
+    return None
+
+
 def find_audit_job(bundle: Path, parent_job: str) -> dict | None:
     """Return the newest reusable audit attempt for an ingest job.
 
     Queued/running attempts and terminal successful business results are
     idempotent. A technically failed attempt remains durable for diagnosis but
-    must not permanently block a fresh retry.
+    must not permanently block a fresh retry; neither does a bounded number of done
+    attempts whose verdict was missing or invalid.
     """
     jobs = bundle / ".okf" / "jobs"
     if not jobs.is_dir():
         return None
+    attempts = []
     for path in sorted(jobs.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             job = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if (
-            job.get("kind") == "audit"
-            and job.get("parent_job") == parent_job
-            and job.get("status") in _REUSABLE_AUDIT_STATUSES
-        ):
-            return job
-    return None
+        if job.get("kind") == "audit" and job.get("parent_job") == parent_job:
+            attempts.append(job)
+    return _reusable_audit(attempts)
 
 
 def new_audit_job(bundle: Path, parent_job: str, concept_files: list[str]) -> dict:
@@ -167,6 +189,7 @@ def new_audit_job(bundle: Path, parent_job: str, concept_files: list[str]) -> di
         "concept_files": concept_files,
         "status": "queued",
         "created": _now(),
+        "service": service_identity(),
     }
     if not concept_files:
         job.update({
@@ -213,10 +236,11 @@ def pending_audits(bundle: Path, *, older_than_hours: float = 24, limit: int = 2
             jobs.append(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             continue
-    reviewed = {
-        j.get("parent_job") for j in jobs
-        if j.get("kind") == "audit" and j.get("status") in _REUSABLE_AUDIT_STATUSES
-    }
+    attempts: dict = {}
+    for job in sorted(jobs, key=lambda j: (j.get("created", ""), j.get("id", "")), reverse=True):
+        if job.get("kind") == "audit":
+            attempts.setdefault(job.get("parent_job"), []).append(job)
+    reviewed = {parent for parent, audits in attempts.items() if _reusable_audit(audits) is not None}
     failed_audits = {}
     for job in sorted(jobs, key=lambda j: (j.get("created", ""), j.get("id", ""))):
         if job.get("kind") == "audit" and job.get("status") == "failed":

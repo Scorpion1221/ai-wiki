@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..runtime import audit, curate
+from ..runtime.failure import classify, failure
 from . import ingest as I
 
 _q: queue.Queue = queue.Queue()
@@ -257,6 +258,17 @@ def _reconcile_running(bundle: Path, job: dict) -> str:
     return "interrupted transaction rolled back to base revision"
 
 
+def _classify_failed(job_path: Path) -> None:
+    """Give every terminal failed job a structured ``failure`` record (early-return paths)."""
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(job, dict) and job.get("status") == "failed" and not isinstance(job.get("failure"), dict):
+        job["failure"] = classify(job)
+        _save_job(job_path, job)
+
+
 def submit(bundle: Path, source_rel: str, job_path: Path) -> None:
     _q.put(("ingest", bundle, source_rel, job_path))
 
@@ -270,10 +282,13 @@ def _run() -> None:
         kind, bundle, subject, job_path = _q.get()
         try:
             with serialized_mutation():
-                if kind == "audit":
-                    audit.run(bundle, subject, job_path)
-                else:
-                    curate.run(bundle, subject, job_path)
+                try:
+                    if kind == "audit":
+                        audit.run(bundle, subject, job_path)
+                    else:
+                        curate.run(bundle, subject, job_path)
+                finally:
+                    _classify_failed(job_path)
         except Exception:  # noqa: BLE001 — runtimes record their own failures; never kill the worker
             pass
         finally:
@@ -371,6 +386,12 @@ def recover(bundles: list[Path]) -> bool:
                 if job.get("status") != "done":
                     job["status"] = "failed"
                     job["error"] = f"interrupted by service restart: {outcome}"
+                    # Only a confirmed rollback makes a fresh attempt safe.
+                    rolled_back = job.get("phase") == "rolled_back"
+                    job["failure"] = failure(
+                        "interrupted" if rolled_back else "internal", stage="startup",
+                        detail=job["error"], retryable=None if rolled_back else False,
+                    )
                 job["finished"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 _save_job(jf, job)
                 curate._cleanup_recovery_source(b, job)

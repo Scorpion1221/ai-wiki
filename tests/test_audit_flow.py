@@ -14,21 +14,29 @@ from aiwiki.runtime import audit, curate
 from aiwiki.service import ingest as I
 
 
-def test_audit_prompt_matches_generation_and_verification_policy() -> None:
-    assert "Trusted timestamp for NEW generated/verified events: {now}" in audit.AUDIT_PROMPT
-    assert "Preserve historical events" in audit.AUDIT_PROMPT
-    assert "change only `status` and `verified`" in audit.AUDIT_PROMPT
-    assert "change ANY frontmatter or body content" in audit.AUDIT_PROMPT
-    assert "refresh `generated`" in audit.AUDIT_PROMPT
-    assert "Source provenance is FROZEN" in audit.AUDIT_PROMPT
-    assert "Never leave a scoped concept as `draft`" in audit.AUDIT_PROMPT
-    assert "completed but unverified knowledge record" in audit.AUDIT_PROMPT
-    assert "Do not batch-insert a fixed indentation across files" in audit.AUDIT_PROMPT
-    assert "read-only YAML syntax check" in audit.AUDIT_PROMPT
-    assert "for EVERY scoped concept" in audit.AUDIT_PROMPT
+def test_audit_prompt_leaves_bookkeeping_to_the_service() -> None:
+    prompt = audit.AUDIT_PROMPT.format(parent_job="p", source="sources/s.md.source", concepts="- a.md")
+    assert "never edit `verified`, `generated`, `status`, or `sources`" in prompt
+    assert "Never move text between the body and the frontmatter" in prompt
+    assert "leave its file byte-for-byte unchanged" in prompt
+    assert '{"verified": ["<path>"], "unverified": ["<path>"], "corrected": ["<path>"]}' in prompt
+    assert "missing or malformed verdict leaves every scoped concept unverified" in prompt
+    # No timestamp for the reviewer to copy: time is stamped by the service.
+    assert "{now}" not in audit.AUDIT_PROMPT and "Trusted timestamp" not in prompt
+
 
 AUTH = {"Authorization": "Bearer testtok"}
 AUDIT_NOW = "2026-08-13T01:00:00Z"
+
+
+def _verdict(verified=(), unverified=(), corrected=()) -> str:
+    """A reviewer's final message ending with the machine-readable verdict."""
+    data = {"verified": list(verified), "unverified": list(unverified), "corrected": list(corrected)}
+    return "Reviewed every scoped concept.\n\n```json\n" + json.dumps(data) + "\n```\n"
+
+
+def _frontmatter(path: Path) -> dict:
+    return audit.parse_doc(path)[0]
 
 
 def _concept(*, verified: bool = False) -> str:
@@ -214,11 +222,7 @@ def test_audit_with_no_changed_concepts_is_immediate_idempotent_pass(tmp_path: P
     assert second["id"] == first["id"] and second["deduplicated"] is True
 
 
-def test_audit_endpoint_fails_closed_during_bundle_mutation(tmp_path: Path, monkeypatch) -> None:
-    bundle = _bundle(tmp_path)
-    client, submitted = _client(bundle, monkeypatch)
-    from aiwiki.service import app as appmod
-
+def _post_audit_while_mutating(client, appmod, params=None):
     entered = threading.Event()
     release = threading.Event()
 
@@ -232,18 +236,85 @@ def test_audit_endpoint_fails_closed_during_bundle_mutation(tmp_path: Path, monk
     assert entered.wait(5)
     try:
         response = client.post("/jobs/ingest1/audit", headers=AUTH)
+        status = client.get(f"/jobs/{response.json().get('id', 'ingest1')}", headers=AUTH)
     finally:
         release.set()
         thread.join(timeout=5)
+    return response, status
 
-    assert response.status_code == 503
+
+def _audit_jobs(bundle: Path) -> list[dict]:
+    return [
+        job for job in (json.loads(path.read_text(encoding="utf-8"))
+                        for path in (bundle / ".okf" / "jobs").glob("*.json"))
+        if job.get("kind") == "audit"
+    ]
+
+
+def test_audit_endpoint_enqueues_during_bundle_mutation(tmp_path: Path, monkeypatch) -> None:
+    """A long agent pass must not turn POST /audit or a status read into a 503 (CUR-07)."""
+    bundle = _bundle(tmp_path)
+    client, submitted = _client(bundle, monkeypatch)
+    from aiwiki.service import app as appmod
+
+    response, status = _post_audit_while_mutating(client, appmod)
+
+    assert response.status_code == 200
+    job = response.json()
+    assert job["status"] == "queued" and job["deduplicated"] is False
+    assert job["concept_files"] == ["features/release.md"]
+    assert status.status_code == 200 and status.json()["id"] == job["id"]
+    assert len(submitted) == 1
+    assert [audit_job["id"] for audit_job in _audit_jobs(bundle)] == [job["id"]]
+    # The queued attempt is idempotent like any other.
+    again = client.post("/jobs/ingest1/audit", headers=AUTH).json()
+    assert again["id"] == job["id"] and again["deduplicated"] is True
+
+
+def test_audit_endpoint_during_mutation_keeps_no_concept_and_legacy_gates(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    bundle = _bundle(tmp_path)
+    parent = I.read_job(bundle, "ingest1")
+    parent.pop("concept_files")
+    I.save_job(bundle, parent)
+    client, submitted = _client(bundle, monkeypatch)
+    from aiwiki.service import app as appmod
+
+    # An unscoped legacy receipt needs the live tree to resolve scope: nothing is created.
+    response, _status = _post_audit_while_mutating(client, appmod)
+    assert response.status_code == 409 and "in progress" in response.json()["detail"]
+    assert submitted == [] and _audit_jobs(bundle) == []
+
+    # A receipt that declares no concepts is a tree-independent no-op pass.
+    parent["concept_files"] = []
+    I.save_job(bundle, parent)
+    response, _status = _post_audit_while_mutating(client, appmod)
+    assert response.status_code == 200
+    assert response.json()["status"] == "done" and response.json()["reason"] == "no_concepts_to_audit"
     assert submitted == []
-    jobs = []
-    for path in (bundle / ".okf" / "jobs").glob("*.json"):
-        job = json.loads(path.read_text(encoding="utf-8"))
-        if job.get("kind") == "audit":
-            jobs.append(job)
-    assert jobs == []
+
+
+def test_queued_audit_rechecks_declared_scope_on_the_live_tree(tmp_path: Path, monkeypatch) -> None:
+    bundle = _bundle(tmp_path)
+    (bundle / "features" / "other.md").write_text(_concept(), encoding="utf-8")
+    parent = I.read_job(bundle, "ingest1")
+    parent["concept_files"] = ["features/other.md", "features/release.md"]
+    I.save_job(bundle, parent)
+    job = I.new_audit_job(bundle, "ingest1", parent["concept_files"])
+    (bundle / "features" / "other.md").unlink()  # a later pass removed a declared concept
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a scope mismatch must fail before the reviewer runs")
+
+    monkeypatch.setattr(curate, "_agent_process", unexpected)
+    audit.run(bundle, "ingest1", I.job_path(bundle, job["id"]))
+
+    result = I.read_job(bundle, job["id"])
+    assert result["status"] == "failed"
+    assert result["error"] == "ingest audit scope is missing or invalid"
+    assert result["failure"]["class"] == "input" and result["failure"]["retryable"] is False
 
 
 def test_audit_endpoint_rejects_missing_declared_concept_scope(tmp_path: Path, monkeypatch) -> None:
@@ -272,10 +343,9 @@ def _run_runtime(tmp_path: Path, monkeypatch, *, verify: bool, validate_errors=N
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: validate_errors or [])
 
     def fake_agent(*args, **kwargs):
-        assert AUDIT_NOW in args[0][-1]
-        if verify:
-            (bundle / "features" / "release.md").write_text(_concept(verified=True), encoding="utf-8")
-        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+        rel = "features/release.md"
+        message = _verdict(verified=[rel]) if verify else _verdict(unverified=[rel])
+        return subprocess.CompletedProcess(args[0], 0, stdout=message, stderr="")
 
     monkeypatch.setattr(curate, "_agent_process", fake_agent)
     audit.run(bundle, "ingest1", path)
@@ -295,6 +365,10 @@ def test_runtime_passed_when_all_scoped_concepts_are_machine_verified(tmp_path: 
     assert job["parent_job"] == "ingest1" and job["commit"] is None
     assert job["closeout"]["log"] == "log.md"
     assert "index.md" in job["closeout"]["indexes"]
+    assert job["verdict"]["status"] == "valid"
+    frontmatter = _frontmatter(tmp_path / "kb" / "features" / "release.md")
+    assert frontmatter["status"] == "stable"
+    assert frontmatter["verified"] == [{"by": audit.AUDITOR, "at": audit._instant(AUDIT_NOW)}]
 
 
 @pytest.mark.parametrize("verify", [True, False], ids=["passed", "needs_attention"])
@@ -318,9 +392,9 @@ def test_durable_audit_receipt_survives_stale_missing_and_busy_reads(
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
 
     def fake_agent(command, **kwargs):
-        if verify:
-            (bundle / "features/release.md").write_text(_concept(verified=True), encoding="utf-8")
-        return subprocess.CompletedProcess(command, 0, stdout="reviewed", stderr="")
+        rel = "features/release.md"
+        message = _verdict(verified=[rel]) if verify else _verdict(unverified=[rel])
+        return subprocess.CompletedProcess(command, 0, stdout=message, stderr="")
 
     monkeypatch.setattr(curate, "_agent_process", fake_agent)
     audit.run(bundle, "ingest1", I.job_path(bundle, job["id"]))
@@ -611,30 +685,25 @@ def test_runtime_validation_failure_is_technical_failure(tmp_path: Path, monkeyp
 
 
 @pytest.mark.parametrize("git_enabled", [False, True])
-def test_audit_mixed_verification_indentation_reports_path_and_rolls_back(
+def test_audit_normalizes_reviewer_mixed_verification_indentation(
     tmp_path: Path, monkeypatch, git_enabled: bool,
 ) -> None:
+    """9de6461bab99: an indentless event appended to an indented list broke the YAML."""
     bundle = _git_bundle(tmp_path) if git_enabled else _bundle(tmp_path)
     concept = bundle / "features/release.md"
-    # Both indentation styles are legal on their own; this production failure
-    # appended an indentless event to an existing indented verification list.
+    historical = f"  - {{by: {audit.AUDITOR}, at: '2026-08-12T01:00:00Z'}}"
     original = concept.read_text(encoding="utf-8").replace(
-        "\n---\n# Summary",
-        "\nverified:\n  - {by: process:ai-wiki-adversarial-audit, at: '2026-08-12T01:00:00Z'}"
-        "\n---\n# Summary",
+        "\n---\n# Summary", f"\nverified:\n{historical}\n---\n# Summary",
     )
     concept.write_text(original, encoding="utf-8")
     if git_enabled:
         curate._git(bundle, "add", ".")
         curate._git(bundle, "commit", "-m", "retain indented verification history")
-    base_revision = curate._git(bundle, "rev-parse", "HEAD").stdout.strip() if git_enabled else None
     job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
     path = I.job_path(bundle, job["id"])
     monkeypatch.setenv("AIWIKI_GIT", "on" if git_enabled else "off")
     monkeypatch.setattr(curate, "_now", lambda: AUDIT_NOW)
-    closeout = []
-    monkeypatch.setattr(audit, "_repair_audit_output", lambda *args: closeout.append("repair"))
-    monkeypatch.setattr(audit, "validate_bundle", lambda *args: closeout.append("validate"))
+    monkeypatch.setattr(audit, "validate_bundle", lambda *args: [])
 
     def malformed_review(*args, **kwargs):
         malformed = original.replace("status: draft", "status: stable").replace(
@@ -642,7 +711,48 @@ def test_audit_mixed_verification_indentation_reports_path_and_rolls_back(
             f"\n- {{by: {audit.AUDITOR}, at: '{AUDIT_NOW}'}}\n---\n# Summary",
         )
         concept.write_text(malformed, encoding="utf-8")
-        return subprocess.CompletedProcess(args[0], 0, stdout="verified", stderr="")
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout=_verdict(verified=["features/release.md"]), stderr="",
+        )
+
+    monkeypatch.setattr(curate, "_agent_process", malformed_review)
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    assert result["validation"] == {"status": "passed", "error_count": 0}
+    assert result["deterministic_repairs"] == {
+        "features/release.md": ["restored service-owned verification history"],
+    }
+    # Only the service's event is appended, in the list's own indentation and quoting.
+    assert concept.read_text(encoding="utf-8") == original.replace("status: draft", "status: stable").replace(
+        historical, f"{historical}\n  - {{by: {audit.AUDITOR}, at: '{AUDIT_NOW}'}}",
+    )
+    if git_enabled:
+        assert result["git"]["committed"] is True
+        assert curate._git(bundle, "status", "--porcelain").stdout == ""
+
+
+@pytest.mark.parametrize("git_enabled", [False, True])
+def test_audit_invalid_yaml_outside_bookkeeping_reports_path_and_rolls_back(
+    tmp_path: Path, monkeypatch, git_enabled: bool,
+) -> None:
+    bundle = _git_bundle(tmp_path) if git_enabled else _bundle(tmp_path)
+    concept = bundle / "features/release.md"
+    original = concept.read_text(encoding="utf-8")
+    base_revision = curate._git(bundle, "rev-parse", "HEAD").stdout.strip() if git_enabled else None
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "on" if git_enabled else "off")
+    monkeypatch.setattr(curate, "_now", lambda: AUDIT_NOW)
+    closeout = []
+    monkeypatch.setattr(audit, "validate_bundle", lambda *args: closeout.append("validate"))
+
+    def malformed_review(*args, **kwargs):
+        concept.write_text(original.replace("- demo", "- demo\n- [broken"), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout=_verdict(verified=["features/release.md"]), stderr="",
+        )
 
     monkeypatch.setattr(curate, "_agent_process", malformed_review)
     audit.run(bundle, "ingest1", path)
@@ -651,9 +761,7 @@ def test_audit_mixed_verification_indentation_reports_path_and_rolls_back(
     assert result["status"] == "failed" and result["phase"] == "rolled_back"
     assert result["validation"]["status"] == "failed"
     assert result["validation"]["error_count"] == 1
-    error = result["validation"]["errors"][0]
-    assert error.startswith("features/release.md: invalid YAML frontmatter:")
-    assert "expected <block end>, but found '-'" in error
+    assert result["validation"]["errors"][0].startswith("features/release.md: invalid YAML frontmatter:")
     assert result["audit"]["verified_concepts"] == []
     assert not result.get("git", {}).get("committed")
     assert concept.read_text(encoding="utf-8") == original
@@ -664,7 +772,7 @@ def test_audit_mixed_verification_indentation_reports_path_and_rolls_back(
 
 
 @pytest.mark.parametrize("indent", ["", "  "])
-def test_audit_accepts_consistent_verification_indentation(tmp_path: Path, monkeypatch, indent: str) -> None:
+def test_audit_appends_service_event_in_existing_list_style(tmp_path: Path, monkeypatch, indent: str) -> None:
     bundle = _bundle(tmp_path)
     (bundle / "index.md").write_text('---\nokf_version: "0.2"\n---\n', encoding="utf-8")
     concept = bundle / "features/release.md"
@@ -677,23 +785,20 @@ def test_audit_accepts_consistent_verification_indentation(tmp_path: Path, monke
     path = I.job_path(bundle, job["id"])
     monkeypatch.setenv("AIWIKI_GIT", "off")
     monkeypatch.setattr(curate, "_now", lambda: AUDIT_NOW)
-
-    def valid_review(*args, **kwargs):
-        concept.write_text(
-            original.replace("status: draft", "status: stable").replace(
-                "\n---\n# Summary",
-                f"\n{indent}- {{by: {audit.AUDITOR}, at: '{AUDIT_NOW}'}}\n---\n# Summary",
-            ),
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="verified", stderr="")
-
-    monkeypatch.setattr(curate, "_agent_process", valid_review)
+    monkeypatch.setattr(
+        curate, "_agent_process",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=_verdict(verified=["features/release.md"]), stderr="",
+        ),
+    )
     audit.run(bundle, "ingest1", path)
     result = json.loads(path.read_text(encoding="utf-8"))
     assert result["status"] == "done" and result["audit"]["status"] == "passed"
     assert result["validation"]["status"] == "passed"
-    assert historical in concept.read_text(encoding="utf-8")
+    assert "deterministic_repairs" not in result
+    assert f"{historical}\n{indent}- {{by: {audit.AUDITOR}, at: '{AUDIT_NOW}'}}\n---" in (
+        concept.read_text(encoding="utf-8")
+    )
 
 
 def test_audit_preflight_rejects_bundle_symlink_without_starting_agent(
@@ -753,55 +858,220 @@ def test_no_git_audit_rejects_successful_agent_out_of_scope_edit(tmp_path: Path,
     assert purpose.read_text(encoding="utf-8") == "original"
 
 
-def test_audit_rejects_substantive_correction_without_generated_refresh(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    bundle = _bundle(tmp_path)
-    concept = bundle / "features" / "release.md"
-    original = concept.read_text(encoding="utf-8")
+def _review(bundle: Path, monkeypatch, edit, message: str, clock: dict | None = None) -> dict:
+    """Run one no-Git audit whose reviewer applies ``edit`` to the scoped concept."""
     job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
     path = I.job_path(bundle, job["id"])
     monkeypatch.setenv("AIWIKI_GIT", "off")
-
-    def stale_generation(*args, **kwargs):
-        concept.write_text(original.replace("The feature was merged.", "The feature may be merged."), encoding="utf-8")
-        return subprocess.CompletedProcess(args[0], 0, stdout="corrected", stderr="")
-
-    monkeypatch.setattr(curate, "_agent_process", stale_generation)
+    clock = clock if clock is not None else {"now": AUDIT_NOW}
+    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+
+    def reviewer(*args, **kwargs):
+        edit(bundle / "features" / "release.md")
+        clock["now"] = clock.get("finish", clock["now"])
+        return subprocess.CompletedProcess(args[0], 0, stdout=message, stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", reviewer)
     audit.run(bundle, "ingest1", path)
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert any("must set generated.by" in error for error in result["validation"]["errors"])
-    assert concept.read_text(encoding="utf-8") == original
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_audit_rejects_forged_human_verification(tmp_path: Path, monkeypatch) -> None:
+def _rewrite(concept: Path, change) -> None:
+    text = concept.read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(text[4:text.find("\n---\n", 4)])
+    body = change(frontmatter)
+    concept.write_text(
+        "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n"
+        + (body if isinstance(body, str) else "# Summary\n\nThe feature was merged.\n"),
+        encoding="utf-8",
+    )
+
+
+def test_audit_stamps_generation_for_substantive_correction(tmp_path: Path, monkeypatch) -> None:
     bundle = _bundle(tmp_path)
     concept = bundle / "features" / "release.md"
-    original = concept.read_text(encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-
-    def forged_review(*args, **kwargs):
-        forged = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        forged["status"] = "stable"
-        forged["verified"] = [{"by": "human:owner", "at": "2026-08-13T01:00:00Z"}]
-        concept.write_text(
-            "---\n" + yaml.safe_dump(forged, sort_keys=False) + "---\n# Summary\n\nThe feature was merged.\n",
+    result = _review(
+        bundle, monkeypatch,
+        lambda path: path.write_text(
+            path.read_text(encoding="utf-8").replace("The feature was merged.", "The feature may be merged."),
             encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
+        ),
+        _verdict(verified=["features/release.md"], corrected=["features/release.md"]),
+    )
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    assert result["audit"]["corrected_concepts"] == ["features/release.md"]
+    text = concept.read_text(encoding="utf-8")
+    # generated keeps its quoted block style; the new verified list uses flow style.
+    assert f"generated:\n  by: {audit.AUDITOR}\n  at: '{AUDIT_NOW}'\n" in text
+    assert f"verified:\n  - {{by: {audit.AUDITOR}, at: {AUDIT_NOW}}}\n" in text
+    assert "may be merged" in text
 
-    monkeypatch.setattr(curate, "_agent_process", forged_review)
+
+def test_audit_missing_verdict_is_needs_attention_not_a_failed_job(tmp_path: Path, monkeypatch) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    result = _review(
+        bundle, monkeypatch,
+        lambda path: path.write_text(
+            path.read_text(encoding="utf-8").replace("The feature was merged.", "The feature may be merged."),
+            encoding="utf-8",
+        ),
+        "All five scoped concepts are verified.",  # prose only: no machine-readable verdict
+    )
+    assert result["status"] == "done"
+    assert result["validation"]["status"] == "passed"
+    assert result["verdict"]["status"] == "missing"
+    assert result["audit"] == {
+        "status": "needs_attention",
+        "verified_concepts": [],
+        "unverified_concepts": ["features/release.md"],
+        "corrected_concepts": ["features/release.md"],
+        "reason": "verdict_missing",
+    }
+    frontmatter = _frontmatter(concept)
+    assert frontmatter["status"] == "stable"
+    assert frontmatter["generated"]["by"] == audit.AUDITOR
+    assert "verified" not in frontmatter
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        '```json\n{"verified": "features/release.md"}\n```',
+        '```json\n{"verified": [1]}\n```',
+        "```json\n{not json}\n```",
+    ],
+)
+def test_audit_invalid_verdict_verifies_nothing(tmp_path: Path, monkeypatch, message: str) -> None:
+    result = _review(_bundle(tmp_path), monkeypatch, lambda path: None, message)
+    assert result["status"] == "done"
+    assert result["audit"]["status"] == "needs_attention"
+    assert result["verdict"]["status"] in {"invalid", "missing"}
+    assert result["audit"]["reason"] == "verdict_" + result["verdict"]["status"]
+    assert "verified" not in _frontmatter(tmp_path / "kb" / "features" / "release.md")
+
+
+def test_audit_endpoint_allows_one_reaudit_after_a_verdict_format_failure(tmp_path: Path, monkeypatch) -> None:
+    """A garbled verdict judged no evidence, so it must not be the parent's final audit."""
+    bundle = _bundle(tmp_path)
+    client, submitted = _client(bundle, monkeypatch)
+
+    def finish(bundle: Path, job_id: str, reason: str | None) -> None:
+        job = I.read_job(bundle, job_id)
+        job.update({"status": "done", "validation": {"status": "passed", "error_count": 0}})
+        job["audit"] = {"status": "needs_attention", "verified_concepts": [],
+                        "unverified_concepts": ["features/release.md"], "corrected_concepts": []}
+        if reason:
+            job["audit"]["reason"] = reason
+        I.save_job(bundle, job)
+
+    first = client.post("/jobs/ingest1/audit", headers=AUTH).json()
+    finish(bundle, first["id"], "verdict_missing")
+    retry = client.post("/jobs/ingest1/audit", headers=AUTH).json()
+    assert retry["id"] != first["id"] and retry["deduplicated"] is False and len(submitted) == 2
+    finish(bundle, retry["id"], "verdict_invalid")
+    # The bound is reached: the newest garbled attempt is now the idempotent result.
+    final = client.post("/jobs/ingest1/audit", headers=AUTH).json()
+    assert final["id"] == retry["id"] and final["deduplicated"] is True and len(submitted) == 2
+
+    # A judged needs_attention (valid verdict) is final at once.
+    judged = _bundle(tmp_path / "judged")
+    client, submitted = _client(judged, monkeypatch)
+    first = client.post("/jobs/ingest1/audit", headers=AUTH).json()
+    finish(judged, first["id"], None)
+    again = client.post("/jobs/ingest1/audit", headers=AUTH).json()
+    assert again["id"] == first["id"] and again["deduplicated"] is True and len(submitted) == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # An earlier non-JSON fence must not shift which fence holds the verdict.
+        "Report\n```yaml\nstatus: stable\n```\nVerdict:\n```json\n"
+        '{"notes": "ok", "verified": ["features/release.md"], "unverified": [], "corrected": []}\n```\n',
+        # JSON-looking prose after the fenced verdict does not override it.
+        _verdict(verified=["features/release.md"])
+        + 'Note: the source config sets `{"verified": false}` for the flag.\n',
+        # A null list is an empty list.
+        '{"verified": ["features/release.md"], "unverified": null, "corrected": []}',
+        # A bare file name that names exactly one scoped concept.
+        '```json\n{"verified": ["release.md"]}\n```',
+        # An unusable later candidate is skipped, not fatal.
+        _verdict(verified=["features/release.md"]) + '```json\n{"verified": "features/release.md"}\n```\n',
+    ],
+)
+def test_verdict_parser_tolerates_surrounding_text(message: str) -> None:
+    assert audit._parse_verdict(message, ["features/release.md", "features/other.md"]) == {
+        "status": "valid",
+        "verified": ["features/release.md"],
+        "unverified": ["features/other.md"],
+        "corrected": [],
+    }
+
+
+def test_audit_reads_the_verdict_from_the_last_message_file(tmp_path: Path, monkeypatch) -> None:
+    """Production reads codex --output-last-message; stdout is only a fallback."""
+    bundle = _bundle(tmp_path)
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+    monkeypatch.setenv("AIWIKI_GIT", "off")
+    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
     monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+
+    def reviewer(command, **kwargs):
+        output = Path(command[command.index("--output-last-message") + 1])
+        output.write_text(_verdict(verified=["features/release.md"]), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout=_verdict(unverified=["features/release.md"]),
+                                           stderr="")
+
+    monkeypatch.setattr(curate, "_agent_process", reviewer)
     audit.run(bundle, "ingest1", path)
     result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert any("unauthorized verifier 'human:owner'" in error for error in result["validation"]["errors"])
-    assert "deterministic_repairs" not in result
-    assert concept.read_text(encoding="utf-8") == original
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    assert result["verdict"]["verified"] == ["features/release.md"]
+
+
+def test_audit_verdict_maps_workspace_paths_and_prefers_unverified(tmp_path: Path, monkeypatch) -> None:
+    bundle = _bundle(tmp_path)
+    absolute = "/home/admin/solvely-wiki/features/release.md"  # as written in 71ea85ca9c20's summary
+    result = _review(
+        bundle, monkeypatch, lambda path: None,
+        "Report.\n```json\n" + json.dumps({"verified": [absolute, "features/other.md"]}) + "\n```\n"
+        + "Afterthought, still final:\n```\n" + json.dumps({"verified": [absolute], "unverified": []}) + "\n```",
+    )
+    assert result["audit"]["status"] == "passed"
+    assert result["verdict"] == {
+        "status": "valid",
+        "verified": ["features/release.md"],
+        "unverified": [],
+        "corrected": [],
+    }
+    both = _review(
+        _bundle(tmp_path / "second"), monkeypatch, lambda path: None,
+        _verdict(verified=["features/release.md"], unverified=["./features/release.md"]),
+    )
+    assert both["audit"]["status"] == "needs_attention"
+    assert "verified" not in _frontmatter(tmp_path / "second" / "kb" / "features" / "release.md")
+
+
+def test_audit_discards_forged_human_verification(tmp_path: Path, monkeypatch) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    original = concept.read_text(encoding="utf-8")
+
+    def forge(path: Path) -> None:
+        def change(frontmatter: dict) -> None:
+            frontmatter["status"] = "stable"
+            frontmatter["verified"] = [{"by": "human:owner", "at": "2026-08-13T01:00:00Z"}]
+        _rewrite(path, change)
+
+    result = _review(bundle, monkeypatch, forge, "forged")
+    assert result["status"] == "done" and result["audit"]["status"] == "needs_attention"
+    assert result["deterministic_repairs"] == {
+        "features/release.md": ["restored service-owned verification history"],
+    }
+    assert concept.read_text(encoding="utf-8") == original.replace("status: draft", "status: stable")
 
 
 def test_audit_keeps_unverified_stable_as_completed_needs_attention(
@@ -841,62 +1111,39 @@ def test_audit_promotes_leftover_draft_to_stable_without_faking_verification(
 ) -> None:
     bundle = _bundle(tmp_path)
     concept = bundle / "features" / "release.md"
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    monkeypatch.setattr(
-        curate,
-        "_agent_process",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0, stdout="bounded but unverified", stderr="",
-        ),
-    )
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    frontmatter = yaml.safe_load(concept.read_text(encoding="utf-8").split("---", 2)[1])
+    result = _review(bundle, monkeypatch, lambda path: None, _verdict(unverified=["features/release.md"]))
+    frontmatter = _frontmatter(concept)
     assert result["status"] == "done"
     assert result["audit"]["status"] == "needs_attention"
-    assert result["deterministic_repairs"] == {
-        "features/release.md": [
-            "promoted completed audit draft to stable without adding verification"
-        ]
-    }
+    assert "deterministic_repairs" not in result  # status is service-owned, not a repair
     assert frontmatter["status"] == "stable"
     assert "verified" not in frontmatter
+
+
+def test_audit_keeps_deprecated_concepts_deprecated(tmp_path: Path, monkeypatch) -> None:
+    bundle = _bundle(tmp_path)
+    concept = bundle / "features" / "release.md"
+    concept.write_text(
+        concept.read_text(encoding="utf-8").replace("status: draft", "status: deprecated"), encoding="utf-8",
+    )
+    result = _review(bundle, monkeypatch, lambda path: None, _verdict(verified=["features/release.md"]))
+    assert result["audit"]["status"] == "passed"
+    assert _frontmatter(concept)["status"] == "deprecated"
 
 
 def test_audit_restores_generation_when_only_provenance_edit_survived(
     tmp_path: Path, monkeypatch,
 ) -> None:
     bundle = _bundle(tmp_path)
-    concept = bundle / "features" / "release.md"
-    original = concept.read_text(encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
 
-    def provenance_only(*args, **kwargs):
-        frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        frontmatter["status"] = "stable"
-        frontmatter["generated"] = {"by": audit.AUDITOR, "at": AUDIT_NOW}
-        frontmatter["verified"] = [{"by": audit.AUDITOR, "at": AUDIT_NOW}]
-        frontmatter["sources"][0]["author"] = "process:guessed"
-        concept.write_text(
-            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="verified", stderr="")
+    def provenance_only(path: Path) -> None:
+        def change(frontmatter: dict) -> None:
+            frontmatter["status"] = "stable"
+            frontmatter["generated"] = {"by": audit.AUDITOR, "at": AUDIT_NOW}
+            frontmatter["sources"][0]["author"] = "process:guessed"
+        _rewrite(path, change)
 
-    monkeypatch.setattr(curate, "_agent_process", provenance_only)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
+    result = _review(bundle, monkeypatch, provenance_only, _verdict(verified=["features/release.md"]))
     assert result["status"] == "done"
     assert result["audit"]["status"] == "passed"
     assert result["deterministic_repairs"] == {
@@ -907,469 +1154,257 @@ def test_audit_restores_generation_when_only_provenance_edit_survived(
     }
 
 
-def test_audit_rejects_future_generation_and_verification_and_rolls_back(
-    tmp_path: Path, monkeypatch,
-) -> None:
+def test_audit_replaces_future_bookkeeping_with_trusted_time(tmp_path: Path, monkeypatch) -> None:
     bundle = _bundle(tmp_path)
     concept = bundle / "features" / "release.md"
-    original = concept.read_text(encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
 
-    def future_review(*args, **kwargs):
-        assert AUDIT_NOW in args[0][-1]
-        forged = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        forged["description"] = "A materially corrected claim"
-        forged["status"] = "stable"
-        forged["generated"] = {"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}
-        forged["verified"] = [{"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}]
-        concept.write_text(
-            "---\n" + yaml.safe_dump(forged, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
+    def future_review(path: Path) -> None:
+        def change(frontmatter: dict) -> None:
+            frontmatter["description"] = "A materially corrected claim"
+            frontmatter["status"] = "stable"
+            frontmatter["generated"] = {"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}
+            frontmatter["verified"] = [{"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}]
+        _rewrite(path, change)
 
-    monkeypatch.setattr(curate, "_agent_process", future_review)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert any("generated.at must not be in the future" in error for error in result["validation"]["errors"])
-    assert any("verification timestamp must not be in the future" in error for error in result["validation"]["errors"])
-    assert concept.read_text(encoding="utf-8") == original
+    result = _review(bundle, monkeypatch, future_review, _verdict(verified=["features/release.md"]))
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    frontmatter = _frontmatter(concept)
+    stamp = audit._instant(AUDIT_NOW)
+    assert frontmatter["description"] == "A materially corrected claim"
+    assert frontmatter["generated"]["by"] == audit.AUDITOR
+    assert audit._instant(frontmatter["generated"]["at"]) == stamp
+    assert frontmatter["verified"] == [{"by": audit.AUDITOR, "at": stamp}]
 
 
-def test_audit_restamps_only_new_stale_auditor_verification(
+def test_audit_stamps_verification_with_trusted_finish_not_reviewer_time(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    """920d5b3 restamped only a single stale event; the service now writes the event."""
     bundle = _bundle(tmp_path)
     concept = bundle / "features" / "release.md"
-    original_fm = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
-    original_fm["verified"] = [{"by": "human:owner", "at": "2026-08-13T00:30:00Z"}]
-    original = (
-        "---\n" + yaml.safe_dump(original_fm, sort_keys=False)
-        + "---\n# Summary\n\nThe feature was merged.\n"
-    )
-    concept.write_text(original, encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    clock = {"now": AUDIT_NOW}
-    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
+    human = {"by": "human:owner", "at": "2026-08-13T00:30:00Z"}
+    _rewrite(concept, lambda frontmatter: frontmatter.update(verified=[human]))
 
-    def stale_review(*args, **kwargs):
-        reviewed = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        reviewed["status"] = "stable"
-        reviewed["verified"].append(
-            {"by": audit.AUDITOR, "at": "2026-08-13T00:50:00Z"}
-        )
-        concept.write_text(
-            "---\n" + yaml.safe_dump(reviewed, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        clock["now"] = "2026-08-13T01:10:00Z"
-        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+    def stale_review(path: Path) -> None:
+        def change(frontmatter: dict) -> None:
+            frontmatter["status"] = "stable"
+            frontmatter["verified"].extend([
+                {"by": audit.AUDITOR, "at": "2026-08-13T00:50:00Z"},
+                {"by": audit.AUDITOR, "at": "2026-08-13T00:51:00Z"},
+            ])
+        _rewrite(path, change)
 
-    monkeypatch.setattr(curate, "_agent_process", stale_review)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "done"
-    assert result["audit"]["status"] == "passed"
+    clock = {"now": AUDIT_NOW, "finish": "2026-08-13T01:10:00Z"}
+    result = _review(bundle, monkeypatch, stale_review, _verdict(verified=["features/release.md"]), clock)
+    assert result["status"] == "done" and result["audit"]["status"] == "passed"
     assert result["deterministic_repairs"] == {
-        "features/release.md": [
-            "restamped new auditor verification to trusted audit time"
-        ]
+        "features/release.md": ["restored service-owned verification history"],
     }
-    reviewed = yaml.safe_load(concept.read_text(encoding="utf-8").split("---", 2)[1])
-    assert reviewed["verified"][0] == original_fm["verified"][0]
-    assert reviewed["verified"][1]["by"] == audit.AUDITOR
-    assert audit._instant(reviewed["verified"][1]["at"]) == audit._instant(clock["now"])
+    verified = _frontmatter(concept)["verified"]
+    assert [event["by"] for event in verified] == ["human:owner", audit.AUDITOR]
+    assert audit._instant(verified[0]["at"]) == audit._instant(human["at"])
+    assert audit._instant(verified[1]["at"]) == audit._instant("2026-08-13T01:10:00Z")
 
 
+LIVE = Path(__file__).parent / "fixtures" / "live_bundle"
+ORPHAN_REL = "experiments/web-landing-page-aio-ab.md"
 ORPHAN_AT = "2026-09-19T20:56:59Z"
 ORPHAN_LINE = f"  - {{by: {audit.AUDITOR}, at: {ORPHAN_AT}}}"
-ORPHAN_AUDIT_START = "2026-09-24T00:10:00Z"
-ORPHAN_AUDIT_FINISH = "2026-09-24T00:20:00Z"
+HISTORY_TAIL = f"  - {{by: {audit.AUDITOR}, at: 2026-09-17T21:18:46Z}}"
+ORPHAN_AUDIT_START = "2026-09-23T15:52:00Z"
+ORPHAN_AUDIT_FINISH = "2026-09-23T15:55:15Z"
 
 
-def _orphan_concept() -> str:
-    frontmatter = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
-    frontmatter["generated"] = {"by": "process:ai-wiki-curator", "at": "2026-09-23T12:00:00Z"}
-    frontmatter["verified"] = [
-        {"by": audit.AUDITOR, "at": "2026-09-14T11:00:00Z"},
-        {"by": audit.AUDITOR, "at": "2026-09-17T12:00:00Z"},
-    ]
-    text = (
-        "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
-        + f"---\n{ORPHAN_LINE}\n# Summary\n\nThe feature was merged.\n"
-    )
-    # The production history uses unquoted timestamps; PyYAML loads these as
-    # aware datetimes, while the body orphan remains plain Markdown text.
-    return text.replace("at: '2026-09-14T11:00:00Z'", "at: 2026-09-14T11:00:00Z").replace(
-        "at: '2026-09-17T12:00:00Z'", "at: 2026-09-17T12:00:00Z"
-    )
-
-
-@pytest.mark.parametrize("new_at", ["2026-09-24T00:18:00Z", "2026-09-24T00:00:00Z"])
-@pytest.mark.parametrize("quote_history", [False, True])
-def test_audit_discards_lifted_body_orphan_before_validating_current_event(
-    tmp_path: Path, monkeypatch, new_at: str, quote_history: bool,
-) -> None:
-    bundle = _bundle(tmp_path)
-    concept = bundle / "features/release.md"
-    original = _orphan_concept()
-    concept.write_text(original, encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    clock = {"now": ORPHAN_AUDIT_START}
-    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-
-    def reviewed(*args, **kwargs):
-        frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        frontmatter["status"] = "stable"
-        frontmatter["generated"] = {"by": audit.AUDITOR, "at": ORPHAN_AUDIT_START}
-        if quote_history:
-            for event in frontmatter["verified"]:
-                event["at"] = event["at"].isoformat().replace("+00:00", "Z")
-        frontmatter["verified"].extend([
-            {"by": audit.AUDITOR, "at": ORPHAN_AT},
-            {"by": audit.AUDITOR, "at": new_at},
-        ])
-        concept.write_text(
-            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        clock["now"] = ORPHAN_AUDIT_FINISH
-        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
-
-    monkeypatch.setattr(curate, "_agent_process", reviewed)
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "done" and result["audit"]["status"] == "passed"
-    assert result["audit"]["corrected_concepts"] == ["features/release.md"]
-    expected_repairs = ["discarded body orphan auditor event from verification"]
-    if new_at == "2026-09-24T00:00:00Z":
-        expected_repairs.append("restamped new auditor verification to trusted audit time")
-    assert result["deterministic_repairs"] == {"features/release.md": expected_repairs}
-    frontmatter, body = audit.parse_doc(concept)
-    before_fm = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-    assert all(
-        audit._same_history_event(before, after)
-        for before, after in zip(before_fm["verified"], frontmatter["verified"][:2], strict=True)
-    )
-    assert len(frontmatter["verified"]) == 3
-    assert audit._instant(frontmatter["verified"][-1]["at"]) == audit._instant(
-        ORPHAN_AUDIT_FINISH if new_at == "2026-09-24T00:00:00Z" else new_at
-    )
-    assert ORPHAN_AT not in body
-    assert ORPHAN_AT not in str(frontmatter["verified"])
-    assert frontmatter["generated"] == {"by": audit.AUDITOR, "at": ORPHAN_AUDIT_START}
-
-
-@pytest.mark.parametrize(
-    "attack",
-    [
-        "nonprefix", "nonprefix_only_orphan", "body_retained", "other_verifier",
-        "invalid_timestamp", "naive_timestamp", "history_tamper", "multiple_new",
-        "only_orphan", "missing_generation",
-    ],
-)
-def test_audit_orphan_compatibility_fails_closed_and_rolls_back(
-    tmp_path: Path, monkeypatch, attack: str,
-) -> None:
-    bundle = _bundle(tmp_path)
-    concept = bundle / "features/release.md"
-    original = _orphan_concept()
-    if attack in {"nonprefix", "nonprefix_only_orphan"}:
-        original = original.replace(ORPHAN_LINE, f"# Context\n\n{ORPHAN_LINE}")
-    elif attack == "invalid_timestamp":
-        original = original.replace(ORPHAN_AT, "not-a-timestamp")
-    concept.write_text(original, encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    clock = {"now": ORPHAN_AUDIT_START}
-    monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-
-    def unsafe_review(*args, **kwargs):
-        frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        frontmatter["status"] = "stable"
-        if attack != "missing_generation":
-            frontmatter["generated"] = {"by": audit.AUDITOR, "at": ORPHAN_AUDIT_START}
-        if attack == "history_tamper":
-            frontmatter["verified"][0]["at"] = "2026-09-14T12:00:00Z"
-        orphan_at = "not-a-timestamp" if attack == "invalid_timestamp" else ORPHAN_AT
-        frontmatter["verified"].append({"by": audit.AUDITOR, "at": orphan_at})
-        if attack not in {"only_orphan", "nonprefix_only_orphan"}:
-            actor = "human:forged" if attack == "other_verifier" else audit.AUDITOR
-            current_at = "2026-09-24T00:18:00" if attack == "naive_timestamp" else "2026-09-24T00:18:00Z"
-            frontmatter["verified"].append({"by": actor, "at": current_at})
-        if attack == "multiple_new":
-            frontmatter["verified"].append({"by": audit.AUDITOR, "at": "2026-09-24T00:19:00Z"})
-        body = (
-            f"{ORPHAN_LINE}\n# Summary\n\nThe feature was merged.\n"
-            if attack == "body_retained" else "# Summary\n\nThe feature was merged.\n"
-        )
-        concept.write_text(
-            "---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n" + body,
-            encoding="utf-8",
-        )
-        clock["now"] = ORPHAN_AUDIT_FINISH
-        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
-
-    monkeypatch.setattr(curate, "_agent_process", unsafe_review)
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed" and result["phase"] == "rolled_back"
-    assert result["validation"]["status"] == "failed"
-    assert concept.read_text(encoding="utf-8") == original
-    assert not result.get("git", {}).get("committed")
-    if attack == "missing_generation":
-        assert any("substantive audit correction" in error for error in result["validation"]["errors"])
-    elif attack == "other_verifier":
-        assert any("unauthorized verifier" in error for error in result["validation"]["errors"])
-    elif attack == "history_tamper":
-        assert any("preserve existing verification" in error for error in result["validation"]["errors"])
-    elif attack == "invalid_timestamp":
-        assert any("valid timestamp" in error for error in result["validation"]["errors"])
-    else:
-        assert any(
-            "outside the trusted audit window" in error or "at most one new" in error
-            for error in result["validation"]["errors"]
-        )
-
-
-def test_audit_body_orphan_does_not_block_unrelated_stale_event_restamp(tmp_path: Path) -> None:
-    concept = tmp_path / "release.md"
-    original = _orphan_concept()
+def _orphan_bundle(tmp_path: Path) -> tuple[Path, str]:
+    """The pre-audit file of 71ea85ca9c20/e94c8b707aea (bundle 3b5731b, prose redacted)."""
+    bundle = tmp_path / "kb"
+    (bundle / ".okf" / "jobs").mkdir(parents=True)
+    (bundle / "index.md").write_text('---\nokf_version: "0.2"\n---\n# Bundle\n', encoding="utf-8")
+    original = (LIVE / ORPHAN_REL).read_text(encoding="utf-8")
+    (bundle / ORPHAN_REL).parent.mkdir(parents=True)
+    (bundle / ORPHAN_REL).write_text(original, encoding="utf-8")
     frontmatter = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-    frontmatter["status"] = "stable"
-    frontmatter["verified"].append(
-        {"by": audit.AUDITOR, "at": "2026-09-24T00:00:00Z"}
-    )
-    concept.write_text(
-        "---\n" + yaml.safe_dump(frontmatter, sort_keys=False)
-        + f"---\n{ORPHAN_LINE}\n# Summary\n\nThe feature was merged.\n",
-        encoding="utf-8",
-    )
-    trusted_finish = audit._instant(ORPHAN_AUDIT_FINISH)
-    assert trusted_finish is not None
-
-    assert audit._repair_audit_output(concept, original, trusted_finish) == [
-        "restamped new auditor verification to trusted audit time"
-    ]
-    reviewed, body = audit.parse_doc(concept)
-    assert ORPHAN_LINE in body
-    assert audit._instant(reviewed["verified"][-1]["at"]) == trusted_finish
+    for source in frontmatter["sources"]:
+        path = bundle / source["resource"].lstrip("/")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"placeholder evidence for {source['id']}\n", encoding="utf-8")
+    evidence = bundle / frontmatter["sources"][0]["resource"].lstrip("/")
+    I.save_job(bundle, {
+        "id": "6f4b6f97e4b2", "kind": "ingest", "status": "done",
+        "source": "sources/inbox/" + evidence.name,
+        "sha256": __import__("hashlib").sha256(evidence.read_bytes()).hexdigest(),
+        "validation": {"status": "passed", "error_count": 0},
+        "concept_files": [ORPHAN_REL], "changed_files": [ORPHAN_REL],
+    })
+    return bundle, original
 
 
-def test_audit_accepts_current_verification_during_long_agent_run(
-    tmp_path: Path, monkeypatch,
+def _lift_orphan(text: str, *, new_event: bool = True, refresh: bool = True, keep_body: bool = False,
+                 chronological: bool = False) -> str:
+    """Text-level reviewer edits observed or simulated around the body orphan."""
+    lifted = [ORPHAN_LINE] + ([f"  - {{by: {audit.AUDITOR}, at: {ORPHAN_AUDIT_START}}}"] if new_event else [])
+    if chronological:
+        text = text.replace("  - {by: process:ai-wiki-adversarial-audit, at: 2026-09-14T20:50:19Z}\n",
+                            "  - {by: process:ai-wiki-adversarial-audit, at: 2026-09-14T20:50:19Z}\n"
+                            + ORPHAN_LINE + "\n")
+        lifted = lifted[1:]
+    appended = "".join(f"{line}\n" for line in lifted)
+    text = text.replace(HISTORY_TAIL + "\n---\n", HISTORY_TAIL + "\n" + appended + "---\n")
+    if not keep_body:
+        text = text.replace("---\n" + ORPHAN_LINE + "\n# Summary", "---\n# Summary")
+    if refresh:
+        text = text.replace(
+            "  by: 'process:ai-wiki-curator'\n  at: '2026-09-23T15:46:00Z'",
+            f"  by: {audit.AUDITOR}\n  at: '{ORPHAN_AUDIT_START}'",
+        )
+    return text.replace("status: draft", "status: stable")
+
+
+ORPHAN_EDITS = {
+    # 71ea85ca9c20 / e94c8b707aea: lift + new event + refreshed generated.
+    "lift_new_refresh": lambda text: _lift_orphan(text),
+    # f7dddac6e389: the reviewer ignored the orphan and appended its event.
+    "ignore_orphan": lambda text: _lift_orphan(text, refresh=False, keep_body=True).replace(
+        HISTORY_TAIL + "\n" + ORPHAN_LINE + "\n", HISTORY_TAIL + "\n", 1,
+    ),
+    "lift_without_refresh": lambda text: _lift_orphan(text, refresh=False),
+    "lift_only": lambda text: _lift_orphan(text, new_event=False, refresh=False),
+    "copy_keep_body": lambda text: _lift_orphan(text, keep_body=True),
+    "chronological_insert": lambda text: _lift_orphan(text, chronological=True),
+    "delete_only": lambda text: text.replace("---\n" + ORPHAN_LINE + "\n", "---\n"),
+    # The item lost its `- `: `by`/`at` become top-level frontmatter keys.
+    "column0_fields": lambda text: text.replace(
+        HISTORY_TAIL + "\n---\n", HISTORY_TAIL + f"\nby: {audit.AUDITOR}\nat: {ORPHAN_AUDIT_START}\n---\n",
+    ),
+    # e5c00b16c75a again: the reviewer writes its event below the closing delimiter.
+    "spill_again": lambda text: text.replace(
+        "---\n" + ORPHAN_LINE + "\n", f"---\n  - {{by: {audit.AUDITOR}, at: {ORPHAN_AUDIT_START}}}\n"
+        + ORPHAN_LINE + "\n",
+    ),
+    "untouched": lambda text: text,
+}
+
+
+@pytest.mark.parametrize("edit", sorted(ORPHAN_EDITS))
+@pytest.mark.parametrize("verdict", ["verified", "unverified"])
+def test_audit_replay_71ea_e94c_orphan_never_fails_and_cleans_body(
+    tmp_path: Path, monkeypatch, edit: str, verdict: str,
 ) -> None:
-    bundle = _bundle(tmp_path)
-    concept = bundle / "features" / "release.md"
-    original = concept.read_text(encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    """Replay of audits 71ea85ca9c20/e94c8b707aea (parent ingest 6f4b6f97e4b2).
+
+    Both failed with "audit verification timestamp is outside the trusted audit window"
+    after lifting the 2026-09-19 orphan into ``verified``. Every reviewer variant now
+    finishes, keeps structured history, and removes the spilled line from the body.
+    """
+    bundle, original = _orphan_bundle(tmp_path)
+    concept = bundle / ORPHAN_REL
+    job = I.new_audit_job(bundle, "6f4b6f97e4b2", [ORPHAN_REL])
     path = I.job_path(bundle, job["id"])
     monkeypatch.setenv("AIWIKI_GIT", "off")
-    clock = {"now": AUDIT_NOW}
+    clock = {"now": ORPHAN_AUDIT_START}
     monkeypatch.setattr(audit.curate, "_now", lambda: clock["now"])
 
-    def long_review(*args, **kwargs):
-        reviewed = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        reviewed["status"] = "stable"
-        reviewed["verified"] = [
-            {"by": audit.AUDITOR, "at": "2026-08-13T01:08:00Z"}
-        ]
-        concept.write_text(
-            "---\n" + yaml.safe_dump(reviewed, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        clock["now"] = "2026-08-13T01:10:00Z"
-        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+    def reviewer(*args, **kwargs):
+        concept.write_text(ORPHAN_EDITS[edit](original), encoding="utf-8")
+        clock["now"] = ORPHAN_AUDIT_FINISH
+        verdicts = {"verified": [ORPHAN_REL]} if verdict == "verified" else {"unverified": [ORPHAN_REL]}
+        return subprocess.CompletedProcess(args[0], 0, stdout=_verdict(**verdicts), stderr="")
 
-    monkeypatch.setattr(curate, "_agent_process", long_review)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
+    monkeypatch.setattr(curate, "_agent_process", reviewer)
+    audit.run(bundle, "6f4b6f97e4b2", path)  # real validate_bundle, no monkeypatch
 
     result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done", result.get("validation")
+    assert result["validation"] == {"status": "passed", "error_count": 0}
+    assert result["audit"]["status"] == ("passed" if verdict == "verified" else "needs_attention")
+    assert result["audit"]["corrected_concepts"] == []
+    repairs = result["deterministic_repairs"][ORPHAN_REL]
+    assert f"removed spilled frontmatter line from body: {ORPHAN_LINE.strip()!r}" in repairs
+    if edit in {"column0_fields", "spill_again"}:  # the reviewer's own slip is visible too
+        assert any(repair.startswith(("removed spilled verification field from frontmatter",
+                                      "discarded spilled frontmatter line written by editor"))
+                   for repair in repairs)
+    expected = original.replace("status: draft", "status: stable").replace("---\n" + ORPHAN_LINE + "\n", "---\n")
+    if verdict == "verified":
+        expected = expected.replace(
+            HISTORY_TAIL + "\n", HISTORY_TAIL + f"\n  - {{by: {audit.AUDITOR}, at: {ORPHAN_AUDIT_FINISH}}}\n",
+        )
+    assert concept.read_text(encoding="utf-8") == expected
+    from aiwiki.engine.validate import body_spill_errors
+    assert body_spill_errors(audit.parse_doc(concept)[1]) == []
+
+
+def test_verification_invariant_rejects_rewritten_or_extra_history(tmp_path: Path) -> None:
+    concept = tmp_path / "release.md"
+    before_fm = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
+    before_fm["verified"] = [{"by": "human:owner", "at": "2026-08-13T00:30:00Z"}]
+    before_text = "---\n" + yaml.safe_dump(before_fm, sort_keys=False) + "---\n# Summary\n"
+    cases = {
+        "history": ([{"by": "human:owner", "at": "2026-08-13T00:40:00Z"}], "must preserve existing"),
+        "two_new": (
+            [before_fm["verified"][0], {"by": audit.AUDITOR, "at": AUDIT_NOW}, {"by": audit.AUDITOR, "at": AUDIT_NOW}],
+            "at most one",
+        ),
+        "other_actor": ([before_fm["verified"][0], {"by": "human:forged", "at": AUDIT_NOW}], "at most one"),
+        "bad_time": ([before_fm["verified"][0], {"by": audit.AUDITOR, "at": "2026-08-13T00:50:00"}], "at most one"),
+    }
+    for events, expected in cases.values():
+        after_fm = dict(before_fm, verified=events)
+        concept.write_text("---\n" + yaml.safe_dump(after_fm, sort_keys=False) + "---\n# Summary\n", encoding="utf-8")
+        assert any(expected in error for error in audit._verification_policy_errors("a.md", concept, before_text))
+    concept.write_text(before_text, encoding="utf-8")
+    assert audit._verification_policy_errors("a.md", concept, before_text) == []
+
+
+def test_audit_accepts_verdict_after_long_agent_run(tmp_path: Path, monkeypatch) -> None:
+    bundle = _bundle(tmp_path)
+    clock = {"now": AUDIT_NOW, "finish": "2026-08-13T01:10:00Z"}
+    result = _review(bundle, monkeypatch, lambda path: None, _verdict(verified=["features/release.md"]), clock)
     assert result["status"] == "done"
     assert result["audit"]["status"] == "passed"
     assert "deterministic_repairs" not in result
+    verified = _frontmatter(bundle / "features" / "release.md")["verified"]
+    assert verified == [{"by": audit.AUDITOR, "at": audit._instant("2026-08-13T01:10:00Z")}]
 
 
-@pytest.mark.parametrize(
-    ("before_verified", "after_verified", "expected_error"),
-    [
-        ([], [{"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}], "must not be in the future"),
-        ([], [{"by": audit.AUDITOR, "at": "2026-08-13T00:50:00"}], "requires a valid timestamp"),
-        ([], [{"by": "human:forged", "at": "2026-08-13T00:50:00Z"}], "unauthorized verifier"),
-        (
-            [],
-            [
-                {"by": audit.AUDITOR, "at": "2026-08-13T00:40:00Z"},
-                {"by": audit.AUDITOR, "at": "2026-08-13T00:41:00Z"},
-            ],
-            "outside the trusted audit window",
-        ),
-        (
-            [{"by": audit.AUDITOR, "at": "2026-08-13T00:30:00Z"}],
-            [{"by": audit.AUDITOR, "at": "2026-08-13T00:40:00Z"}],
-            "must preserve existing verification",
-        ),
-    ],
-)
-def test_audit_timestamp_repair_keeps_invalid_or_historical_events_for_policy_rejection(
-    tmp_path: Path, before_verified: list[dict], after_verified: list[dict],
-    expected_error: str,
-) -> None:
-    concept = tmp_path / "release.md"
-    before_fm = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
-    if before_verified:
-        before_fm["verified"] = before_verified
-    before_text = (
-        "---\n" + yaml.safe_dump(before_fm, sort_keys=False)
-        + "---\n# Summary\n\nThe feature was merged.\n"
-    )
-    after_fm = dict(before_fm)
-    after_fm["status"] = "stable"
-    after_fm["verified"] = after_verified
-    output = (
-        "---\n" + yaml.safe_dump(after_fm, sort_keys=False)
-        + "---\n# Summary\n\nThe feature was merged.\n"
-    )
-    concept.write_text(output, encoding="utf-8")
-    trusted_finish = audit._instant(AUDIT_NOW)
-    assert trusted_finish is not None
-
-    assert audit._repair_audit_output(concept, before_text, trusted_finish) == []
-    assert concept.read_text(encoding="utf-8") == output
-    assert any(
-        expected_error in error
-        for error in audit._verification_policy_errors(concept, before_text, trusted_finish)
-    )
-
-
-def test_audit_rejects_bookkeeping_only_future_generation_and_rolls_back(
-    tmp_path: Path, monkeypatch,
-) -> None:
+@pytest.mark.parametrize("spoof", ["future_time", "actor"])
+def test_audit_restores_bookkeeping_only_generation_edit(tmp_path: Path, monkeypatch, spoof: str) -> None:
     bundle = _bundle(tmp_path)
     concept = bundle / "features" / "release.md"
     original = concept.read_text(encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
 
-    def bookkeeping_only(*args, **kwargs):
-        forged = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        forged["generated"] = {"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}
-        concept.write_text(
-            "---\n" + yaml.safe_dump(forged, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
+    def bookkeeping_only(path: Path) -> None:
+        def change(frontmatter: dict) -> None:
+            if spoof == "actor":
+                frontmatter["generated"]["by"] = audit.AUDITOR
+            else:
+                frontmatter["generated"] = {"by": audit.AUDITOR, "at": "2099-01-01T00:00:00Z"}
+        _rewrite(path, change)
 
-    monkeypatch.setattr(curate, "_agent_process", bookkeeping_only)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert any(
-        "must not change generated without a substantive correction" in error
-        for error in result["validation"]["errors"]
-    )
-    assert concept.read_text(encoding="utf-8") == original
+    result = _review(bundle, monkeypatch, bookkeeping_only, _verdict(unverified=["features/release.md"]))
+    assert result["status"] == "done" and result["audit"]["status"] == "needs_attention"
+    assert result["deterministic_repairs"] == {
+        "features/release.md": ["restored generated after discarded non-substantive edits"],
+    }
+    assert concept.read_text(encoding="utf-8") == original.replace("status: draft", "status: stable")
 
 
-def test_audit_rejects_bookkeeping_only_generated_actor_spoof(
-    tmp_path: Path, monkeypatch,
-) -> None:
+def test_audit_restores_removed_human_verification(tmp_path: Path, monkeypatch) -> None:
     bundle = _bundle(tmp_path)
     concept = bundle / "features" / "release.md"
+    human = {"by": "human:owner", "at": "2026-08-13T00:30:00Z"}
+    _rewrite(concept, lambda frontmatter: frontmatter.update(verified=[human]))
     original = concept.read_text(encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
 
-    def actor_spoof(*args, **kwargs):
-        forged = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        forged["generated"]["by"] = audit.AUDITOR
-        concept.write_text(
-            "---\n" + yaml.safe_dump(forged, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="forged", stderr="")
+    def delete_human_history(path: Path) -> None:
+        _rewrite(path, lambda frontmatter: frontmatter.pop("verified"))
 
-    monkeypatch.setattr(curate, "_agent_process", actor_spoof)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert any(
-        "must not change generated without a substantive correction" in error
-        for error in result["validation"]["errors"]
-    )
-    assert concept.read_text(encoding="utf-8") == original
-
-
-def test_audit_rejects_removing_existing_human_verification(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    bundle = _bundle(tmp_path)
-    concept = bundle / "features" / "release.md"
-    original_fm = yaml.safe_load(_concept()[4:_concept().find("\n---\n", 4)])
-    original_fm["verified"] = [{"by": "human:owner", "at": "2026-08-13T00:30:00Z"}]
-    original = (
-        "---\n" + yaml.safe_dump(original_fm, sort_keys=False)
-        + "---\n# Summary\n\nThe feature was merged.\n"
-    )
-    concept.write_text(original, encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
-
-    def delete_human_history(*args, **kwargs):
-        forged = dict(original_fm)
-        forged.pop("verified")
-        concept.write_text(
-            "---\n" + yaml.safe_dump(forged, sort_keys=False)
-            + "---\n# Summary\n\nThe feature was merged.\n",
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="deleted", stderr="")
-
-    monkeypatch.setattr(curate, "_agent_process", delete_human_history)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
-    assert result["status"] == "failed"
-    assert any(
-        "must preserve existing verification 'human:owner'" in error
-        for error in result["validation"]["errors"]
-    )
-    assert concept.read_text(encoding="utf-8") == original
+    result = _review(bundle, monkeypatch, delete_human_history, _verdict(unverified=["features/release.md"]))
+    assert result["status"] == "done"
+    assert result["deterministic_repairs"] == {
+        "features/release.md": ["restored service-owned verification history"],
+    }
+    assert concept.read_text(encoding="utf-8") == original.replace("status: draft", "status: stable")
 
 
 @pytest.mark.parametrize(
@@ -1381,37 +1416,22 @@ def test_audit_restores_source_retarget_before_commit(
 ) -> None:
     bundle = _bundle(tmp_path)
     concept = bundle / "features" / "release.md"
-    original = concept.read_text(encoding="utf-8")
-    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
-    path = I.job_path(bundle, job["id"])
-    monkeypatch.setenv("AIWIKI_GIT", "off")
-    monkeypatch.setattr(audit.curate, "_now", lambda: AUDIT_NOW)
 
-    def retargeting_review(*args, **kwargs):
-        forged = yaml.safe_load(original[4:original.find("\n---\n", 4)])
-        forged["status"] = "stable"
-        forged["generated"] = {"by": audit.AUDITOR, "at": AUDIT_NOW}
-        forged["verified"] = [{"by": audit.AUDITOR, "at": AUDIT_NOW}]
-        forged["sources"] = [{"id": "retargeted", "resource": resource}]
-        concept.write_text(
-            "---\n" + yaml.safe_dump(forged, sort_keys=False)
-            + "---\n# Summary\n\nThe feature may have been merged.\n",
-            encoding="utf-8",
-        )
-        return subprocess.CompletedProcess(args[0], 0, stdout="retargeted", stderr="")
+    def retargeting_review(path: Path) -> None:
+        def change(frontmatter: dict) -> str:
+            frontmatter["status"] = "stable"
+            frontmatter["generated"] = {"by": audit.AUDITOR, "at": AUDIT_NOW}
+            frontmatter["sources"] = [{"id": "retargeted", "resource": resource}]
+            return "# Summary\n\nThe feature may have been merged.\n"
+        _rewrite(path, change)
 
-    monkeypatch.setattr(curate, "_agent_process", retargeting_review)
-    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
-    audit.run(bundle, "ingest1", path)
-
-    result = json.loads(path.read_text(encoding="utf-8"))
+    result = _review(bundle, monkeypatch, retargeting_review, _verdict(verified=["features/release.md"]))
     assert result["status"] == "done"
     assert result["audit"]["status"] == "passed"
     assert result["deterministic_repairs"] == {
         "features/release.md": ["restored immutable sources provenance"]
     }
-    repaired_text = concept.read_text(encoding="utf-8")
-    repaired = yaml.safe_load(repaired_text[4:repaired_text.find("\n---\n", 4)])
+    repaired = _frontmatter(concept)
     assert repaired["sources"] == [
         {"id": "release-source", "resource": "/sources/release.md.source"}
     ]
@@ -1442,8 +1462,9 @@ def test_runtime_failed_attempt_can_be_retried_without_overwriting_history(
     assert retry["id"] != first["id"] and deduplicated is False
 
     def successful_review(*args, **kwargs):
-        (bundle / "features" / "release.md").write_text(_concept(verified=True), encoding="utf-8")
-        return subprocess.CompletedProcess(args[0], 0, stdout="reviewed", stderr="")
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout=_verdict(verified=["features/release.md"]), stderr="",
+        )
 
     monkeypatch.setattr(curate, "_agent_process", successful_review)
     retry_path = I.job_path(bundle, retry["id"])

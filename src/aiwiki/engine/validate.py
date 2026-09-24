@@ -32,6 +32,16 @@ ACTOR_RE = re.compile(r"^(?:human:[^\s/]+|process:[^\s/]+|[^\s/]+/[^\s/]+)$")
 H1_RE = re.compile(r"^ {0,3}#(?:\s+|$)")
 COMPUTATION_H1_RE = re.compile(r"^ {0,3}#\s+Computation(?:\s+#+)?\s*$")
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# Frontmatter that slipped below the closing delimiter, e.g. an audit event written one
+# line too low. Such lines are Markdown to every parser, so they never count as history.
+SPILL_KEYS = set(PROFILE_REQUIRED) | {
+    "verified", "stale_after", "usage_window", "confidence", "aliases", "contested",
+    "contradictions", *LEGACY_KEYS,
+}
+SPILL_FLOW_EVENT_RE = re.compile(r"^\s*(?:-\s*)?\{(?=[^}]*\bby\s*:)(?=[^}]*\bat\s*:)[^}]*\}\s*$")
+SPILL_BLOCK_EVENT_RE = re.compile(r"^\s*-\s+(by|at)\s*:\s*\S")
+SPILL_EVENT_FIELD_RE = re.compile(r"^\s+(by|at)\s*:\s*\S")
+SPILL_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:(?:\s|$)")
 
 
 def parse_doc(path: Path) -> tuple[dict[str, Any], str]:
@@ -285,6 +295,62 @@ def _validate_attested_computation(frontmatter: dict[str, Any], body: str) -> li
     return errors
 
 
+def split_body_spill(body: str) -> tuple[list[str], str]:
+    """Split leading spilled frontmatter/verification lines from a concept body.
+
+    Returns the spilled lines (without newlines) and the remaining body. A body that
+    does not start with spill is returned unchanged, including its leading blank lines.
+    """
+    lines = body.splitlines(keepends=True)
+    spilled: list[str] = []
+    in_key = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        block = SPILL_BLOCK_EVENT_RE.match(line)
+        field = SPILL_EVENT_FIELD_RE.match(following)
+        key = SPILL_KEY_RE.match(line)
+        if not line.strip():
+            index += 1
+            continue
+        if line.strip() == "---":
+            # A stray fence counts only when spill follows it; otherwise it is Markdown.
+            if not split_body_spill("".join(lines[index + 1:]))[0]:
+                break
+            spilled.append(line)
+            in_key = False
+        elif SPILL_FLOW_EVENT_RE.match(line):
+            spilled.append(line)
+            in_key = False
+        elif block and field and {block.group(1), field.group(1)} == {"by", "at"}:
+            spilled.extend((line, following))
+            in_key = False
+            index += 1
+        elif key and key.group(1) in SPILL_KEYS:
+            spilled.append(line)
+            in_key = True
+        elif in_key and line[:1] in (" ", "\t", "-"):
+            spilled.append(line)  # nested value of a spilled frontmatter key
+        else:
+            break
+        index += 1
+    if not spilled:
+        return [], body
+    return [line.rstrip("\r\n") for line in spilled], "".join(lines[index:])
+
+
+def body_spill_errors(body: str) -> list[str]:
+    """Document-local gate for concepts written by the current job or changeset."""
+    spilled, _rest = split_body_spill(body)
+    if not spilled:
+        return []
+    return [
+        f"body starts with {len(spilled)} spilled frontmatter/verification line(s), "
+        f"first {spilled[0].strip()!r}"
+    ]
+
+
 def validate_profile_document(frontmatter: dict[str, Any], body: str) -> list[str]:
     """Validate one concept against the strict AI Wiki OKF v0.2 profile.
 
@@ -436,6 +502,36 @@ def validate(root: Path) -> list[str]:
     return list(dict.fromkeys(validate_okf_conformance(root) + validate_profile(root)))
 
 
+def _body_spill_findings(root: Path, rels) -> list[str]:
+    findings: list[str] = []
+    for rel in sorted(set(rels)):
+        path = root / rel
+        if path.is_symlink() or not path.is_file() or not should_check(path, root):
+            continue
+        try:
+            document = load_document(path)
+        except (OSError, UnicodeError, OKFDocumentError):
+            continue  # conformance reports the parser error
+        findings.extend(f"{rel}: {error}" for error in body_spill_errors(document.body))
+    return findings
+
+
+def validate_changed(root: Path, rels) -> list[str]:
+    """Strict checks for concepts the current job or changeset writes.
+
+    Existing bundle content is not re-judged here, so a legacy defect elsewhere never
+    blocks unrelated work; ``spill_warnings`` reports it instead.
+    """
+    return _body_spill_findings(root, rels)
+
+
+def spill_warnings(root: Path) -> list[str]:
+    """Bundle-wide spilled-frontmatter findings, reported as warnings only."""
+    return _body_spill_findings(
+        root, (path.relative_to(root).as_posix() for path in _markdown_files(root)),
+    )
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Validate an OKF v0.2 bundle.")
     parser.add_argument("bundle", type=Path)
@@ -443,6 +539,13 @@ def main(argv=None) -> int:
         "--conformance-only",
         action="store_true",
         help="check only the permissive official OKF v0.2 interoperability contract",
+    )
+    parser.add_argument(
+        "--changed",
+        nargs="+",
+        default=[],
+        metavar="REL",
+        help="bundle-relative concepts written by this change; spilled frontmatter in them is an error",
     )
     args = parser.parse_args(argv)
     root_input = args.bundle.expanduser()
@@ -455,6 +558,11 @@ def main(argv=None) -> int:
         print(f"not a directory: {root}", file=sys.stderr)
         return 2
     errors = validate_okf_conformance(root) if args.conformance_only else validate(root)
+    if not args.conformance_only:
+        errors.extend(validate_changed(root, args.changed))
+        for warning in spill_warnings(root):
+            if warning not in errors:
+                print(f"WARNING: {warning}", file=sys.stderr)
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
