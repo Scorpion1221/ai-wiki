@@ -23,8 +23,8 @@ def gate(tmp_path, monkeypatch):
     gate.close()
 
 
-def _run(gate: Gate, capsys, *args: str) -> tuple[int, dict, list[tuple]]:
-    calls = gate.connect("owner")  # a human: only a human uploads the probe packet
+def _run(gate: Gate, capsys, *args: str, token: str = "owner") -> tuple[int, dict, list[tuple]]:
+    calls = gate.connect(token)  # the owner: only a human uploads the probe packet
     code = sample.main(["-b", "kb-a", *args])
     return code, json.loads(capsys.readouterr().out), [call for call in calls if call[:2] == ("POST", "/changesets")]
 
@@ -35,7 +35,8 @@ def test_each_sampled_concept_is_judged_once_and_nothing_is_written(gate, capsys
     code, summary, posts = _run(gate, capsys, "--count", "3")
 
     assert code == 0, summary
-    assert (summary["sent"], summary["skipped"], summary["server_errors"]) == (3, 0, []) and len(posts) == 3
+    assert (summary["sent"], summary["skipped"], summary["server_errors"], summary["unjudged"]) == (3, 0, [], [])
+    assert len(posts) == 3
     assert summary["base_revision"] == head and summary["http"] == {"200": 3}
     assert {row["status"] for row in summary["rows"]} == {"would_apply"}
     gate.assert_untouched(head)
@@ -57,6 +58,16 @@ def test_a_5xx_is_counted_once_and_fails_the_check(gate, capsys, monkeypatch) ->
     assert code == 1
     assert [row["path"] for row in summary["server_errors"]] == [METRIC]  # never resent, unlike propose
     assert len(posts) == summary["sent"] == 6 and summary["http"]["503"] == 1
+
+
+def test_a_token_the_gate_never_judges_fails_the_check(gate, capsys) -> None:
+    # eb17's legacy token reads, so the workspace pulls, but it has no actor: every dry-run is
+    # a 403 and no concept is judged, which must not read as "zero 5xx".
+    code, summary, posts = _run(gate, capsys, "--count", "3", token="actorless")
+
+    assert code == 1
+    assert summary["server_errors"] == [] and summary["http"] == {"403": 3} and len(posts) == 3
+    assert [row["http"] for row in summary["unjudged"]] == [403, 403, 403]
 
 
 def test_a_concept_without_a_block_sources_list_is_skipped() -> None:

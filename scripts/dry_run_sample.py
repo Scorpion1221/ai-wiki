@@ -5,7 +5,8 @@ Pulls the published bundle once. For each sampled concept, appends one footnoted
 cites an uploaded probe packet and sends ``POST /changesets?dry_run=true`` exactly once. There
 is no resend, unlike ``ai-wiki propose``, so every 5xx is counted. A dry-run creates no job,
 takes no lock and never touches Git. Prints one JSON summary. Exits 1 when any answer is a 5xx
-or never came, or when nothing could be sent.
+or never came, when any answer is not the gate's verdict (a 401/403/429 judges nothing), or when
+nothing could be sent.
 
 Run it from a checkout, with the CLI configured for the endpoint and a token whose principal
 may upload evidence (a human: token, e.g. the owner's), kept out of the shell history:
@@ -30,9 +31,12 @@ from pathlib import Path
 from aiwiki.cli import main as cli
 from aiwiki.cli import workspace
 from aiwiki.engine.validate import should_check
+from aiwiki.runtime.changeset import CODES
 
 PROBE_ID = "dry-run-probe"
 PROBE = b"# Dry-run probe\n\nA gate probe: the writer judges it and commits nothing.\n"
+VERDICTS = {"would_apply", "noop", "rejected"}
+VERDICT_HTTP = {200, *CODES.values()}  # the gate's own answers; any other one judged nothing
 
 
 def cite(text: str) -> str | None:
@@ -82,9 +86,13 @@ def sample(bundle: str, count: int, seed: int) -> dict:
                          "codes": sorted({str(error.get("code")) for error in answer.get("errors") or []}),
                          "seconds": round(time.monotonic() - started, 1)})
     sent = [row for row in rows if "skipped" not in row]
+    server_errors = [row for row in sent if row["http"] is None or row["http"] >= 500]
     return {"bundle": bundle, "base_revision": state["base_revision"], "sent": len(sent),
             "skipped": len(rows) - len(sent), "http": dict(Counter(str(row["http"]) for row in sent)),
-            "server_errors": [row for row in sent if row["http"] is None or row["http"] >= 500], "rows": rows}
+            "server_errors": server_errors,
+            "unjudged": [row for row in sent if row not in server_errors
+                         and (row["http"] not in VERDICT_HTTP or row["status"] not in VERDICTS)],
+            "rows": rows}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(summary, ensure_ascii=False, indent=1))
-    return 1 if summary["server_errors"] or not summary["sent"] else 0
+    return 1 if summary["server_errors"] or summary["unjudged"] or not summary["sent"] else 0
 
 
 if __name__ == "__main__":
