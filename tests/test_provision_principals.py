@@ -62,7 +62,7 @@ def test_every_preset_round_trips_through_auth(tmp_path: Path) -> None:
 
 def test_legacy_token_keeps_todays_identity_and_scopes(tmp_path: Path) -> None:
     path = tmp_path / "principals.json"
-    prov.add(path, "owner")
+    owner = prov.add(path, "owner")
     with pytest.raises(auth.PrincipalsError, match="AIWIKI_TOKEN is set, but no principal"):
         prov.check(path, LEGACY)  # the writer and the mirror would refuse to start on it
     prov.add_legacy(path, LEGACY)
@@ -79,13 +79,18 @@ def test_legacy_token_keeps_todays_identity_and_scopes(tmp_path: Path) -> None:
         prov.add_legacy(path, LEGACY)
     with pytest.raises(auth.PrincipalsError, match="empty or unset"):
         prov.add_legacy(path, "")
+    prov.remove(path, auth.LEGACY_ID)
+    with pytest.raises(auth.PrincipalsError, match="token_sha256 is shared with another principal"):
+        prov.add_legacy(path, owner)  # one token, two identities: the service would refuse to start
 
 
 @pytest.mark.parametrize(("preset", "options", "message"), [
-    # auth.py's startup invariants: an agent never verifies its own output (the owner's scopes as a process).
-    ("owner", {"pid": "process:rogue"}, "process:rogue: a process principal must not hold both curate and audit"),
+    # The id keeps the preset's kind, which decides the actor (and keeps the owner's scopes off a process).
+    ("owner", {"pid": "process:rogue"}, "preset owner needs --id human:<name>"),
+    ("maintainer", {"pid": "member:helper"}, "preset maintainer needs --id process:<name>"),
+    ("maintainer", {"pid": "process:"}, "process:<name>"),
+    # auth.py's startup rules.
     ("maintainer", {}, "process:ai-wiki-maintainer: duplicate principal id"),
-    ("maintainer", {"pid": "maintainer"}, "process:<name>"),
     ("maintainer", {"limits": {"changeset_per_day": 5}}, "unknown limits changeset_per_day"),
     ("maintainer", {"limits": {"changesets_per_day": -1}}, "non-negative"),
     ("watchdog", {"expires": "soon"}, "expires must be a YYYY-MM-DD date"),

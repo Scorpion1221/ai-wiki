@@ -3,15 +3,16 @@
 
 Stdlib only, apart from the service's own ``aiwiki.service.auth``, whose rules it applies.
 On the writer host, run it as root with the writer's venv python (the host python3 is too
-old for auth.py), so no bytecode lands in admin's tree:
+old for auth.py) and -B, so no root-owned bytecode lands in admin's tree:
 
-    sudo env PYTHONDONTWRITEBYTECODE=1 /home/admin/app/.venv/bin/python \\
+    sudo /home/admin/app/.venv/bin/python -B \\
         /home/admin/app/scripts/provision_principals.py --file /etc/ai-wiki/principals.json list
 
 Commands:
   add PRESET    generate a token for a canonical role (below), store only its sha256 and print
                 the token once: it is the only thing written to stdout, so capture it straight
-                into the secret store. --id, --bundle, --limit NAME=N and --expires adjust it.
+                into the secret store. --id (same kind: process:, human: or member:), --bundle,
+                --limit NAME=N and --expires adjust it.
   add-legacy    register the legacy shared token, read from $AIWIKI_TOKEN (--token-env), as
                 member:legacy-token with every scope, as it authenticates without a file; the
                 service refuses to start on a file that leaves out a token it is still given.
@@ -39,7 +40,9 @@ its owner and group; a new file takes its directory's group, so keep /etc/ai-wik
 root:<writer user> 0750.
 
 After an edit, `check` it, then reload each service and confirm in an admin's GET /whoami
-("auth"): a refused reload only logs. Signal the server process, never the unit's cgroup:
+("auth"): a refused reload only logs. SIGHUP reloads only a service started with
+AIWIKI_PRINCIPALS; one started without it exits on SIGHUP, so adopting the file takes a
+restart. Signal the server process, never the unit's cgroup:
 
     kill -HUP "$(pgrep -P "$(systemctl show -p MainPID --value ai-wiki-worker)" -f aiwiki.service)"
     docker exec ai-wiki uv run --no-dev python -m aiwiki.service.auth /etc/ai-wiki/principals.json
@@ -114,9 +117,11 @@ def add(path: Path, preset: str, *, pid: str | None = None, bundles: list[str] |
         limits: dict[str, int] | None = None, expires: str | None = None) -> str:
     """Add a principal from `preset`; return its new token, whose sha256 alone is stored."""
     spec = PRESETS[preset]
-    pid = pid or spec["id"]
-    if pid is None:
-        raise auth.PrincipalsError(f"preset {preset} needs --id member:<name>")
+    # The kind decides the actor: an --id of another kind would stamp (or not stamp) the wrong one.
+    kind = (spec["id"] or "member:").partition(":")[0]
+    pid = pid or spec["id"] or ""
+    if not pid.startswith(f"{kind}:"):
+        raise auth.PrincipalsError(f"preset {preset} needs --id {kind}:<name>")
     token = spec["prefix"] + secrets.token_urlsafe(32)
     entry = {"id": pid, "token_sha256": auth.token_sha256(token), "prefix": spec["prefix"],
              "scopes": list(spec["scopes"])}
