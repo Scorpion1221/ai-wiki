@@ -16,10 +16,14 @@
 #   docker kill -s HUP ai-wiki
 FROM python:3.12-slim
 
-# Health revision reporting and the writer transaction path both require Git.
+# Health revision reporting and the writer transaction path both require Git. The container
+# runs as root and the clones under /bundles belong to whoever pulls them on the host, so trust
+# them: otherwise Git refuses a clone it does not own ("dubious ownership") and /health reports
+# git_revision null. The `/*` prefix match needs Git 2.46 or later.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory '/bundles/*'
 
 # uv (dependency manager) from its official image — fast, no pip bootstrap.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
