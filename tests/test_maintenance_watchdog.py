@@ -470,6 +470,7 @@ def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) 
     assert facts["needs_human"] == [{"id": a, "topic_key": "repo:x#a", "since": iso(t0),
                                      "reason": "not_retryable/input"}]
     assert (facts["oldest_ready"], facts["ready_stale"]) == ({"id": b, "since": iso(t0), "age_hours": 73.0}, 1)
+    assert facts["cursors"]["repos"] == {"updated_at": iso(t0), "age_hours": 73.0, "stale_repos": []}
 
     script = load_script()
     assert "有效至 10-17 09:00，最后续期 10-17 06:00" in card_text_of(script.render_card("alert", "w", held, {}))
@@ -488,6 +489,34 @@ def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) 
     recovered = at(81)
     assert maint_keys(recovered) == set()  # a waits in ready since its reopen, not since t0
     assert recovered["checks"]["maint:solvely-wiki"]["oldest_ready"]["age_hours"] == 1.0
+
+
+def test_a_repository_that_stopped_advancing_makes_the_repos_cursor_stale(tmp_path: Path, monkeypatch) -> None:
+    t0 = datetime(2026, 10, 16, 20, 0, tzinfo=UTC)
+    clock = [t0]
+    monkeypatch.setattr(M, "_now", lambda: clock[0])
+    bundle = make_bundle(tmp_path, iso(t0), [])
+    good = {"branch": "main", "sha": "1" * 40, "stale_since": None, "error": None}
+    failing = {**good, "stale_since": iso(t0), "error": "fetch failed"}
+    record = M.put_cursor(bundle, "repos", {"git.invalid/a": good, "git.invalid/b": failing}, if_match=None,
+                          if_none_match="*", principal=MAINTAINER, run="WAIO-1")
+    # Every later collect still rewrites the cursor and carries b's stale_since forward.
+    clock[0] = t0 + timedelta(hours=29)
+    record = M.put_cursor(bundle, "repos", {"git.invalid/a": good, "git.invalid/b": failing},
+                          if_match=record["etag"], if_none_match=None, principal=MAINTAINER, run="WAIO-4")
+
+    _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=31)))
+    assert maint_keys(result) == {"maint_cursor_stale:solvely-wiki:repos"}
+    assert result["checks"]["maint:solvely-wiki"]["cursors"]["repos"] == {
+        "updated_at": iso(t0 + timedelta(hours=29)), "age_hours": 31.0, "stale_repos": ["git.invalid/b"]}
+    [message] = [a["message"] for a in result["alerts"] if a["key"].startswith("maint_")]
+    assert "1 个仓库未能扫描，最老 git.invalid/b 自 2026-10-16T20:00:00Z 起" in message
+
+    clock[0] = t0 + timedelta(hours=32)  # b is readable again
+    M.put_cursor(bundle, "repos", {"git.invalid/a": good, "git.invalid/b": good}, if_match=record["etag"],
+                 if_none_match=None, principal=MAINTAINER, run="WAIO-5")
+    _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=33)))
+    assert maint_keys(result) == set()
 
 
 def corrupt(bundle: Path, item_id: str, text: str) -> None:

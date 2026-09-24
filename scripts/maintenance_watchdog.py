@@ -526,15 +526,25 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
         if not path.exists():
             cursors[cursor] = None  # this collector has not run yet: nothing can fall behind
             continue
-        updated = parse_ts((read_json(path) or {}).get("updated_at"))
-        cursors[cursor] = {"updated_at": iso(updated), "age_hours": age_h(now, updated)}
+        record = read_json(path) or {}
+        updated = parse_ts(record.get("updated_at"))
+        # The repos collector rewrites its cursor even when a repository could not be read; that
+        # repository keeps its old row marked stale_since, so it has not advanced since then.
+        rows = record.get("value") if cursor == "repos" and isinstance(record.get("value"), dict) else {}
+        failing = sorted((ts, remote) for remote, row in rows.items()
+                         if isinstance(row, dict) and (ts := parse_ts(row.get("stale_since"))))
+        since = min(updated, failing[0][0]) if updated and failing else updated
+        cursors[cursor] = {"updated_at": iso(updated), "age_hours": age_h(now, since),
+                           "stale_repos": [remote for _ts, remote in failing]}
         if updated is None:
             alerts.append(alert(check, f"maint_cursor_stale:{name}:{cursor}",
                                 f"maint {name}：{cursor} 游标文件无法读取（{path}）"))
         elif cursors[cursor]["age_hours"] > args.cursor_max_age_hours:
+            where = (f"{len(failing)} 个仓库未能扫描，最老 {failing[0][1]} 自 {iso(since)} 起" if since < updated
+                     else iso(updated))
             alerts.append(alert(check, f"maint_cursor_stale:{name}:{cursor}",
                                 f"maint {name}：{cursor} 游标已 {cursors[cursor]['age_hours']}h 未推进"
-                                f"（{iso(updated)}，阈值 {args.cursor_max_age_hours:g}h）"))
+                                f"（{where}，阈值 {args.cursor_max_age_hours:g}h）"))
 
     leases: dict[str, dict | None] = {}
     for role in MAINT_ROLES:
