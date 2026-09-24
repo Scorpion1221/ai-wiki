@@ -18,6 +18,7 @@ You turn on each group of checks with a flag. Every threshold can be changed wit
 | `--multica` | `multica` CLI, autopilot `5c80732b-…` (`--autopilot-id`) | The newest `ai_wiki_incremental_checkpoint_v4.completed_at` found in any run issue's metadata is older than `--checkpoint-max-age-hours` (30). The latest run failed and no checkpoint was written after that run started. The latest run is older than `--run-max-age-hours` (26), which means the schedule did not fire. A run issue has been in `todo`/`in_progress` longer than `--stuck-hours` (3). A run has not reached a terminal state after `--stuck-hours`, and its issue is not done or cancelled. |
 | `--ledger PATH` | `ai-wiki maintain` `state.json`, or its state directory | An entry is `needs_repair`. An entry has been pending longer than `--pending-max-age-hours` (48); the pending time is measured from the earlier of its frozen evidence mtime and its first job. `done` and `superseded` entries are ignored. |
 | `--bundle PATH` (repeatable) | The writer's bundle directory | The bundle's last Git commit is older than `--commit-max-age-hours` (48). A job in `<bundle>/.okf/jobs/` failed within the last `--unresolved-failure-hours` (168, 7 days) and no later attempt on the same source SHA (ingest) or parent job (audit) is done, queued or running. A queued or running job is older than `--stuck-hours`. The output lists every failure from the last `--failed-window-hours` (24) with the attempt that resolved it, and reports queue depth and the age of the oldest queued job. |
+| `--bundle PATH` (same flag) | The maintainer queue in `<bundle>/.okf/maint/` (`service/maint_state.py`, design §7) | An item is `needs_human` (one alert per item, so each new one posts at once). Some item has waited in `ready` longer than `--ready-max-age-hours` (72), counted from its creation or from its last admin retry; one alert per bundle names the count and the oldest item. The `repos` or `issues` cursor has not advanced for `--cursor-max-age-hours` (30); a cursor that does not exist yet never alerts, so there is nothing before Phase 2 starts. A maintainer or auditor run lease has been held longer than `--stuck-hours`, or has lapsed that long ago without `maint end` and without a new run taking it over. A missing `.okf/maint` is quiet, not an error. |
 
 The script prints one JSON document containing `status`, `alerts[]`, `errors[]`, per-check
 `checks` facts, and `notify`. Exit codes:
@@ -204,6 +205,16 @@ been reassigned away from the agent. On 2026-09-23 a run made 6 calls and finish
   example after a manual recovery on the same issue (WAIO-547, WAIO-427), or when the next
   scheduled run succeeds.
 - **`ledger_needs_repair`**: clears once the entry is resolved through `ai-wiki maintain`.
+- **`maint_needs_human`**: clears when the owner reopens the item (`POST /admin/items/<id>/retry`) or
+  closes it (`POST /admin/items/<id>/resolve`), or when a new build re-admits an attempt-capped item at
+  the next `maint begin`. Run `ai-wiki maint status` first to see the reason.
+- **`maint_ready_stale`**: maintainer runs are not draining the queue (not scheduled, failing,
+  or too few items per run). It clears once no ready item is older than the threshold.
+- **`maint_cursor_stale`**: no `maint collect` has succeeded for that collector. It clears on
+  the next successful collect, which rewrites the cursor even when nothing changed.
+- **`maint_lease_stuck`**: `held` means a run is still renewing its lease past `--stuck-hours`;
+  check that run's issue. `expired` means a run died without `maint end`; the next `maint begin`
+  takes the lease over and returns the run's item to `ready`, which clears it.
 - **`job_failed`**: clears once a later attempt on the same source or parent job is queued,
   running or done. A failure that nobody retries keeps alerting for
   `--unresolved-failure-hours` (7 days), well past the 24-hour listing window and the
@@ -221,8 +232,8 @@ been reassigned away from the agent. On 2026-09-23 a run made 6 calls and finish
 - Checkpoints written after it are ignored.
 - Issue status is rebuilt from the `status_changed` timeline.
 
-Pass the v3 key as well for dates before v4 existed. Ledger and writer checks read the files
-as they are today and only measure ages from `--now`.
+Pass the v3 key as well for dates before v4 existed. Ledger, writer and maint checks read the
+files as they are today and only measure ages from `--now`.
 
 ```bash
 ai-wiki-watchdog --multica --runs-limit 100 \
