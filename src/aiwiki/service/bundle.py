@@ -99,10 +99,29 @@ def is_bundle(p: Path) -> bool:
 
 
 def discover(root: Path) -> dict[str, Path]:
-    """Map bundle-name -> path for every bundle directly under `root` (name-sorted)."""
+    """Map bundle-name -> path for every bundle directly under `root` (name-sorted).
+
+    An entry may be a symlink to a bundle directory of the same name elsewhere, so a writer
+    can host a bundle that stays at its own path (the phase 2 shadow beside production). It
+    maps to that real directory, exactly the path single-bundle mode serves, because every
+    read gate refuses a bundle path that traverses a symlink. Only the host operator can
+    place such a link: the service itself creates real directories.
+    """
     if not root.is_dir():
         return {}
-    return {p.name: p for p in sorted(root.iterdir()) if is_bundle(p)}
+    found = {}
+    for p in sorted(root.iterdir()):
+        if p.is_symlink():
+            try:
+                target = p.resolve(strict=True)
+            except (OSError, RuntimeError):  # dangling or looping link
+                continue
+            # Same name, so worker checks keyed on bundle.name (commit, audit) keep their meaning.
+            if target.name == p.name and is_bundle(target):
+                found[p.name] = target
+        elif is_bundle(p):
+            found[p.name] = p
+    return found
 
 
 def count_concepts(root: Path) -> int:
