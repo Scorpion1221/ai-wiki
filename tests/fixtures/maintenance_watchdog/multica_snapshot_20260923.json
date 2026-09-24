@@ -1,0 +1,2019 @@
+{
+ "_source": "read-only `multica autopilot runs/get`, `issue list`, `issue timeline --action status_changed` for autopilot 5c80732b on 2026-09-23; descriptions, titles and checkpoint repo lists stripped",
+ "autopilot": {
+  "id": "5c80732b-67a6-4e33-ba22-c620a94e27c1",
+  "assignee_id": "1dcccd34-e9e4-48c7-a0a3-32c061d4c284"
+ },
+ "runs": [
+  {
+   "id": "01a0cab4-a405-7cfd-baff-8dbcdfb7ac69",
+   "issue_id": "01a0cab4-a40f-7acb-aee7-eecd8d3147a3",
+   "created_at": "2026-09-22T20:00:31Z",
+   "completed_at": "2026-09-22T20:04:46Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0c58e-489a-79a2-b148-01a8e9a8a3e4",
+   "issue_id": "01a0c58e-48a3-7c83-8510-198fb775ce72",
+   "created_at": "2026-09-21T20:00:31Z",
+   "completed_at": "2026-09-21T21:51:37Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0c068-03b5-70a2-a68c-a28623e43d13",
+   "issue_id": "01a0c068-03c6-7634-8d45-9cc0548e3f4c",
+   "created_at": "2026-09-20T20:00:37Z",
+   "completed_at": "2026-09-20T21:54:06Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0bb41-7d90-7811-b333-6a32a9b114cb",
+   "issue_id": "01a0bb41-7d97-78bd-9cfb-d6321e4222ba",
+   "created_at": "2026-09-19T20:00:26Z",
+   "completed_at": "2026-09-19T20:57:42Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0b61b-1695-74ef-b093-e3bbf6c3aa0f",
+   "issue_id": "01a0b61b-169e-78e1-a6b5-8d7641bcf205",
+   "created_at": "2026-09-18T20:00:23Z",
+   "completed_at": null,
+   "status": "issue_created",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a0b0f4-9e30-7066-8776-4c5685189b7b",
+   "issue_id": "01a0b0f4-9e3b-795f-86f8-994b226aa18a",
+   "created_at": "2026-09-17T20:00:16Z",
+   "completed_at": "2026-09-17T21:35:20Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a0abce-41de-7d5e-9d25-b5050365cbf5",
+   "issue_id": "01a0abce-41ea-7886-bb8c-77da80785671",
+   "created_at": "2026-09-16T20:00:16Z",
+   "completed_at": "2026-09-16T20:00:20Z",
+   "status": "failed",
+   "failure_reason": "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 21st, 2026 6:38 AM.",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0a6a7-d34d-7548-aff4-ce9d56875037",
+   "issue_id": "01a0a6a7-d356-7134-9d86-f970cc471e1d",
+   "created_at": "2026-09-15T20:00:11Z",
+   "completed_at": "2026-09-15T20:08:58Z",
+   "status": "failed",
+   "failure_reason": "Selected model is at capacity. Please try a different model.",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0a181-bed7-7b51-8338-a3ec097fe034",
+   "issue_id": "01a0a181-bedf-75de-a805-4a652921828e",
+   "created_at": "2026-09-14T20:00:29Z",
+   "completed_at": "2026-09-14T20:58:33Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a09c5b-4508-7cff-8cf5-c1ce467fa838",
+   "issue_id": "01a09c5b-4510-748c-aecd-0501e3103dff",
+   "created_at": "2026-09-13T20:00:22Z",
+   "completed_at": "2026-09-13T20:40:15Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a09734-e6d1-7d58-9117-496b086330a0",
+   "issue_id": "01a09734-e6db-7149-ae1c-cded697b1a5d",
+   "created_at": "2026-09-12T20:00:21Z",
+   "completed_at": "2026-09-12T20:50:45Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a0920e-90b2-7225-a13d-1c4ab62bea14",
+   "issue_id": "01a0920e-90c0-72bd-9a40-acbab8d874a6",
+   "created_at": "2026-09-11T20:00:23Z",
+   "completed_at": "2026-09-11T20:15:00Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a08ce8-35e0-7c91-8f6e-6b2afc54d710",
+   "issue_id": "01a08ce8-35ec-75e8-b31a-0a550520cfe1",
+   "created_at": "2026-09-10T20:00:23Z",
+   "completed_at": "2026-09-10T20:13:36Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a087c1-d571-700b-9584-0ba49bace092",
+   "issue_id": "01a087c1-d586-7a90-99a6-4bf56d3b2650",
+   "created_at": "2026-09-09T20:00:22Z",
+   "completed_at": "2026-09-09T21:41:06Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0829b-82fe-7170-b1c5-085ecb1ab3dd",
+   "issue_id": "01a0829b-8309-712f-83b1-31003c0188c9",
+   "created_at": "2026-09-08T20:00:24Z",
+   "completed_at": "2026-09-08T21:07:33Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a08020-587c-7853-a3ec-462d9bf7cf82",
+   "issue_id": "01a08020-5886-720f-9053-0064769e847a",
+   "created_at": "2026-09-08T08:26:38Z",
+   "completed_at": "2026-09-08T10:14:06Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "manual"
+  },
+  {
+   "id": "01a07d75-2347-728c-8dc1-2d75ab78a5b8",
+   "issue_id": "01a07d75-2355-7a35-b80b-7d6e47501430",
+   "created_at": "2026-09-07T20:00:23Z",
+   "completed_at": "2026-09-07T21:56:57Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0784e-d5be-7c50-8557-65184649a1d8",
+   "issue_id": "01a0784e-d5cb-7e3e-8593-ff71f47d112a",
+   "created_at": "2026-09-06T20:00:27Z",
+   "completed_at": "2026-09-06T20:32:22Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a07328-6a97-7a20-8f34-b319c89c6b87",
+   "issue_id": "01a07328-6aa1-7b76-8a69-80805d1e42da",
+   "created_at": "2026-09-05T20:00:23Z",
+   "completed_at": "2026-09-05T21:01:49Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a06e02-1270-72dc-9020-d63adc415140",
+   "issue_id": "01a06e02-127b-757f-b7c5-3b6a6486fe8a",
+   "created_at": "2026-09-04T20:00:24Z",
+   "completed_at": "2026-09-04T20:33:46Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a06d71-8274-79f4-9f2e-fdd7c95343f7",
+   "issue_id": "01a06d71-827c-708e-9be1-f0da3eabb07c",
+   "created_at": "2026-09-04T17:22:30Z",
+   "completed_at": "2026-09-04T18:33:23Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "manual"
+  },
+  {
+   "id": "01a068db-bcc4-758c-b901-3d8a19971624",
+   "issue_id": "01a068db-bccd-7389-acf1-0b30b7878abd",
+   "created_at": "2026-09-03T20:00:26Z",
+   "completed_at": "2026-09-03T20:44:56Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a063b5-62b9-7881-bdd1-83e3223c2aa3",
+   "issue_id": "01a063b5-62c8-7f34-8901-580e722d9532",
+   "created_at": "2026-09-02T20:00:26Z",
+   "completed_at": "2026-09-02T20:53:48Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a05e8e-f95b-7b37-bae4-5858cbea0d17",
+   "issue_id": "01a05e8e-f968-76b9-b7a5-60f054e34f78",
+   "created_at": "2026-09-01T20:00:23Z",
+   "completed_at": "2026-09-01T20:32:31Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a05968-9daa-7efb-88f2-0dd975161021",
+   "issue_id": "01a05968-9dbb-7218-964e-b2c42280c417",
+   "created_at": "2026-08-31T20:00:23Z",
+   "completed_at": "2026-08-31T20:44:00Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a05442-4cab-717b-8e37-b45be17399c3",
+   "issue_id": "01a05442-4cb4-70fc-a4e0-8628e0cf60b9",
+   "created_at": "2026-08-30T20:00:26Z",
+   "completed_at": "2026-08-30T20:19:48Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a04f1c-0753-7544-96f0-5f9037eb1e1c",
+   "issue_id": "01a04f1c-0762-7599-a6a0-c01720aaa65e",
+   "created_at": "2026-08-29T20:00:32Z",
+   "completed_at": "2026-08-29T20:58:34Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a049f5-96f5-7427-9731-3c1f633de611",
+   "issue_id": "01a049f5-9702-73e9-bb05-3ac6e66c11d4",
+   "created_at": "2026-08-28T20:00:26Z",
+   "completed_at": "2026-08-28T20:49:44Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a044cf-3f3f-74c5-9df4-b781f1c08ae9",
+   "issue_id": "01a044cf-3f4b-7ba0-8496-8ad7d9bbf84b",
+   "created_at": "2026-08-27T20:00:27Z",
+   "completed_at": "2026-08-27T20:39:03Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "01a03fa8-e4ab-7178-83c1-b5c279e091ef",
+   "issue_id": "01a03fa8-e4bd-7de6-b132-c18b96aed187",
+   "created_at": "2026-08-26T20:00:28Z",
+   "completed_at": "2026-08-26T20:18:55Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a03a82-7822-767f-8f18-f2824694e23f",
+   "issue_id": "01a03a82-782e-79ed-a48e-b43731218e0a",
+   "created_at": "2026-08-25T20:00:24Z",
+   "completed_at": "2026-08-25T20:20:58Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a0355c-4160-7850-8b9c-c82bf6557d4f",
+   "issue_id": "01a0355c-416c-709d-a191-83600e277d16",
+   "created_at": "2026-08-24T20:00:33Z",
+   "completed_at": "2026-08-24T20:33:39Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a03035-de4f-76e3-bede-fd0f20134994",
+   "issue_id": "01a03035-de59-7b20-8ed5-6303a566beb6",
+   "created_at": "2026-08-23T20:00:31Z",
+   "completed_at": "2026-08-23T20:50:22Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a02b0f-96c6-7a87-a758-0c9095aac534",
+   "issue_id": "01a02b0f-96da-75c8-88d5-6f9ef8e09339",
+   "created_at": "2026-08-22T20:00:37Z",
+   "completed_at": "2026-08-22T21:14:48Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a025e9-3440-75ad-83bb-1572eb2496d5",
+   "issue_id": "01a025e9-3449-7e59-9636-a113ad836e15",
+   "created_at": "2026-08-21T20:00:35Z",
+   "completed_at": "2026-08-21T20:42:45Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "01a020c2-cb1d-79c4-9816-add715b6f421",
+   "issue_id": "01a020c2-cb37-762f-9a06-48390a793a7a",
+   "created_at": "2026-08-20T20:00:32Z",
+   "completed_at": "2026-08-20T20:21:56Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "cc55ddb8-8b1f-44c2-b8d5-ea39dc8b316e",
+   "issue_id": "b69e3e6b-de90-4cfd-8aa6-d4cec898d0bd",
+   "created_at": "2026-08-19T20:00:24Z",
+   "completed_at": "2026-08-19T20:16:33Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "0972f9a4-2792-401e-9b1a-feb5febf5a1e",
+   "issue_id": "5bb41960-bf56-4e1e-a91b-c8477909dab6",
+   "created_at": "2026-08-18T20:00:28Z",
+   "completed_at": "2026-08-18T20:42:07Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "98838972-5bcf-415d-b3a3-d385c3b5a224",
+   "issue_id": "44ed4541-536f-4ddd-8051-12ad5e6593c4",
+   "created_at": "2026-08-17T20:00:34Z",
+   "completed_at": "2026-08-17T21:11:06Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "4302e8bb-4e6f-45c9-9c26-d232cf2687ab",
+   "issue_id": "07fb9b92-b294-420b-8b2e-6bac2a266cae",
+   "created_at": "2026-08-16T20:00:21Z",
+   "completed_at": "2026-08-16T20:06:00Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "e15696dc-d4ff-47c4-865c-7d2ee64e962c",
+   "issue_id": "36ea063b-3de4-4ecc-addd-fbac9cf0ca8b",
+   "created_at": "2026-08-15T20:00:30Z",
+   "completed_at": "2026-08-15T20:43:30Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "f06d16fc-511d-4e8c-8533-42ce4aa2809e",
+   "issue_id": "5a6248e0-533d-43d5-b817-f59ffb9a1711",
+   "created_at": "2026-08-14T20:00:28Z",
+   "completed_at": "2026-08-14T20:22:12Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "d70a51a6-2f36-4b05-9564-c48e08af8c1c",
+   "issue_id": "fde6b688-93bc-4469-a7f4-b1a693f2194a",
+   "created_at": "2026-08-13T20:00:31Z",
+   "completed_at": "2026-08-13T20:08:19Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "587df842-9e7d-4d9a-86b6-7ed0bd06effb",
+   "issue_id": "524efa58-8d5c-4a01-8f76-18ebe0fbcb36",
+   "created_at": "2026-08-13T16:24:15Z",
+   "completed_at": "2026-08-13T16:46:44Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "manual"
+  },
+  {
+   "id": "bcd2129f-f1c5-4fc0-ac9f-e78720b3dc9f",
+   "issue_id": "ea753c19-f48b-4379-a780-854f2f048d2f",
+   "created_at": "2026-08-13T10:48:43Z",
+   "completed_at": "2026-08-13T11:36:13Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "manual"
+  },
+  {
+   "id": "f259dfd7-9e08-422f-b8e6-df5024308332",
+   "issue_id": "4d9c9aa5-2408-49cf-81d2-5515a1fadcfb",
+   "created_at": "2026-08-12T20:00:57Z",
+   "completed_at": "2026-08-12T20:33:28Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "41120c1c-2a47-45df-b44b-1434fa22bb45",
+   "issue_id": "ce6af595-e4dd-4db4-a40c-d554221b9ee4",
+   "created_at": "2026-08-11T20:00:19Z",
+   "completed_at": "2026-08-11T20:25:12Z",
+   "status": "completed",
+   "failure_reason": null,
+   "source": "schedule"
+  },
+  {
+   "id": "65554f7a-be51-4001-a6c1-3f0c3a09ca84",
+   "issue_id": "1ad3d0b9-6a6a-471c-95c7-b736d071ff94",
+   "created_at": "2026-08-10T20:00:28Z",
+   "completed_at": "2026-08-10T20:02:29Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  },
+  {
+   "id": "c070695a-d0ff-47c6-b07f-59464e34a798",
+   "issue_id": "e39cc518-dc45-4f11-8ad6-0427f9cbbcff",
+   "created_at": "2026-08-09T20:00:22Z",
+   "completed_at": "2026-08-09T20:02:57Z",
+   "status": "failed",
+   "failure_reason": "issue blocked",
+   "source": "schedule"
+  }
+ ],
+ "issues": [
+  {
+   "id": "01a020c2-cb37-762f-9a06-48390a793a7a",
+   "identifier": "WAIO-157",
+   "status": "blocked",
+   "created_at": "2026-08-20T20:00:32Z",
+   "updated_at": "2026-08-20T20:21:56Z",
+   "last_activity_at": "2026-08-20T20:21:56.429753Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a025e9-3449-7e59-9636-a113ad836e15",
+   "identifier": "WAIO-162",
+   "status": "blocked",
+   "created_at": "2026-08-21T20:00:35Z",
+   "updated_at": "2026-08-21T20:43:31Z",
+   "last_activity_at": "2026-08-21T20:43:31.725103Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a02b0f-96da-75c8-88d5-6f9ef8e09339",
+   "identifier": "WAIO-166",
+   "status": "blocked",
+   "created_at": "2026-08-22T20:00:37Z",
+   "updated_at": "2026-08-22T21:15:20Z",
+   "last_activity_at": "2026-08-22T21:15:20.147998Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a03035-de59-7b20-8ed5-6303a566beb6",
+   "identifier": "WAIO-170",
+   "status": "blocked",
+   "created_at": "2026-08-23T20:00:31Z",
+   "updated_at": "2026-08-23T20:50:56Z",
+   "last_activity_at": "2026-08-23T20:50:56.959701Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a0355c-416c-709d-a191-83600e277d16",
+   "identifier": "WAIO-181",
+   "status": "blocked",
+   "created_at": "2026-08-24T20:00:33Z",
+   "updated_at": "2026-08-24T20:34:08Z",
+   "last_activity_at": "2026-08-24T20:34:08.058143Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a03a82-782e-79ed-a48e-b43731218e0a",
+   "identifier": "WAIO-198",
+   "status": "blocked",
+   "created_at": "2026-08-25T20:00:24Z",
+   "updated_at": "2026-08-25T20:21:04Z",
+   "last_activity_at": "2026-08-25T20:21:04.481715Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a03fa8-e4bd-7de6-b132-c18b96aed187",
+   "identifier": "WAIO-219",
+   "status": "blocked",
+   "created_at": "2026-08-26T20:00:28Z",
+   "updated_at": "2026-08-26T20:19:42Z",
+   "last_activity_at": "2026-08-26T20:19:42.481258Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a044cf-3f4b-7ba0-8496-8ad7d9bbf84b",
+   "identifier": "WAIO-232",
+   "status": "in_review",
+   "created_at": "2026-08-27T20:00:27Z",
+   "updated_at": "2026-08-28T03:02:25Z",
+   "last_activity_at": "2026-08-28T03:02:25.900293Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-27T20:36:48Z\"}"
+   }
+  },
+  {
+   "id": "01a049f5-9702-73e9-bb05-3ac6e66c11d4",
+   "identifier": "WAIO-256",
+   "status": "in_review",
+   "created_at": "2026-08-28T20:00:26Z",
+   "updated_at": "2026-08-28T20:49:44Z",
+   "last_activity_at": "2026-08-28T20:49:44.721772Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-28T20:48:09Z\"}"
+   }
+  },
+  {
+   "id": "01a04f1c-0762-7599-a6a0-c01720aaa65e",
+   "identifier": "WAIO-275",
+   "status": "done",
+   "created_at": "2026-08-29T20:00:32Z",
+   "updated_at": "2026-08-31T09:14:25Z",
+   "last_activity_at": "2026-08-31T09:14:25.908838Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a05442-4cb4-70fc-a4e0-8628e0cf60b9",
+   "identifier": "WAIO-278",
+   "status": "in_review",
+   "created_at": "2026-08-30T20:00:26Z",
+   "updated_at": "2026-08-31T09:13:08Z",
+   "last_activity_at": "2026-08-31T09:13:08.35711Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-30T20:15:00Z\"}"
+   }
+  },
+  {
+   "id": "01a05968-9dbb-7218-964e-b2c42280c417",
+   "identifier": "WAIO-282",
+   "status": "in_review",
+   "created_at": "2026-08-31T20:00:23Z",
+   "updated_at": "2026-08-31T20:44:00Z",
+   "last_activity_at": "2026-08-31T20:44:00.433702Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-31T20:42:44Z\"}"
+   }
+  },
+  {
+   "id": "01a05e8e-f968-76b9-b7a5-60f054e34f78",
+   "identifier": "WAIO-291",
+   "status": "in_review",
+   "created_at": "2026-09-01T20:00:23Z",
+   "updated_at": "2026-09-01T20:32:32Z",
+   "last_activity_at": "2026-09-01T20:32:32.03883Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-09-01T20:31:34Z\"}"
+   }
+  },
+  {
+   "id": "01a063b5-62c8-7f34-8901-580e722d9532",
+   "identifier": "WAIO-300",
+   "status": "in_review",
+   "created_at": "2026-09-02T20:00:26Z",
+   "updated_at": "2026-09-02T20:53:48Z",
+   "last_activity_at": "2026-09-02T20:53:48.266401Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-09-02T20:52:31Z\"}"
+   }
+  },
+  {
+   "id": "01a068db-bccd-7389-acf1-0b30b7878abd",
+   "identifier": "WAIO-309",
+   "status": "blocked",
+   "created_at": "2026-09-03T20:00:26Z",
+   "updated_at": "2026-09-03T20:45:44Z",
+   "last_activity_at": "2026-09-03T20:45:44.972349Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a06d71-827c-708e-9be1-f0da3eabb07c",
+   "identifier": "WAIO-324",
+   "status": "in_review",
+   "created_at": "2026-09-04T17:22:30Z",
+   "updated_at": "2026-09-04T18:33:28Z",
+   "last_activity_at": "2026-09-04T18:33:28.648299Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-04T18:29:44Z\"}"
+   }
+  },
+  {
+   "id": "01a06e02-127b-757f-b7c5-3b6a6486fe8a",
+   "identifier": "WAIO-328",
+   "status": "in_review",
+   "created_at": "2026-09-04T20:00:24Z",
+   "updated_at": "2026-09-04T20:33:46Z",
+   "last_activity_at": "2026-09-04T20:33:46.691022Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-04T20:32:14Z\"}"
+   }
+  },
+  {
+   "id": "01a07328-6aa1-7b76-8a69-80805d1e42da",
+   "identifier": "WAIO-348",
+   "status": "in_review",
+   "created_at": "2026-09-05T20:00:23Z",
+   "updated_at": "2026-09-05T21:01:49Z",
+   "last_activity_at": "2026-09-05T21:01:49.179572Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-05T20:59:57Z\"}"
+   }
+  },
+  {
+   "id": "01a0784e-d5cb-7e3e-8593-ff71f47d112a",
+   "identifier": "WAIO-354",
+   "status": "in_review",
+   "created_at": "2026-09-06T20:00:27Z",
+   "updated_at": "2026-09-06T20:32:22Z",
+   "last_activity_at": "2026-09-06T20:32:22.542896Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-06T20:30:10Z\"}"
+   }
+  },
+  {
+   "id": "01a07d75-2355-7a35-b80b-7d6e47501430",
+   "identifier": "WAIO-383",
+   "status": "done",
+   "created_at": "2026-09-07T20:00:23Z",
+   "updated_at": "2026-09-08T04:32:11Z",
+   "last_activity_at": "2026-09-08T04:32:11.672343Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-08T04:15:09Z\"}"
+   }
+  },
+  {
+   "id": "01a08020-5886-720f-9053-0064769e847a",
+   "identifier": "WAIO-397",
+   "status": "done",
+   "created_at": "2026-09-08T08:26:38Z",
+   "updated_at": "2026-09-08T10:29:13Z",
+   "last_activity_at": "2026-09-08T10:29:13.882216Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-08T10:10:36Z\"}"
+   }
+  },
+  {
+   "id": "01a0829b-8309-712f-83b1-31003c0188c9",
+   "identifier": "WAIO-415",
+   "status": "in_review",
+   "created_at": "2026-09-08T20:00:24Z",
+   "updated_at": "2026-09-08T21:07:32Z",
+   "last_activity_at": "2026-09-08T21:07:32.995112Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-08T21:03:51Z\"}"
+   }
+  },
+  {
+   "id": "01a087c1-d586-7a90-99a6-4bf56d3b2650",
+   "identifier": "WAIO-427",
+   "status": "done",
+   "created_at": "2026-09-09T20:00:22Z",
+   "updated_at": "2026-09-10T12:49:31Z",
+   "last_activity_at": "2026-09-10T12:49:31.167967Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-10T12:40:32Z\"}"
+   }
+  },
+  {
+   "id": "01a08ce8-35ec-75e8-b31a-0a550520cfe1",
+   "identifier": "WAIO-440",
+   "status": "done",
+   "created_at": "2026-09-10T20:00:23Z",
+   "updated_at": "2026-09-12T18:57:43Z",
+   "last_activity_at": "2026-09-12T18:57:43.963745Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a0920e-90c0-72bd-9a40-acbab8d874a6",
+   "identifier": "WAIO-452",
+   "status": "done",
+   "created_at": "2026-09-11T20:00:23Z",
+   "updated_at": "2026-09-12T18:57:45Z",
+   "last_activity_at": "2026-09-12T18:57:45.042688Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-12T18:50:34Z\"}"
+   }
+  },
+  {
+   "id": "01a09734-e6db-7149-ae1c-cded697b1a5d",
+   "identifier": "WAIO-467",
+   "status": "done",
+   "created_at": "2026-09-12T20:00:21Z",
+   "updated_at": "2026-09-12T20:50:45Z",
+   "last_activity_at": "2026-09-12T20:50:45.371446Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-12T20:48:19Z\"}"
+   }
+  },
+  {
+   "id": "01a09c5b-4510-748c-aecd-0501e3103dff",
+   "identifier": "WAIO-469",
+   "status": "done",
+   "created_at": "2026-09-13T20:00:22Z",
+   "updated_at": "2026-09-14T13:49:53Z",
+   "last_activity_at": "2026-09-14T13:49:53.012593Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-13T20:37:31Z\"}"
+   }
+  },
+  {
+   "id": "01a0a181-bedf-75de-a805-4a652921828e",
+   "identifier": "WAIO-482",
+   "status": "done",
+   "created_at": "2026-09-14T20:00:29Z",
+   "updated_at": "2026-09-14T20:58:32Z",
+   "last_activity_at": "2026-09-14T20:58:32.987551Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-14T20:53:37Z\"}"
+   }
+  },
+  {
+   "id": "01a0a6a7-d356-7134-9d86-f970cc471e1d",
+   "identifier": "WAIO-499",
+   "status": "in_progress",
+   "created_at": "2026-09-15T20:00:11Z",
+   "updated_at": "2026-09-15T20:08:58Z",
+   "last_activity_at": "2026-09-15T20:08:58.538554Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a0abce-41ea-7886-bb8c-77da80785671",
+   "identifier": "WAIO-512",
+   "status": "todo",
+   "created_at": "2026-09-16T20:00:16Z",
+   "updated_at": "2026-09-16T20:00:20Z",
+   "last_activity_at": "2026-09-16T20:00:20.817922Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a0b0f4-9e3b-795f-86f8-994b226aa18a",
+   "identifier": "WAIO-532",
+   "status": "done",
+   "created_at": "2026-09-17T20:00:16Z",
+   "updated_at": "2026-09-17T21:35:20Z",
+   "last_activity_at": "2026-09-17T21:35:20.099691Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-17T21:32:32Z\"}"
+   }
+  },
+  {
+   "id": "01a0b61b-169e-78e1-a6b5-8d7641bcf205",
+   "identifier": "WAIO-545",
+   "status": "todo",
+   "created_at": "2026-09-18T20:00:23Z",
+   "updated_at": "2026-09-18T20:02:09Z",
+   "last_activity_at": "2026-09-18T20:02:09.978496Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a0bb41-7d97-78bd-9cfb-d6321e4222ba",
+   "identifier": "WAIO-547",
+   "status": "done",
+   "created_at": "2026-09-19T20:00:26Z",
+   "updated_at": "2026-09-20T10:36:25Z",
+   "last_activity_at": "2026-09-20T10:36:25.479672Z",
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v4": "{\"version\": 4, \"completed_at\": \"2026-09-20T10:35:37Z\"}"
+   }
+  },
+  {
+   "id": "01a0c068-03c6-7634-8d45-9cc0548e3f4c",
+   "identifier": "WAIO-559",
+   "status": "blocked",
+   "created_at": "2026-09-20T20:00:37Z",
+   "updated_at": "2026-09-20T21:54:06Z",
+   "last_activity_at": "2026-09-20T21:54:06.68035Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a0c58e-48a3-7c83-8510-198fb775ce72",
+   "identifier": "WAIO-568",
+   "status": "blocked",
+   "created_at": "2026-09-21T20:00:31Z",
+   "updated_at": "2026-09-21T21:51:46Z",
+   "last_activity_at": "2026-09-21T21:51:46.089062Z",
+   "metadata": {}
+  },
+  {
+   "id": "01a0cab4-a40f-7acb-aee7-eecd8d3147a3",
+   "identifier": "WAIO-587",
+   "status": "blocked",
+   "created_at": "2026-09-22T20:00:31Z",
+   "updated_at": "2026-09-23T17:43:17Z",
+   "last_activity_at": "2026-09-23T17:43:17.323073Z",
+   "metadata": {}
+  },
+  {
+   "id": "07fb9b92-b294-420b-8b2e-6bac2a266cae",
+   "identifier": "WAIO-130",
+   "status": "in_review",
+   "created_at": "2026-08-16T20:00:21Z",
+   "updated_at": "2026-08-16T20:06:00Z",
+   "last_activity_at": null,
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-16T20:05:32Z\"}"
+   }
+  },
+  {
+   "id": "1ad3d0b9-6a6a-471c-95c7-b736d071ff94",
+   "identifier": "WAIO-95",
+   "status": "blocked",
+   "created_at": "2026-08-10T20:00:28Z",
+   "updated_at": "2026-08-11T17:28:48Z",
+   "last_activity_at": null,
+   "metadata": {}
+  },
+  {
+   "id": "36ea063b-3de4-4ecc-addd-fbac9cf0ca8b",
+   "identifier": "WAIO-129",
+   "status": "done",
+   "created_at": "2026-08-15T20:00:30Z",
+   "updated_at": "2026-08-17T07:58:19Z",
+   "last_activity_at": null,
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-15T20:41:46Z\"}"
+   }
+  },
+  {
+   "id": "44ed4541-536f-4ddd-8051-12ad5e6593c4",
+   "identifier": "WAIO-143",
+   "status": "in_review",
+   "created_at": "2026-08-17T20:00:34Z",
+   "updated_at": "2026-08-17T21:11:06Z",
+   "last_activity_at": null,
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-17T21:10:10Z\"}"
+   }
+  },
+  {
+   "id": "4d9c9aa5-2408-49cf-81d2-5515a1fadcfb",
+   "identifier": "WAIO-106",
+   "status": "done",
+   "created_at": "2026-08-12T20:00:57Z",
+   "updated_at": "2026-08-13T08:39:05Z",
+   "last_activity_at": null,
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-12T20:32:34Z\"}"
+   }
+  },
+  {
+   "id": "524efa58-8d5c-4a01-8f76-18ebe0fbcb36",
+   "identifier": "WAIO-111",
+   "status": "in_review",
+   "created_at": "2026-08-13T16:24:15Z",
+   "updated_at": "2026-08-13T16:46:44Z",
+   "last_activity_at": null,
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-13T16:45:49Z\"}"
+   }
+  },
+  {
+   "id": "5a6248e0-533d-43d5-b817-f59ffb9a1711",
+   "identifier": "WAIO-121",
+   "status": "blocked",
+   "created_at": "2026-08-14T20:00:28Z",
+   "updated_at": "2026-08-17T08:31:34Z",
+   "last_activity_at": null,
+   "metadata": {}
+  },
+  {
+   "id": "5bb41960-bf56-4e1e-a91b-c8477909dab6",
+   "identifier": "WAIO-146",
+   "status": "blocked",
+   "created_at": "2026-08-18T20:00:28Z",
+   "updated_at": "2026-08-18T20:42:11Z",
+   "last_activity_at": null,
+   "metadata": {}
+  },
+  {
+   "id": "b69e3e6b-de90-4cfd-8aa6-d4cec898d0bd",
+   "identifier": "WAIO-151",
+   "status": "blocked",
+   "created_at": "2026-08-19T20:00:24Z",
+   "updated_at": "2026-08-19T20:17:05Z",
+   "last_activity_at": "2026-08-19T20:17:05.344564Z",
+   "metadata": {}
+  },
+  {
+   "id": "ce6af595-e4dd-4db4-a40c-d554221b9ee4",
+   "identifier": "WAIO-103",
+   "status": "done",
+   "created_at": "2026-08-11T20:00:19Z",
+   "updated_at": "2026-08-12T10:37:59Z",
+   "last_activity_at": null,
+   "metadata": {}
+  },
+  {
+   "id": "e39cc518-dc45-4f11-8ad6-0427f9cbbcff",
+   "identifier": "WAIO-89",
+   "status": "blocked",
+   "created_at": "2026-08-09T20:00:22Z",
+   "updated_at": "2026-08-09T20:02:58Z",
+   "last_activity_at": null,
+   "metadata": {}
+  },
+  {
+   "id": "ea753c19-f48b-4379-a780-854f2f048d2f",
+   "identifier": "WAIO-110",
+   "status": "blocked",
+   "created_at": "2026-08-13T10:48:43Z",
+   "updated_at": "2026-08-13T11:36:13Z",
+   "last_activity_at": null,
+   "metadata": {}
+  },
+  {
+   "id": "fde6b688-93bc-4469-a7f4-b1a693f2194a",
+   "identifier": "WAIO-112",
+   "status": "in_review",
+   "created_at": "2026-08-13T20:00:31Z",
+   "updated_at": "2026-08-13T20:08:19Z",
+   "last_activity_at": null,
+   "metadata": {
+    "ai_wiki_incremental_checkpoint_v3": "{\"version\": 3, \"completed_at\": \"2026-08-13T20:07:42Z\"}"
+   }
+  }
+ ],
+ "timelines": {
+  "01a020c2-cb37-762f-9a06-48390a793a7a": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-20T20:01:16Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-20T20:21:56Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a025e9-3449-7e59-9636-a113ad836e15": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-21T20:01:15Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-21T20:42:45Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a02b0f-96da-75c8-88d5-6f9ef8e09339": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-22T20:01:09Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-22T21:14:48Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a03035-de59-7b20-8ed5-6303a566beb6": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-23T20:01:11Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-23T20:50:22Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a0355c-416c-709d-a191-83600e277d16": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-24T20:01:17Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-24T20:33:39Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a03a82-782e-79ed-a48e-b43731218e0a": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-25T20:01:06Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-25T20:20:58Z",
+    "details": {
+     "from": "todo",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a03fa8-e4bd-7de6-b132-c18b96aed187": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-26T20:00:59Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-26T20:18:55Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a044cf-3f4b-7ba0-8496-8ad7d9bbf84b": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-27T20:01:38Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-27T20:39:03Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a049f5-9702-73e9-bb05-3ac6e66c11d4": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-28T20:01:39Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-28T20:49:44Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a04f1c-0762-7599-a6a0-c01720aaa65e": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-29T20:01:17Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-29T20:58:34Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-31T09:14:25Z",
+    "details": {
+     "from": "blocked",
+     "to": "done"
+    }
+   }
+  ],
+  "01a05442-4cb4-70fc-a4e0-8628e0cf60b9": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-30T20:01:06Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-30T20:19:48Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-31T09:02:54Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-31T09:13:01Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a05968-9dbb-7218-964e-b2c42280c417": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-31T20:01:25Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-31T20:44:00Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a05e8e-f968-76b9-b7a5-60f054e34f78": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-01T20:00:56Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-01T20:32:31Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a063b5-62c8-7f34-8901-580e722d9532": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-02T20:01:13Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-02T20:53:48Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a068db-bccd-7389-acf1-0b30b7878abd": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-03T20:00:48Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-03T20:44:56Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a06d71-827c-708e-9be1-f0da3eabb07c": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-04T17:22:58Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-04T18:33:23Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a06e02-127b-757f-b7c5-3b6a6486fe8a": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-04T20:00:55Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-04T20:33:46Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a07328-6aa1-7b76-8a69-80805d1e42da": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-05T20:00:54Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-05T21:01:49Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a0784e-d5cb-7e3e-8593-ff71f47d112a": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-06T20:00:52Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-06T20:32:22Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a07d75-2355-7a35-b80b-7d6e47501430": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-07T20:04:26Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-07T21:56:57Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T03:48:20Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T04:20:09Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T04:32:11Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "01a08020-5886-720f-9053-0064769e847a": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T08:27:18Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T10:14:06Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T10:29:13Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "01a0829b-8309-712f-83b1-31003c0188c9": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T20:01:50Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-08T21:07:33Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "01a087c1-d586-7a90-99a6-4bf56d3b2650": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-09T20:01:12Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-09T20:01:28Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-09T21:41:06Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-10T12:05:53Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-10T12:43:26Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-10T12:49:31Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "01a08ce8-35ec-75e8-b31a-0a550520cfe1": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-10T20:00:51Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-10T20:13:36Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-12T18:52:21Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-12T18:57:43Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "01a0920e-90c0-72bd-9a40-acbab8d874a6": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-11T20:00:56Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-11T20:15:00Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-12T17:32:58Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-12T18:53:07Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-12T18:57:45Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "01a09734-e6db-7149-ae1c-cded697b1a5d": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-12T20:00:52Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-12T20:50:45Z",
+    "details": {
+     "from": "in_progress",
+     "to": "done"
+    }
+   }
+  ],
+  "01a09c5b-4510-748c-aecd-0501e3103dff": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-13T20:00:57Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-13T20:40:15Z",
+    "details": {
+     "from": "in_progress",
+     "to": "done"
+    }
+   }
+  ],
+  "01a0a181-bedf-75de-a805-4a652921828e": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-14T20:01:05Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-14T20:58:32Z",
+    "details": {
+     "from": "in_progress",
+     "to": "done"
+    }
+   }
+  ],
+  "01a0a6a7-d356-7134-9d86-f970cc471e1d": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-15T20:00:42Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   }
+  ],
+  "01a0abce-41ea-7886-bb8c-77da80785671": [],
+  "01a0b0f4-9e3b-795f-86f8-994b226aa18a": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-17T20:01:00Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-17T21:35:20Z",
+    "details": {
+     "from": "in_progress",
+     "to": "done"
+    }
+   }
+  ],
+  "01a0b61b-169e-78e1-a6b5-8d7641bcf205": [],
+  "01a0bb41-7d97-78bd-9cfb-d6321e4222ba": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-19T20:00:55Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-19T20:57:42Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-20T10:33:46Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-20T10:36:25Z",
+    "details": {
+     "from": "in_progress",
+     "to": "done"
+    }
+   }
+  ],
+  "01a0c068-03c6-7634-8d45-9cc0548e3f4c": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-20T20:01:10Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-20T21:54:06Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a0c58e-48a3-7c83-8510-198fb775ce72": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-21T20:01:07Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-21T21:51:37Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "01a0cab4-a40f-7acb-aee7-eecd8d3147a3": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-22T20:00:59Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-22T20:04:46Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T15:15:03Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T15:33:41Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T15:45:12Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T15:56:20Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T17:10:16Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T17:13:29Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T17:36:53Z",
+    "details": {
+     "from": "blocked",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-09-23T17:42:48Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "07fb9b92-b294-420b-8b2e-6bac2a266cae": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-16T20:01:14Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-16T20:06:00Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "1ad3d0b9-6a6a-471c-95c7-b736d071ff94": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-10T20:01:11Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-10T20:02:29Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "36ea063b-3de4-4ecc-addd-fbac9cf0ca8b": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-15T20:01:15Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-15T20:43:30Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-17T07:58:19Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "44ed4541-536f-4ddd-8051-12ad5e6593c4": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-17T20:01:17Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-17T21:11:06Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "4d9c9aa5-2408-49cf-81d2-5515a1fadcfb": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-12T20:01:34Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-12T20:33:28Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-13T07:15:13Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "524efa58-8d5c-4a01-8f76-18ebe0fbcb36": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-13T16:25:15Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-13T16:46:44Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ],
+  "5a6248e0-533d-43d5-b817-f59ffb9a1711": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-14T20:01:20Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-14T20:22:12Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "5bb41960-bf56-4e1e-a91b-c8477909dab6": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-18T20:01:03Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-18T20:42:07Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "b69e3e6b-de90-4cfd-8aa6-d4cec898d0bd": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-19T20:01:08Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-19T20:16:33Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "ce6af595-e4dd-4db4-a40c-d554221b9ee4": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-11T20:00:52Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-11T20:25:12Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-12T10:37:59Z",
+    "details": {
+     "from": "in_review",
+     "to": "done"
+    }
+   }
+  ],
+  "e39cc518-dc45-4f11-8ad6-0427f9cbbcff": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-09T20:01:26Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-09T20:02:57Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "ea753c19-f48b-4379-a780-854f2f048d2f": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-13T10:49:24Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-13T11:36:13Z",
+    "details": {
+     "from": "in_progress",
+     "to": "blocked"
+    }
+   }
+  ],
+  "fde6b688-93bc-4469-a7f4-b1a693f2194a": [
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-13T20:01:16Z",
+    "details": {
+     "from": "todo",
+     "to": "in_progress"
+    }
+   },
+   {
+    "action": "status_changed",
+    "created_at": "2026-08-13T20:08:19Z",
+    "details": {
+     "from": "in_progress",
+     "to": "in_review"
+    }
+   }
+  ]
+ }
+}
