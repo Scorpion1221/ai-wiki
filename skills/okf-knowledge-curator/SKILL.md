@@ -2,17 +2,17 @@
 name: okf-knowledge-curator
 description: >-
   Curate messy source documents into strict Open Knowledge Format v0.2 bundles. Use when
-  the AI Wiki worker needs to split sources into durable concepts, preserve structured
-  provenance and per-claim attribution, leave generated/verified bookkeeping to the
-  service without faking verification, and hand concept edits back to deterministic
-  service gates.
+  the AI Wiki worker or the curating maintainer (in a pulled workspace) needs to split
+  sources into durable concepts, preserve structured provenance and per-claim attribution,
+  leave generated/verified bookkeeping to the service without faking verification, and hand
+  concept edits back to deterministic service gates.
 ---
 
 # OKF Knowledge Curator
 
 Target **strict OKF v0.2 only**. This skill is the authoring protocol used inside the AI
-Wiki worker; callers outside the worker submit sources through `ai-wiki ingest` rather
-than editing a bundle directly.
+Wiki worker and by the curating maintainer (see Remote maintainer mode); other callers
+submit sources through `ai-wiki ingest` rather than editing a bundle directly.
 
 ## Core workflow
 
@@ -185,6 +185,28 @@ merge; production QA proves availability; mature measurements prove effects.
 5. If evidence is insufficient, keep/demote to transient `draft` for the audit to qualify;
    if superseded, use `deprecated`.
 6. Report changed concept paths. The service applies update invariants and deterministic closeout.
+
+## Remote maintainer mode
+
+The curating maintainer (`ai-wiki-curating-maintainer`) runs this protocol without a worker
+around it: it curates in a workspace pulled by `ai-wiki workspace pull` (the published tree
+plus `.ai-wiki/`) and submits through the writer's deterministic gate. There, these rules
+replace the worker-specific ones above:
+
+1. Evidence is the claimed work item's frozen files under `<workspace>/.ai-wiki/items/<item>/`,
+   not a snapshot under `sources/`; still never write `sources/`. More evidence comes only from
+   `ai-wiki maint add-evidence`, never from your own text.
+2. Cite the item's one evidence packet as `{id: <evidence-id>, resource: evidence:packet}` with
+   `[^<evidence-id>]` footnotes; the gate rewrites the resource to the final `/sources/`
+   snapshot. Every changed concept cites it (else `uncited_change`); keep existing `sources`.
+3. Omit `status`, `generated` and `verified`: the gate stamps them (new concepts become
+   `draft`) and overwrites any you write. Start new concepts with `ai-wiki concept new`.
+4. Never delete or rename a concept: retire it with `ai-wiki propose --deprecate
+   PATH:SUPERSEDED_BY:REASON`. `type` and `title` are identity-locked (`--allow-retype
+   PATH:REASON`); a body below 70% of its base needs `--allow-shrink PATH:REASON`.
+5. Judge the workspace with `ai-wiki validate` (the gate's own code), then `ai-wiki propose`;
+   fix rejections by `code`, `line` and `hint`. The gate closes out indexes, log, source hashes,
+   commit and push; the independent audit runs later, never in the maintainer's run.
 
 ## Deterministic close-out commands (service/manual maintenance only)
 
