@@ -425,6 +425,8 @@ LIVE_GIT = os.environ.get("AIWIKI_TEST_BUNDLE_GIT")
 def test_live_bundle_head_still_validates_and_replay_cleans_the_real_orphan(tmp_path: Path, capsys) -> None:
     checkout = tmp_path / "bundle"
     subprocess.run(["git", "clone", "-q", LIVE_GIT, str(checkout)], check=True)
+    # Production removed the orphan on 2026-09-24, so HEAD no longer has it: pin a358395, which does.
+    subprocess.run(["git", "-C", str(checkout), "checkout", "-q", "a358395"], check=True)
     assert validate_main([str(checkout)]) == 0
     assert "WARNING: experiments/web-landing-page-aio-ab.md: body starts with" in capsys.readouterr().err
     assert [finding.split(":", 1)[0] for finding in spill_warnings(checkout)] == [ORPHAN_REL]
