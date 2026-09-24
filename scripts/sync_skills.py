@@ -4,6 +4,11 @@
 The destination may contain a platform-managed ``multica-metadata.json``; it is ignored
 during checks and preserved on apply. Every other destination file must come from the
 repository so deleted/renamed skill resources cannot linger as hidden behavior.
+
+``--apply`` first runs a skill's package shims (``scripts/*.py`` over ``_aiwiki``) from a
+copy outside the checkout, as a scheduled agent would, and leaves the runtime copy alone if
+one fails: the shims need an installed ai-wiki CLI with ``aiwiki.maint``, so the CLI must be
+upgraded before the skill is synced.
 """
 
 from __future__ import annotations
@@ -12,7 +17,9 @@ import argparse
 import hashlib
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 SKILLS = ("ai-wiki", "ai-wiki-maintainer", "okf-knowledge-curator")
@@ -44,6 +51,30 @@ def _check(source: Path, target: Path) -> list[str]:
         if expected[rel] != actual[rel]:
             findings.append(f"changed {rel}")
     return findings
+
+
+def _shim_failure(source: Path) -> str | None:
+    """Why the skill's shims fail when run as deployed (outside a checkout, PATH's python3), or None."""
+    shims = [path.name for path in sorted((source / "scripts").glob("*.py"))
+             if "from _aiwiki import" in path.read_text(encoding="utf-8")]
+    if not shims:
+        return None
+    python = shutil.which("python3")
+    if python is None:
+        return "python3 is not on PATH"
+    env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "AIWIKI_MAINT_SHIM_REEXEC")}
+    failing: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = Path(tmp) / source.name
+        shutil.copytree(source, staged, ignore=shutil.ignore_patterns("__pycache__"))
+        for name in shims:
+            result = subprocess.run([python, str(staged / "scripts" / name), "--help"], env=env, capture_output=True,
+                                    text=True, stdin=subprocess.DEVNULL, timeout=60, check=False)
+            if result.returncode:
+                failing.append((name, (result.stderr.strip().splitlines() or [f"exit {result.returncode}"])[-1]))
+    if not failing:
+        return None
+    return f"{', '.join(name for name, _ in failing)} fail in this runtime: {failing[0][1]}"
 
 
 def _apply(source: Path, target: Path) -> None:
@@ -86,6 +117,11 @@ def main(argv: list[str] | None = None) -> int:
             failed = True
             continue
         if args.apply:
+            failure = _shim_failure(source)
+            if failure:
+                print(f"ERROR {name}: not applied; {failure}")
+                failed = True
+                continue
             _apply(source, target)
         findings = _check(source, target)
         if findings:

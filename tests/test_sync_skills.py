@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,14 +9,57 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "sync_skills.py"
 
 
-def run(*args: str) -> subprocess.CompletedProcess[str]:
+def run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         cwd=ROOT,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def runtime(tmp_path: Path, cli_python: str) -> dict[str, str]:
+    """PATH with a system ``python3`` that lacks aiwiki and an ``ai-wiki`` CLI whose python3 runs ``cli_python``."""
+    tool, bin_dir = tmp_path / "uv-tools" / "ai-wiki" / "bin", tmp_path / "bin"
+    tool.mkdir(parents=True)
+    bin_dir.mkdir()
+    for directory, name, body in ((tool, "ai-wiki", "exit 0"), (tool, "python3", cli_python),
+                                  (bin_dir, "python3", f'exec "{sys.executable}" -S "$@"')):
+        (directory / name).write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        (directory / name).chmod(0o755)
+    (bin_dir / "ai-wiki").symlink_to(tool / "ai-wiki")
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    return {**env, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"}
+
+
+def test_sync_skills_apply_refuses_shims_an_old_cli_cannot_serve(tmp_path: Path) -> None:
+    target = tmp_path / "skills"
+    deployed = target / "ai-wiki-maintainer" / "scripts" / "checkpoint.py"
+    deployed.parent.mkdir(parents=True)
+    deployed.write_text("# the P0 script body\n", encoding="utf-8")
+    # The installed CLI predates aiwiki.maint, as 0.3.0 does.
+    stale = runtime(tmp_path, f'exec "{sys.executable}" -S "$@"')
+
+    applied = run("--apply", "--dest", str(target), "ai-wiki-maintainer", env=stale)
+
+    assert applied.returncode == 1
+    assert applied.stdout.startswith(
+        "ERROR ai-wiki-maintainer: not applied; checkpoint.py, issue_delta.py, scan_reference_repos.py fail in this "
+        "runtime: checkpoint: fatal: cannot import aiwiki.maint.checkpoint ")
+    assert applied.stdout.endswith("uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r\n")
+    assert deployed.read_text(encoding="utf-8") == "# the P0 script body\n"
+
+
+def test_sync_skills_apply_installs_shims_the_cli_serves(tmp_path: Path) -> None:
+    target = tmp_path / "skills"
+    current = runtime(tmp_path, f'PYTHONPATH="{ROOT / "src"}" exec "{sys.executable}" "$@"')
+
+    applied = run("--apply", "--dest", str(target), "ai-wiki-maintainer", env=current)
+
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert applied.stdout == f"OK ai-wiki-maintainer: {target / 'ai-wiki-maintainer'}\n"
 
 
 def test_sync_skills_apply_and_check_preserves_platform_metadata(tmp_path: Path) -> None:

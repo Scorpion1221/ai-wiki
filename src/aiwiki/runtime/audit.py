@@ -21,12 +21,13 @@ from pathlib import Path
 import yaml
 
 from ..engine import append_log, bookkeeping
-from ..engine.document import _instant, current_verified, normalize_verified
+from ..engine.document import OKFDocumentError, _instant, current_verified, normalize_verified
 from ..engine.gen_indexes import generate_indexes
+from ..engine.scan_sources import _source_resource_rel
 from ..engine.validate import parse_doc, should_check, validate_changed
 from ..engine.validate import validate as validate_bundle
 from ..version import service_identity
-from . import curate
+from . import curate, policy
 from .config import load_agent_timeouts
 from .failure import classify, failure, model_output_error, output_tail, redact
 
@@ -117,9 +118,14 @@ def concept_files(bundle: Path, parent: dict) -> list[str]:
 
 
 def _find_source(bundle: Path, parent: dict) -> str | None:
-    """Find the immutable source after the service moved it out of ``sources/inbox``."""
-    source = parent.get("source")
-    if isinstance(source, str):
+    """Find the immutable source after the service moved it out of ``sources/inbox``.
+
+    The snapshot the ingest recorded wins over an older source with the same bytes.
+    """
+    for key in ("source", "source_snapshot"):
+        source = parent.get(key)
+        if not isinstance(source, str):
+            continue
         direct = (bundle / source).resolve()
         try:
             direct.relative_to(bundle.resolve())
@@ -141,6 +147,13 @@ def _find_source(bundle: Path, parent: dict) -> str | None:
         if digest == expected:
             return path.relative_to(bundle).as_posix()
     return None
+
+
+def _deprecated(path: Path) -> bool:
+    try:
+        return parse_doc(path)[0].get("status") == "deprecated"
+    except OKFDocumentError:
+        return False  # the reviewer's validation reports it
 
 
 def _audited(path: Path) -> bool:
@@ -274,10 +287,10 @@ def _provenance_policy_errors(
             resource = source.get("resource")
             if not isinstance(resource, str):
                 continue
-            resolved = curate._source_resource_rel(resource.strip(), rel)
+            resolved = _source_resource_rel(resource.strip(), rel)
             if resolved is not None:
                 cited.add(resolved)
-            if not curate._local_resource_candidate(resource):
+            if not policy._local_resource_candidate(resource):
                 continue
             if resolved is None:
                 errors.append(
@@ -306,7 +319,7 @@ def _operational_path(rel: str) -> bool:
 def _audit_tree_snapshot(bundle: Path) -> dict[str, bytes]:
     return {
         rel: data
-        for rel, data in curate._agent_tree_snapshot(bundle).items()
+        for rel, data in policy._agent_tree_snapshot(bundle).items()
         if not _operational_path(rel)
     }
 
@@ -314,7 +327,7 @@ def _audit_tree_snapshot(bundle: Path) -> dict[str, bytes]:
 def _audit_symlink_snapshot(bundle: Path) -> dict[str, str]:
     return {
         rel: target
-        for rel, target in curate._agent_symlink_snapshot(bundle).items()
+        for rel, target in policy._agent_symlink_snapshot(bundle).items()
         if not _operational_path(rel)
     }
 
@@ -379,13 +392,11 @@ def _set_failure(job: dict, message: str, *, validation: dict | None = None) -> 
 def _deterministic_closeout(bundle: Path, parent_job_id: str, concept_files: list[str]) -> dict:
     """Trusted audit bookkeeping, intentionally after the agent scope gate."""
     written, missing = generate_indexes(bundle)
-    rc = append_log.main([
-        str(bundle), "audit", f"Audited ingest {parent_job_id}",
-        "--files", *concept_files,
-        "--date", datetime.now(UTC).date().isoformat(),
-    ])
-    if rc != 0:
-        raise RuntimeError("deterministic audit append_log closeout failed")
+    try:
+        append_log.append(bundle.resolve(), "audit", f"Audited ingest {parent_job_id}", concept_files,
+                          day=datetime.now(UTC).date().isoformat())
+    except ValueError as exc:
+        raise RuntimeError("deterministic audit append_log closeout failed") from exc
     return {
         "indexes": sorted(path.relative_to(bundle).as_posix() for path in written),
         "missing_index_descriptions": missing,
@@ -552,13 +563,27 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
             # Same gate as POST /audit; a queued audit re-checks it on the live tree.
             _set_failure(job, "ingest audit scope is missing or invalid")
             return
+        if parent.get("mode") == "changeset":
+            # While this audit waited out the maintainer run, a later changeset may have retired
+            # one of its concepts. A deprecated concept is never audited (design §5.4 A7): the
+            # reviewer would read its deprecation note against a packet that cannot support it.
+            retired = [rel for rel in concepts if _deprecated(bundle / rel)]
+            if retired:
+                concepts = [rel for rel in concepts if rel not in retired]
+                job.update(concept_files=concepts, deprecated_files=retired)
+            if not concepts:
+                job.update(status="done", phase="done", reason="no_concepts_to_audit", commit=None,
+                           changed_files=[], validation={"status": "passed", "error_count": 0},
+                           audit={"status": "passed", "verified_concepts": [], "unverified_concepts": [],
+                                  "corrected_concepts": []})
+                return
         source = _find_source(bundle, parent)
         if source is None:
             _set_failure(job, "immutable source snapshot not found")
             return
         job["source"] = source
 
-        symlinks = curate._agent_symlink_snapshot(bundle)
+        symlinks = policy._agent_symlink_snapshot(bundle)
         if symlinks:
             _set_failure(job, "audit refuses to run while the bundle contains symlinks")
             job["symlink_paths"] = sorted(symlinks)

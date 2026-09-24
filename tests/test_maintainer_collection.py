@@ -9,8 +9,8 @@ Hosts and names are placeholders.
 
 from __future__ import annotations
 
-import importlib.util
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -20,15 +20,11 @@ from typing import Any
 
 import pytest
 
+from aiwiki.maint import collect_repos as scanner
+
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills" / "ai-wiki-maintainer" / "scripts"
 FAKE = Path(__file__).with_name("fake_multica.py")
 AUTOPILOT = "5c80732b-67a6-4e33-ba22-c620a94e27c1"
-
-_spec = importlib.util.spec_from_file_location("scan_reference_repos", SCRIPTS / "scan_reference_repos.py")
-assert _spec and _spec.loader
-scanner = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(scanner)
 
 
 @dataclass
@@ -63,8 +59,9 @@ def multica(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeMultica:
     return FakeMultica(state)
 
 
-def script(name: str, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, str(SCRIPTS / name), *args], cwd=cwd or ROOT,
+def script(module: str, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, "-m", f"aiwiki.maint.{module}", *args], cwd=cwd or ROOT,
+                          env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
                           capture_output=True, text=True, check=False, timeout=60)
 
 
@@ -134,7 +131,7 @@ def test_find_picks_latest_valid_v4_by_completed_at_not_run_status(multica: Fake
     multica.save(production_like_state())
     cache = tmp_path / "cache"
 
-    result = script("checkpoint.py", "find", "--autopilot", AUTOPILOT, "--cache-dir", str(cache))
+    result = script("checkpoint", "find", "--autopilot", AUTOPILOT, "--cache-dir", str(cache))
 
     assert result.returncode == 0, result.stdout + result.stderr
     found = json.loads(result.stdout)
@@ -158,17 +155,17 @@ def test_find_falls_back_to_v3_then_reports_not_found(multica: FakeMultica) -> N
     state["metadata"] = {"issue-0902": state["metadata"]["issue-0902"]}
     multica.save(state)
 
-    fallback = script("checkpoint.py", "find", "--autopilot", AUTOPILOT)
+    fallback = script("checkpoint", "find", "--autopilot", AUTOPILOT)
     assert fallback.returncode == 0, fallback.stdout + fallback.stderr
     found = json.loads(fallback.stdout)
     assert (found["version"], found["fallback"], found["key"]) == (3, True, "ai_wiki_incremental_checkpoint_v3")
 
     multica.save({**state, "metadata": {}})
-    missing = script("checkpoint.py", "find", "--autopilot", AUTOPILOT)
+    missing = script("checkpoint", "find", "--autopilot", AUTOPILOT)
     assert missing.returncode == 1
     assert json.loads(missing.stdout)["found"] is False
 
-    seeded = script("checkpoint.py", "find", "--autopilot", AUTOPILOT, "--seed-issue", "issue-seed")
+    seeded = script("checkpoint", "find", "--autopilot", AUTOPILOT, "--seed-issue", "issue-seed")
     assert seeded.returncode == 1
     assert ["issue", "metadata", "list", "issue-seed", "--output", "json"] in multica.calls()
 
@@ -181,7 +178,7 @@ def test_find_pages_runs_and_reports_unreadable_issues(multica: FakeMultica) -> 
     state["fail"] = {"issue metadata list issue-0917": "Error: request failed: 502 Bad Gateway"}
     multica.save(state)
 
-    result = script("checkpoint.py", "find", "--autopilot", AUTOPILOT)
+    result = script("checkpoint", "find", "--autopilot", AUTOPILOT)
 
     assert result.returncode == 3, result.stdout + result.stderr
     found = json.loads(result.stdout)
@@ -199,7 +196,7 @@ def test_find_can_exclude_a_permanently_unreadable_run_issue(multica: FakeMultic
     state["fail"] = {"issue metadata list issue-0917": "Error: issue not found (404)"}
     multica.save(state)
 
-    result = script("checkpoint.py", "find", "--autopilot", AUTOPILOT, "--exclude-issue", "issue-0917")
+    result = script("checkpoint", "find", "--autopilot", AUTOPILOT, "--exclude-issue", "issue-0917")
 
     assert result.returncode == 0, result.stdout + result.stderr
     found = json.loads(result.stdout)
@@ -227,7 +224,7 @@ def test_find_fails_closed_when_an_unread_issue_may_hold_the_checkpoint(
     # caller would bootstrap every repo as new, or fall back to a v3 missing newer repos.
     multica.save({**production_like_state(), "metadata": metadata, "fail": fail})
 
-    result = script("checkpoint.py", "find", "--autopilot", AUTOPILOT)
+    result = script("checkpoint", "find", "--autopilot", AUTOPILOT)
 
     assert result.returncode == 2, result.stdout + result.stderr
     found = json.loads(result.stdout)
@@ -271,12 +268,12 @@ def test_build_merges_candidate_cursor_and_completion_into_valid_v4(tmp_path: Pa
     args = ["build", "--scan", str(scan), "--issues-cursor", str(delta), "--previous", str(previous),
             "--completed-at", "2026-09-24T04:30:00Z", "--output", str(output)]
 
-    undecided = script("checkpoint.py", *args)
+    undecided = script("checkpoint", *args)
     assert undecided.returncode == 2
     assert "baseline_required repos need --baseline-done or --baseline-waive REPO=REASON: seo" in undecided.stderr
     assert not output.exists()
 
-    result = script("checkpoint.py", *args, "--baseline-waive", "seo=dead release branch; durable docs only")
+    result = script("checkpoint", *args, "--baseline-waive", "seo=dead release branch; durable docs only")
 
     assert result.returncode == 0, result.stdout + result.stderr
     built = json.loads(output.read_text(encoding="utf-8"))
@@ -296,16 +293,16 @@ def test_build_merges_candidate_cursor_and_completion_into_valid_v4(tmp_path: Pa
     }]
     assert summary["warnings"] == {"default_branch_drift": 2, "truncated": 1}
 
-    done = script("checkpoint.py", *args, "--baseline-done", seo_id)
+    done = script("checkpoint", *args, "--baseline-done", seo_id)
     assert done.returncode == 0, done.stdout + done.stderr
     assert json.loads(output.read_text(encoding="utf-8"))["repos"][seo_id]["baseline"] == {
         "sha": "e" * 40, "at": "2026-09-24T04:30:00Z", "disposition": "done",
     }
-    unknown = script("checkpoint.py", *args, "--baseline-done", "seo", "--baseline-done", "web-server")
+    unknown = script("checkpoint", *args, "--baseline-done", "seo", "--baseline-done", "web-server")
     assert unknown.returncode == 2
     assert "'web-server' matches 0 baseline_required repos" in unknown.stderr
 
-    unchanged = script("checkpoint.py", "build", "--scan", str(scan), "--completed-at", "2026-09-24T04:30:00Z",
+    unchanged = script("checkpoint", "build", "--scan", str(scan), "--completed-at", "2026-09-24T04:30:00Z",
                        "--baseline-done", "seo", "--output", str(tmp_path / "unchanged.json"))
     assert unchanged.returncode == 0, unchanged.stdout + unchanged.stderr
     assert json.loads(unchanged.stdout)["issues_cursor"]["source"] == "unchanged"
@@ -354,7 +351,7 @@ def test_build_refuses_lossy_or_malformed_checkpoints(tmp_path: Path, mutate: An
                         encoding="utf-8")
     output = tmp_path / "v4.json"
 
-    result = script("checkpoint.py", "build", "--scan", str(scan), "--previous", str(previous),
+    result = script("checkpoint", "build", "--scan", str(scan), "--previous", str(previous),
                     "--output", str(output), *args)
 
     assert result.returncode == 2
@@ -372,12 +369,12 @@ def test_find_output_flows_through_scanner_and_build(tmp_path: Path) -> None:
     root = tmp_path / "reference"
     root.mkdir()
     first_scan = tmp_path / "first-scan.json"
-    scanned = script("scan_reference_repos.py", "--root", str(root), "--required-remote", str(remote),
+    scanned = script("collect_repos", "--root", str(root), "--required-remote", str(remote),
                      "--cache-dir", str(tmp_path / "cache"), "--output", str(first_scan), "--quiet")
     assert scanned.returncode == 0, scanned.stderr
     first_v4 = tmp_path / "first-v4.json"
 
-    built = script("checkpoint.py", "build", "--scan", str(first_scan), "--issues-updated-at",
+    built = script("checkpoint", "build", "--scan", str(first_scan), "--issues-updated-at",
                    "2026-09-23T17:53:52Z", "--issues-id", "01a0cf47", "--completed-at", "2026-09-23T18:00:00Z",
                    "--baseline-done", "remote", "--output", str(first_v4))
 
@@ -392,16 +389,16 @@ def test_find_output_flows_through_scanner_and_build(tmp_path: Path) -> None:
     found.write_text(json.dumps({"found": True, "checkpoint": json.loads(first_v4.read_text(encoding="utf-8"))}),
                      encoding="utf-8")
     next_scan = tmp_path / "next-scan.json"
-    rescanned = script("scan_reference_repos.py", "--root", str(root), "--required-remote", str(remote),
+    rescanned = script("collect_repos", "--root", str(root), "--required-remote", str(remote),
                        "--checkpoint-json", str(found), "--cache-dir", str(tmp_path / "cache"),
                        "--output", str(next_scan), "--quiet")
     assert rescanned.returncode == 0, rescanned.stderr
     assert json.loads(next_scan.read_text(encoding="utf-8"))["repos"][0]["state"] == "unchanged"
     args = ["build", "--previous", str(found), "--completed-at", "2026-09-24T18:00:00Z",
             "--output", str(tmp_path / "next-v4.json")]
-    assert script("checkpoint.py", *args, "--scan", str(next_scan)).returncode == 0
+    assert script("checkpoint", *args, "--scan", str(next_scan)).returncode == 0
 
-    stale = script("checkpoint.py", *args, "--scan", str(first_scan), "--baseline-done", "remote",
+    stale = script("checkpoint", *args, "--scan", str(first_scan), "--baseline-done", "remote",
                    "--issues-updated-at", "2026-09-24T17:00:00Z", "--issues-id", "01a0cf48")
     assert stale.returncode == 2
     assert "scan was not computed against --previous: remote" in stale.stderr
@@ -412,7 +409,7 @@ def test_write_sets_string_value_and_verifies_readback(multica: FakeMultica, tmp
     checkpoint = tmp_path / "v4.json"
     checkpoint.write_text(json.dumps(LATEST), encoding="utf-8")
 
-    result = script("checkpoint.py", "write", "--issue", "issue-0924", "--file", str(checkpoint))
+    result = script("checkpoint", "write", "--issue", "issue-0924", "--file", str(checkpoint))
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)["verified"] is True
@@ -424,7 +421,7 @@ def test_write_sets_string_value_and_verifies_readback(multica: FakeMultica, tmp
 
     tampered = {**LATEST, "completed_at": "2026-09-21T00:00:00Z"}
     multica.save({"metadata": {}, "readback": {"issue-0924": stored(tampered)}})
-    mismatch = script("checkpoint.py", "write", "--issue", "issue-0924", "--file", str(checkpoint))
+    mismatch = script("checkpoint", "write", "--issue", "issue-0924", "--file", str(checkpoint))
     assert mismatch.returncode == 2
     assert "does not match" in mismatch.stderr
 
@@ -433,7 +430,7 @@ def test_write_refuses_invalid_checkpoint_without_calling_multica(multica: FakeM
     checkpoint = tmp_path / "v4.json"
     checkpoint.write_text(json.dumps({**LATEST, "issues": None}), encoding="utf-8")
 
-    result = script("checkpoint.py", "write", "--issue", "issue-0924", "--file", str(checkpoint))
+    result = script("checkpoint", "write", "--issue", "issue-0924", "--file", str(checkpoint))
 
     assert result.returncode == 2
     assert "issues must be an object" in result.stderr
@@ -492,7 +489,7 @@ def test_issue_delta_lists_changed_issues_and_excludes_maintenance(
     cursor.write_text(json.dumps({"found": True, "checkpoint": {**LATEST, "issues": CURSOR}}), encoding="utf-8")
     cache = tmp_path / "cache"
 
-    result = script("issue_delta.py", "--autopilot", AUTOPILOT, "--cursor-json", str(cursor),
+    result = script("issue_delta", "--autopilot", AUTOPILOT, "--cursor-json", str(cursor),
                     "--exclude-issue", "explicit", "--cache-dir", str(cache), "--page-size", "3",
                     "--max-chars", "20", "--max-comments", "2")
 
@@ -551,7 +548,7 @@ def test_issue_delta_reports_deferred_issue_comments_before_the_cursor_passes_th
     })
     first_output = tmp_path / "delta-1.json"
 
-    first = script("issue_delta.py", "--autopilot", AUTOPILOT, "--since-updated-at", CURSOR["updated_at"],
+    first = script("issue_delta", "--autopilot", AUTOPILOT, "--since-updated-at", CURSOR["updated_at"],
                    "--since-id", CURSOR["id"], "--cache-dir", str(tmp_path / "c1"), "--output", str(first_output))
 
     assert first.returncode == 0, first.stdout + first.stderr
@@ -561,7 +558,7 @@ def test_issue_delta_reports_deferred_issue_comments_before_the_cursor_passes_th
     assert active["deferred"] is True
     assert [row["id"] for row in active["comments"]] == ["c-decision"]
 
-    second = script("issue_delta.py", "--autopilot", AUTOPILOT, "--cursor-json", str(first_output),
+    second = script("issue_delta", "--autopilot", AUTOPILOT, "--cursor-json", str(first_output),
                     "--cache-dir", str(tmp_path / "c2"), "--settle-seconds", "0")
 
     assert second.returncode == 0, second.stdout + second.stderr
@@ -579,7 +576,7 @@ def test_issue_delta_pages_by_returned_rows_when_the_server_caps_the_limit(
               for index in range(10)]
     multica.save({"runs": [], "issues": issues, "page_cap": 3})
 
-    result = script("issue_delta.py", "--autopilot", AUTOPILOT, "--since-updated-at", "2026-09-01T00:00:00Z",
+    result = script("issue_delta", "--autopilot", AUTOPILOT, "--since-updated-at", "2026-09-01T00:00:00Z",
                     "--since-id", "x", "--cache-dir", str(tmp_path / "cache"), "--page-size", "5")
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -612,7 +609,7 @@ def test_issue_delta_fails_closed_when_the_listing_is_not_provably_complete(
     multica.save({"runs": [], "issues": rows, "order_by_offset": orders})
     output = tmp_path / "delta.json"
 
-    result = script("issue_delta.py", "--autopilot", AUTOPILOT, "--since-updated-at", "2026-09-01T00:00:00Z",
+    result = script("issue_delta", "--autopilot", AUTOPILOT, "--since-updated-at", "2026-09-01T00:00:00Z",
                     "--since-id", "x", "--cache-dir", str(tmp_path / "cache"), "--page-size", "3",
                     "--output", str(output))
 
@@ -628,7 +625,7 @@ def test_issue_delta_without_changes_keeps_cursor_and_fails_closed(multica: Fake
     args = ["--autopilot", AUTOPILOT, "--since-updated-at", CURSOR["updated_at"], "--since-id", CURSOR["id"],
             "--cache-dir", str(tmp_path / "cache")]
 
-    quiet = script("issue_delta.py", *args)
+    quiet = script("issue_delta", *args)
     assert quiet.returncode == 0, quiet.stdout + quiet.stderr
     assert json.loads(quiet.stdout)["next_cursor"] == CURSOR
 
@@ -636,7 +633,7 @@ def test_issue_delta_without_changes_keeps_cursor_and_fails_closed(multica: Fake
     state["fail"] = {"issue comment list new": "Error: request failed: 503 Service Unavailable"}
     multica.save(state)
     output = tmp_path / "delta.json"
-    failed = script("issue_delta.py", *args, "--output", str(output))
+    failed = script("issue_delta", *args, "--output", str(output))
     assert failed.returncode == 2
     assert "503 Service Unavailable" in failed.stderr
     assert not output.exists()

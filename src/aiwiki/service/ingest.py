@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import uuid
@@ -30,6 +31,8 @@ _READABLE_BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _NEEDS_CONVERSION_EXT = {".pdf"}
 _REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion"}
 _REUSABLE_AUDIT_STATUSES = {"queued", "running", "done"}
+# A rejected or failed changeset frees its idempotency key, so a fixed resubmission runs (§2.7).
+_REUSABLE_CHANGESET_STATUSES = {"queued", "running", "done"}
 # A done audit whose reviewer omitted or garbled its verdict judged no evidence. It stays a
 # durable receipt, but the parent may be re-audited until this many such attempts exist.
 _VERDICT_FORMAT_REASONS = {"verdict_missing", "verdict_invalid"}
@@ -112,7 +115,11 @@ def new_job(bundle: Path, source_rel: str, sha: str, curatable: bool,
 
 
 def find_job_by_sha(bundle: Path, sha: str) -> dict | None:
-    """Return the newest reusable job for this exact source content."""
+    """Return the newest reusable job for this exact source content.
+
+    A changeset job names its packet's sha too, but it is no receipt for an upload: it may
+    be a noop that stored nothing, or be rejected later. So an upload only reuses ingests.
+    """
     jobs = bundle / ".okf" / "jobs"
     if not jobs.is_dir():
         return None
@@ -121,7 +128,7 @@ def find_job_by_sha(bundle: Path, sha: str) -> dict | None:
             job = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if (job.get("kind", "ingest") == "ingest" and job.get("sha256") == sha
+        if (job.get("kind", "ingest") == "ingest" and job.get("mode") != "changeset" and job.get("sha256") == sha
                 and job.get("status") in _REUSABLE_JOB_STATUSES):
             return job
     return None
@@ -219,6 +226,86 @@ def receive_audit(bundle: Path, parent_job: str, concept_files: list[str]) -> tu
         return new_audit_job(bundle, parent_job, concept_files), False
 
 
+def changeset_path(bundle: Path, job_id: str) -> Path:
+    """The persisted request of a changeset job, re-queued after a restart (§2.10)."""
+    return bundle / ".okf" / "changesets" / f"{job_id}.json"
+
+
+def _write_atomic(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    with temporary.open("w", encoding="utf-8") as out:
+        json.dump(value, out, ensure_ascii=False, indent=2)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(temporary, path)
+
+
+def changeset_jobs(bundle: Path, principal: str | None = None) -> list[dict]:
+    """The bundle's changeset jobs, or only those one principal submitted."""
+    jobs = []
+    for path in (bundle / ".okf" / "jobs").glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(job, dict) and job.get("mode") == "changeset" and principal in (None, job.get("principal")):
+            jobs.append(job)
+    return jobs
+
+
+def find_changeset_job(bundle: Path, principal: str, digest: str) -> dict | None:
+    """The principal's queued, running or done changeset with this idempotency key (§2.7).
+
+    One an admin reverted is not reused: its content is gone, so proposing it again is new work.
+    """
+    matches = [job for job in changeset_jobs(bundle, principal)
+               if job.get("changeset_sha256") == digest and job.get("status") in _REUSABLE_CHANGESET_STATUSES]
+    reverted = reverted_by(bundle) if matches else {}
+    return next((job for job in matches if job.get("id") not in reverted), None)
+
+
+def new_changeset_job(bundle: Path, record: dict, **fields) -> dict:
+    """Persist a changeset request, then its queued job (§2.5 G4). The request is written
+    first, so no queued job exists without the payload a restart re-queues."""
+    job = {"id": uuid.uuid4().hex[:12], "kind": "ingest", "mode": "changeset", "status": "queued",
+           "created": _now(), "service": service_identity(), **fields}
+    _write_atomic(changeset_path(bundle, job["id"]), record)
+    _write_atomic(job_path(bundle, job["id"]), job)
+    return job
+
+
+def new_revert_job(bundle: Path, **fields) -> dict:
+    """A queued admin revert (design §8.5). The job holds its whole request, so a restart
+    re-queues it from the job alone."""
+    job = {"id": uuid.uuid4().hex[:12], "kind": "revert", "status": "queued", "created": _now(),
+           "service": service_identity(), **fields}
+    _write_atomic(job_path(bundle, job["id"]), job)
+    return job
+
+
+def revert_jobs(bundle: Path) -> list[dict]:
+    jobs = []
+    for path in (bundle / ".okf" / "jobs").glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(job, dict) and job.get("kind") == "revert":
+            jobs.append(job)
+    return jobs
+
+
+def _reverted(jobs: list[dict]) -> dict[str, str]:
+    return {changeset: job["id"] for job in jobs if job.get("kind") == "revert" and job.get("status") == "done"
+            and isinstance(job.get("id"), str) for changeset in job.get("reverted") or [] if isinstance(changeset, str)}
+
+
+def reverted_by(bundle: Path) -> dict[str, str]:
+    """Changeset job id -> the done admin revert that reverted it."""
+    return _reverted(revert_jobs(bundle))
+
+
 def save_job(bundle: Path, job: dict) -> None:
     job_path(bundle, job["id"]).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -241,6 +328,7 @@ def pending_audits(bundle: Path, *, older_than_hours: float = 24, limit: int = 2
         if job.get("kind") == "audit":
             attempts.setdefault(job.get("parent_job"), []).append(job)
     reviewed = {parent for parent, audits in attempts.items() if _reusable_audit(audits) is not None}
+    reviewed |= set(_reverted(jobs))  # nothing of a reverted changeset is left to audit
     failed_audits = {}
     for job in sorted(jobs, key=lambda j: (j.get("created", ""), j.get("id", ""))):
         if job.get("kind") == "audit" and job.get("status") == "failed":

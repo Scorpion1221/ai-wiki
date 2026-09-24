@@ -9,6 +9,8 @@ document, then stamps them deterministically with trusted time.
 * ``verified`` history is never edited by the editor; an audit verdict of
   ``verified`` appends one event.
 * audit also freezes ``sources`` and owns ``status`` (``draft`` becomes ``stable``).
+* a curate changeset owns ``status`` too: a new concept starts ``draft``, an existing
+  one keeps its value, and a deprecate operation sets ``deprecated``.
 
 Patching is key-level text surgery, so every untouched key keeps its YAML style.
 Leading body lines that are spilled frontmatter or verification events are removed.
@@ -32,6 +34,7 @@ from .validate import SPILL_KEY_RE, split_body_spill
 SERVICE_KEYS = {
     "curate": ("verified", "generated"),
     "audit": ("verified", "generated", "status", "sources"),
+    "changeset": ("verified", "generated", "status"),
 }
 VERDICTS = {"verified", "unverified"}
 # Verification-event fields an editor may drop to column 0 (a lost ``- ``): never content.
@@ -44,6 +47,10 @@ _RESTORED = {
         "status": "restored service-owned status",
         "sources": "restored immutable sources provenance",
     },
+    "changeset": {
+        "verified": "restored service-owned verification history without adding verification",
+        "status": "restored service-owned status",
+    },
 }
 # A top-level YAML key at column 0; indented, list, comment and blank lines belong to it.
 _KEY = re.compile(
@@ -51,12 +58,17 @@ _KEY = re.compile(
 )
 _ABSENT = object()
 _INVALID = object()
+_MERGE_TAG = "tag:yaml.org,2002:merge"
 
 Block = tuple[str | None, list[str]]
 
 
 class BookkeepingError(ValueError):
     """The edited document cannot be patched into a parseable OKF concept."""
+
+    def __init__(self, message: str, *, line: int | None = None) -> None:
+        super().__init__(message)
+        self.line = line  # 1-based line in the edited file, when known
 
 
 class _TextLoader(yaml.SafeLoader):
@@ -97,6 +109,32 @@ def _blocks(lines: list[str]) -> list[Block]:
         else:
             blocks.append((None, [line]))
     return blocks
+
+
+def _require_plain_keys(frontmatter: list[str]) -> None:
+    """Refuse a top-level key that YAML reads other than as its block is named.
+
+    Surgery finds keys by their written names, so an escaped (``"stat\\x75s"``), tagged,
+    explicit (``? status``) or merge (``<<``) key, or one hidden in another key's block,
+    would carry a value past it.
+    """
+    try:
+        root = yaml.compose("".join(frontmatter), Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return  # a syntax error is reported where the document is parsed
+    pairs = root.value if isinstance(root, yaml.MappingNode) else []
+    read = [key.value if isinstance(key, yaml.ScalarNode) and key.tag != _MERGE_TAG else None for key, _ in pairs]
+    written, line = [], 2  # the frontmatter starts on file line 2
+    for key, lines in _blocks(frontmatter):
+        if key is not None:
+            written.append((key, line))
+        line += len(lines)
+    for index in range(max(len(read), len(written))):
+        name = read[index] if index < len(read) else None
+        if index >= len(written) or name != written[index][0]:
+            at = pairs[index][0].start_mark.line + 2 if index < len(pairs) else written[index][1]
+            shown = name if name is not None else written[index][0]
+            raise BookkeepingError(f"frontmatter key {shown!r} is not written as a plain name", line=at)
 
 
 def _join(blocks: list[Block]) -> str:
@@ -322,6 +360,71 @@ def normalize_snapshot_reference(
     ]
 
 
+def append_sources(text: str, entries: list[dict]) -> str:
+    """Append source entries to ``sources``, matching a block list's indentation.
+
+    Existing items keep their bytes. Each new entry is one flow mapping. A missing or
+    inline ``sources`` value is rewritten as a block list of its entries plus these.
+    """
+    if not entries:
+        return text
+    frontmatter, body = _split(text)
+    blocks = _blocks(frontmatter)
+    lines = _lines(blocks, "sources")
+    flow = [
+        yaml.safe_dump(entry, default_flow_style=True, sort_keys=False, allow_unicode=True, width=4096).strip()
+        for entry in entries
+    ]
+    items = [line for line in (lines or [])[1:] if line.strip() and not line.lstrip().startswith("#")]
+    if lines and not _inline(lines[0]) and items and items[0].lstrip().startswith("-"):
+        pad = items[0][: len(items[0]) - len(items[0].lstrip())]
+        patched = list(lines)
+        tail: list[str] = []
+        while len(patched) > 1 and not patched[-1].strip():
+            tail.insert(0, patched.pop())
+        patched += [f"{pad}- {item}\n" for item in flow] + tail
+    else:
+        current = _value(lines)
+        kept = [
+            yaml.safe_dump(entry, default_flow_style=True, sort_keys=False, allow_unicode=True, width=4096).strip()
+            for entry in (current if isinstance(current, list) else [])
+        ]
+        patched = ["sources:\n", *(f"  - {item}\n" for item in kept + flow)]
+    return "---\n" + _join(_put(blocks, "sources", patched, [])) + "---\n" + body
+
+
+def rewrite_source_resource(text: str, *, placeholder: str, resource: str) -> tuple[str, list[int]]:
+    """Replace every ``sources[].resource`` equal to ``placeholder`` with ``resource``.
+
+    Returns the text and the rewritten indices. The text is unchanged (and no index is
+    returned) when the placeholder also appears elsewhere in ``sources``, so a rewrite
+    never touches a title or reference that merely quotes it.
+    """
+    try:
+        sources = parse_document(text).frontmatter.get("sources")
+    except OKFDocumentError:
+        return text, []
+    indices = [
+        index for index, source in enumerate(sources if isinstance(sources, list) else [])
+        if isinstance(source, dict) and isinstance(source.get("resource"), str)
+        and source["resource"].strip() == placeholder
+    ]
+    frontmatter, body = _split(text)
+    blocks = _blocks(frontmatter)
+    lines = _lines(blocks, "sources") or []
+    if not indices or sum(line.count(placeholder) for line in lines) != len(indices):
+        return text, []
+    patched = [line.replace(placeholder, resource) for line in lines]
+    candidate = "---\n" + _join(_put(blocks, "sources", patched, [])) + "---\n" + body
+    try:
+        rewritten = parse_document(candidate).frontmatter.get("sources")
+    except OKFDocumentError:
+        return text, []
+    if not isinstance(rewritten, list) or any(rewritten[index].get("resource") != resource for index in indices):
+        return text, []
+    return candidate, indices
+
+
 def _seconds(value: datetime) -> datetime:
     return value.astimezone(UTC).replace(microsecond=0)
 
@@ -348,25 +451,32 @@ def apply_bookkeeping(
     trusted_now: datetime,
     stage: str,
     verdict: str | None = None,
+    deprecate: bool = False,
 ) -> tuple[str, list[str]]:
     """Return the edited document with service-owned bookkeeping restored and stamped.
 
-    ``before_text`` is the pre-edit document (None for a new concept; curation only).
-    ``verdict`` is the audit outcome for this concept: ``verified`` appends one
-    ``{by: actor, at: trusted time}`` event; ``unverified`` adds none. The second
-    return value lists deterministic repairs (discarded editor bookkeeping, spill).
-    Raises ``BookkeepingError`` when the edit cannot be made a parseable concept.
+    ``before_text`` is the pre-edit document (None for a new concept; curation and
+    changesets only). ``verdict`` is the audit outcome for this concept: ``verified``
+    appends one ``{by: actor, at: trusted time}`` event; ``unverified`` adds none.
+    ``deprecate`` marks a changeset deprecate operation, whose status is ``deprecated``.
+    The second return value lists deterministic repairs (discarded editor bookkeeping,
+    spill). Raises ``BookkeepingError`` when the edit cannot be made a parseable concept,
+    or when a changeset edit writes a top-level key other than as a plain name.
     """
     if stage not in SERVICE_KEYS:
         raise ValueError(f"unknown bookkeeping stage {stage!r}")
     if verdict is not None and (stage != "audit" or verdict not in VERDICTS):
         raise ValueError("only an audit may pass a verified/unverified verdict")
-    if before_text is None and stage == "audit":
-        raise ValueError("audit bookkeeping requires the pre-edit document")
+    if before_text is None and (stage == "audit" or deprecate):
+        raise ValueError("audit and deprecate bookkeeping require the pre-edit document")
+    if deprecate and stage != "changeset":
+        raise ValueError("only a changeset may deprecate a concept")
     if trusted_now.tzinfo is None:
         raise ValueError("trusted_now must be timezone-aware")
 
     after_fm, after_body = _split(after_text)
+    if stage == "changeset":
+        _require_plain_keys(after_fm)
     after_blocks = _blocks(after_fm)
     before_blocks: list[Block] = []
     before_body = ""
@@ -382,6 +492,8 @@ def apply_bookkeeping(
     status = None
     if stage == "audit":
         status = "deprecated" if before_doc.get("status") == "deprecated" else "stable"
+    elif stage == "changeset":
+        status = "deprecated" if deprecate else "draft" if before_text is None else None
 
     repairs: list[str] = []
     restored = after_blocks
@@ -415,7 +527,7 @@ def apply_bookkeeping(
             split_body_spill(after_body)[1] != split_body_spill(before_body)[1]
         ):
             repairs.append("discarded non-substantive formatting edits")
-        if stage == "curate":
+        if stage != "audit" and not deprecate:
             return before_text, repairs
         blocks, body = before_blocks, before_body
 

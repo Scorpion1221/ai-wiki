@@ -328,6 +328,23 @@ def test_failure_leaving_the_listing_window_is_not_announced_as_recovery(tmp_pat
             1, {"job_failed:solvely-wiki:3399e2a8cea8"}, action)
 
 
+def test_a_done_revert_settles_the_skipped_audit_of_the_changeset_it_reverted(tmp_path: Path) -> None:
+    now = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    at = iso(now - timedelta(hours=2))
+    skipped = {"id": "a1", "kind": "audit", "parent_job": "cs1", "status": "failed", "created": at, "finished": at,
+               "error": "changeset cs1 was reverted before its audit ran", "failure": {"class": "input"}}
+    unrelated = {**skipped, "id": "a2", "parent_job": "cs2", "error": "audit timed out"}
+    reverts = [{"id": "r1", "kind": "revert", "status": "done", "created": at, "reverted": ["cs1"]},
+               {"id": "r2", "kind": "revert", "status": "rejected", "created": at, "reverted": ["cs2"]}]
+    bundle = make_bundle(tmp_path, iso(now - timedelta(hours=1)), [skipped, unrelated, *reverts])
+
+    code, result = run("--bundle", str(bundle), "--now", iso(now))
+
+    assert (code, keys(result)) == (1, {"job_failed:solvely-wiki:a2"})  # only a done revert settles an audit
+    assert {row["id"]: row["resolved_by"] for row in result["checks"]["writer:solvely-wiki"]["failed_in_window"]} == {
+        "a1": "r1", "a2": None}
+
+
 def test_writer_reports_queue_depth_and_stuck_jobs(tmp_path: Path) -> None:
     now = datetime(2026, 9, 23, 19, 0, tzinfo=UTC)
     jobs = [
@@ -344,6 +361,33 @@ def test_writer_reports_queue_depth_and_stuck_jobs(tmp_path: Path) -> None:
     facts = result["checks"]["writer:solvely-wiki"]
     assert (facts["queue_depth"], facts["oldest_queued_age_hours"], facts["unreadable_jobs"]) == (2, 5.0, 1)
 
+
+
+@pytest.mark.parametrize(("lease_ago", "renewed_in", "stuck"), [
+    (None, None, True),  # no run holds the lease: 5h queued is stuck
+    (timedelta(hours=1), None, False),  # held back by a live run
+    (timedelta(hours=5), None, True),  # the run died 2h ago: waiting since, still past 1h
+    (timedelta(hours=3, minutes=30), None, False),  # lapsed only 30m ago
+    (timedelta(hours=1), timedelta(hours=10), True),  # a renewal from the future is forged
+])
+def test_a_queued_audit_waits_out_the_maintainer_lease(tmp_path: Path, lease_ago, renewed_in, stuck) -> None:
+    now = datetime(2026, 9, 23, 19, 0, tzinfo=UTC)
+    jobs = [{"id": "audit0000001", "kind": "audit", "parent_job": "cs0000000001", "status": "queued",
+             "created": iso(now - timedelta(hours=5))},
+            {"id": "ingest000001", "kind": "ingest", "status": "queued", "created": iso(now - timedelta(hours=5))}]
+    bundle = make_bundle(tmp_path, iso(now - timedelta(hours=1)), jobs)
+    if lease_ago is not None:  # last renewed then, so it lives 3h from there
+        renewed = now + renewed_in if renewed_in else now - lease_ago
+        (bundle / ".okf" / "maint").mkdir()
+        (bundle / ".okf" / "maint" / "lease-maintainer.json").write_text(json.dumps({
+            "holder": "process:ai-wiki-maintainer", "run": "WAIO-1", "renewed_at": iso(renewed),
+            "expires_at": iso(renewed + timedelta(hours=3))}))
+
+    code, result = run("--bundle", str(bundle), "--now", iso(now), "--stuck-hours", "1")
+
+    audit = "job_stuck:solvely-wiki:audit0000001:queued"
+    assert code == 1 and "job_stuck:solvely-wiki:ingest000001:queued" in keys(result)  # a lease defers no ingest
+    assert (audit in keys(result)) is stuck
 
 def test_missing_job_directory_is_an_error(tmp_path: Path) -> None:
     bundle = make_bundle(tmp_path, "2026-09-23T17:42:15Z", [])

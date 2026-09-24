@@ -406,3 +406,27 @@ def test_jobs_pending_audit_discovery(monkeypatch, capsys):
     assert cli.main(["jobs", "--pending-audit", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["total"] == 0
     assert calls == [("/jobs/pending-audit", {"bundle": "kb", "older_than_hours": 24})]
+
+
+def test_aiwiki_token_env_wins_and_stays_out_of_the_config(monkeypatch, tmp_path: Path, capsys) -> None:
+    p = _point_config(monkeypatch, tmp_path)
+    assert cli.main(["config", "set", "--endpoint", "https://h/"]) == 0
+    assert json.loads(p.read_text())["token"] is None  # an injected agent token is never saved
+
+    monkeypatch.setenv("AIWIKI_TOKEN", "aiw_c_from-env")
+    assert cli._conn() == ("https://h/", "aiw_c_from-env")
+    cli.main(["config", "set", "--token", "saved"])
+    assert cli._conn() == ("https://h/", "aiw_c_from-env")  # env wins over the saved token
+    seen = {}
+    monkeypatch.setattr(cli, "_send", lambda request: seen.update(auth=request.get_header("Authorization")) or {})
+    cli._api("/whoami")
+    assert seen["auth"] == "Bearer aiw_c_from-env"
+
+    capsys.readouterr()
+    assert cli.main(["config", "show", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["token"] == "aiw_…" and shown["token_source"] == "env:AIWIKI_TOKEN"
+    assert "from-env" not in json.dumps(shown)
+
+    monkeypatch.delenv("AIWIKI_TOKEN")
+    assert cli._conn() == ("https://h/", "saved")
