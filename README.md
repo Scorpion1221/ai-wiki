@@ -145,7 +145,10 @@ The canonical query, maintenance, and curation skills live in [`skills/`](skills
 - `ai-wiki` — read-side status/trust/freshness gates;
 - `ai-wiki-maintainer` — deterministic collection (`checkpoint.py`, `scan_reference_repos.py`,
   `issue_delta.py`), the `ai-wiki maintain` ledger, and checkpoint orchestration;
-- `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker.
+- `ai-wiki-curating-maintainer` — the maintainer that curates: `doctor`, `maint begin/next`,
+  local curation, `validate`/`propose` through the writer's gate, and the `maint end` report;
+- `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker and, in its
+  remote maintainer mode, by the curating maintainer.
 
 Check an installed runtime for drift, then explicitly synchronize it:
 
