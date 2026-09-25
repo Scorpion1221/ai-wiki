@@ -910,16 +910,17 @@ curl -s -H @$P2/maintainer.h http://127.0.0.1:8788/whoami | jq -c '{principal, r
 curl -s -o /dev/null -w '%{http_code}\n' -H @$P2/maintainer.h http://127.0.0.1:8787/health   # 200: the mirror reloaded too
 ```
 
-On the laptop, put the token into the production agent's custom env. `env set` replaces the
+On the laptop, put the token into the production agent's custom env. `env get` prints
+`{agent_id, custom_env}`, so the map is `.custom_env`. `env set` replaces the
 whole map, and `****` keeps an existing entry; the token passes through the environment, never
 argv:
 
 ```bash
 PROD_AGENT=1dcccd34-e9e4-48c7-a0a3-32c061d4c284          # AI Wiki Maintainer, runtime df0fb673
 read -rs MAINT_TOKEN && export MAINT_TOKEN               # ssh aliyun-jp cat /root/ai-wiki-phase2/maintainer.token
-multica agent env get $PROD_AGENT | jq -c 'map_values("****") + {AIWIKI_TOKEN: $ENV.MAINT_TOKEN}' \
+multica agent env get $PROD_AGENT | jq -c '.custom_env | map_values("****") + {AIWIKI_TOKEN: $ENV.MAINT_TOKEN}' \
   | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null
-multica agent env get $PROD_AGENT | jq -c keys           # the previous keys and AIWIKI_TOKEN
+multica agent env get $PROD_AGENT | jq -c '.custom_env | keys'   # the previous keys and AIWIKI_TOKEN
 ```
 
 On the runtime host, as the runtime user (plan step 5 put the merge's CLI there), the Phase 1
@@ -930,6 +931,8 @@ Phase 3a, and `--skills-dir` checks the curating pair.
 read -rs AIWIKI_TOKEN && export AIWIKI_TOKEN             # the same maintainer token
 ai-wiki -b solvely-wiki doctor --role curator --json | jq -c '{ok, failed: [.checks[] | select(.ok | not)]}'
 #   {"ok":true,"failed":[]}
+# Run this on the runtime host: the tool:* rows check the agent's own PATH (multica, git). On a
+# host without multica, such as aliyun-jp, only those rows fail; the server rows must still pass.
 unset AIWIKI_TOKEN
 ```
 
@@ -940,7 +943,7 @@ aliyun-jp. Gate: the next scheduled production run completes as usual (issue don
 Rollback, in this order (the agent first, or its next run gets 401):
 
 ```bash
-multica agent env get $PROD_AGENT | jq -c 'del(.AIWIKI_TOKEN) | map_values("****")' \
+multica agent env get $PROD_AGENT | jq -c '.custom_env | del(.AIWIKI_TOKEN) | map_values("****")' \
   | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null     # laptop: the CLI falls back to its saved legacy token
 pp remove process:ai-wiki-maintainer                                    # aliyun-jp, then the two HUP lines above
 ```
@@ -1009,7 +1012,7 @@ awk 'f;/^---$/{f=1}' docs/prompts/shadow-agent-instructions.md > ~/ai-wiki-phase
 read -rs SHADOW_TOKEN
 printf '{"AIWIKI_TOKEN":"%s"}' "$SHADOW_TOKEN" | multica agent create --name "AI Wiki Maintainer (shadow)" \
   --runtime-id df0fb673-5552-4c64-9b9a-3bb95937ca83 --model claude-opus-5-5-combos --max-concurrent-tasks 1 \
-  --visibility workspace --instructions "$(cat ~/ai-wiki-phase2/shadow-instructions.md)" --custom-env-stdin   # SHADOW_AGENT_ID
+  --permission-mode private --instructions "$(cat ~/ai-wiki-phase2/shadow-instructions.md)" --custom-env-stdin   # SHADOW_AGENT_ID
 unset SHADOW_TOKEN
 multica agent skills add $SHADOW_AGENT_ID --skill-ids $NEW_SKILL_ID,$OKF_SKILL   # not ai-wiki (e49bcda9): legacy flow
 ```
@@ -1108,7 +1111,7 @@ multica autopilot delete $AP_ID
 multica agent archive $SHADOW_AGENT_ID
 multica skill delete $NEW_SKILL_ID
 PROD_AGENT=1dcccd34-e9e4-48c7-a0a3-32c061d4c284
-multica agent env get $PROD_AGENT | jq -c 'del(.AIWIKI_TOKEN) | map_values("****")' \
+multica agent env get $PROD_AGENT | jq -c '.custom_env | del(.AIWIKI_TOKEN) | map_values("****")' \
   | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null      # only if §10a ran
 ```
 
