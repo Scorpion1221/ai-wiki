@@ -88,7 +88,10 @@ fresh, `verification_current: true`, and backed by a source that proves that exa
 
 ## 4. Submit, then audit (when writes are enabled)
 
-Agents never edit concepts or the bundle Git repository directly. Submit sources:
+Agents never edit concepts or the bundle Git repository directly. The one exception is the
+curating maintainer (`skills/ai-wiki-curating-maintainer`, run first as the Phase 2 shadow): it
+edits concepts only in a workspace pulled with `ai-wiki workspace pull` and submits them through
+the writer's gate with `ai-wiki propose`. Everyone else submits sources:
 
 ```bash
 ai-wiki ingest notes.md
@@ -165,8 +168,9 @@ operator abandons it with `ai-wiki maintain --state-dir DIR --drop SHA256_PREFIX
 
 ## 5. Skill source of truth
 
-Repository directories `skills/ai-wiki`, `skills/ai-wiki-maintainer`, and
-`skills/okf-knowledge-curator` are canonical. Detect runtime drift with:
+Repository directories `skills/ai-wiki`, `skills/ai-wiki-maintainer`,
+`skills/ai-wiki-curating-maintainer`, and `skills/okf-knowledge-curator` are canonical. Detect
+runtime drift with:
 
 ```bash
 python3 scripts/sync_skills.py --check

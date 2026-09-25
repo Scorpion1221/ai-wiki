@@ -22,7 +22,7 @@ from aiwiki.version import VERSION
 
 MIN_FREE_BYTES = 2 * 1024 ** 3
 TOOLS = {"curator": ("git", "uv", "multica"), "auditor": ("git", "uv"), "member": ()}
-SKILLS = {"curator": ("ai-wiki", "ai-wiki-maintainer", "okf-knowledge-curator"),
+SKILLS = {"curator": ("ai-wiki-curating-maintainer", "okf-knowledge-curator"),
           "auditor": ("ai-wiki",), "member": ("ai-wiki",)}
 _IGNORED = {"multica-metadata.json", ".DS_Store"}  # as scripts/sync_skills.py
 
@@ -75,9 +75,11 @@ def _server(role: str, bundle: str | None, check) -> None:
             check("writer", who.get("writer") is True, "the writer answered" if who.get("writer") is True
                   else "a read mirror answered /whoami; route it to the writer (design §2.1)")
     status, health = _get("/health", bundle)
+    detail = f"GET /health answered {status}" + (f": {health['detail']}" if health.get("detail") else "")
+    if status == 404:  # the public /health stays on the read mirror, which must serve the bundle too
+        detail += "; the read mirror must serve this bundle"
     check("okf_version", status == 200 and health.get("okf_version") == "0.2",
-          f"bundle {health.get('bundle')} okf_version {health.get('okf_version')}" if status == 200
-          else f"GET /health answered {status}")
+          f"bundle {health.get('bundle')} okf_version {health.get('okf_version')}" if status == 200 else detail)
 
 
 def run(role: str, *, bundle: str | None, state_dir: Path, skills_dir: Path | None) -> dict:

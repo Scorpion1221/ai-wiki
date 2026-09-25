@@ -8,8 +8,11 @@ Each check group is opt-in:
                    todo/in_progress, and runs stuck before a terminal state.
   --ledger PATH    `ai-wiki maintain` state.json (or its state directory): pending ages and
                    needs_repair entries.
-  --bundle PATH    Writer host bundle (repeatable): last Git commit age, and the worker's job
-                   files in <bundle>/.okf/jobs (unresolved failures, queue depth, stuck jobs).
+  --bundle PATH    Writer host bundle (repeatable): last Git commit age, the worker's job files in
+                   <bundle>/.okf/jobs (unresolved failures, queue depth, stuck jobs), and the
+                   maintainer queue in <bundle>/.okf/maint (needs_human and corrupt items, stale
+                   ready items, collector cursors that stopped advancing once they exist, stuck
+                   run leases).
 
 Prints one JSON document. Exit 0 = ok, 1 = alert, 2 = error (a check or the notification
 failed, or bad usage). With --feishu-webhook, a Feishu card (red alert, grouped by check, with
@@ -19,8 +22,8 @@ card itself, the same content is sent as plain text.
 
 --now replays the Multica checks at a past instant: runs created later are ignored, runs that
 completed later count as still open, checkpoints written later are ignored, and issue status
-is rebuilt from the status_changed timeline. Ledger and writer checks read the files as they
-are now and only measure ages from --now.
+is rebuilt from the status_changed timeline. Ledger, writer and maint checks read the files as
+they are now and only measure ages from --now.
 """
 from __future__ import annotations
 
@@ -54,6 +57,13 @@ STUCK_ISSUE_STATUSES = ("todo", "in_progress")
 # and a renewal stamped further ahead than the clock skew is forged.
 LEASE_TTL = timedelta(hours=3)
 LEASE_CLOCK_SKEW = timedelta(minutes=5)
+MAINT_ROLES = ("maintainer", "auditor")
+MAINT_CURSORS = ("repos", "issues")
+MAINT_ITEM = re.compile(r"it_[0-9a-f]{12}")
+# service/maint_state._valid: an item.json that fails it is invisible to the writer.
+MAINT_FIELDS = {"id": str, "status": str, "origin": dict, "topic_key": str, "item_key": str, "priority": int,
+                "brief": str, "files": list, "attempts": dict, "versions": list, "created_at": str}
+SHA256 = re.compile(r"[0-9a-f]{64}")
 CLOSED_ISSUE_STATUSES = ("done", "cancelled", "canceled")
 MAX_MESSAGE_LINES = 12
 CST = timezone(timedelta(hours=8))
@@ -68,6 +78,12 @@ CARD_GROUPS = (
      "maintain 管理的来源会自动重试；成员手动 ingest 的失败需要重新提交"),
     (("bundle_commit_",), "📦 Bundle 提交", "确认 writer 服务和每日维护是否仍在产出提交"),
     (("error:",), "⚠️ 检查本身失败", "watchdog 无法完成这项检查，先修复访问或权限"),
+    # Last, so a backlog of per-item maint alerts cannot crowd the older groups off the card.
+    (("maint_",), "🧭 Maintainer 队列",
+     "needs_human 的原因见 `ai-wiki maint status --json`（尝试明细见 `GET /maint/items/<id>`），修好后 owner 调 "
+     "`POST /admin/items/<id>/retry`（或 `/resolve` 结案）；损坏的条目要恢复或修好它的 item.json；"
+     "ready 超时查 maintainer 定时运行；游标超时查 `maint collect` 和失败的仓库；"
+     "lease 卡住查该 run 的 issue，下一次 `maint begin` 会接管过期的 lease"),
 )
 _ISO = re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)")
 
@@ -101,6 +117,24 @@ def short(text: object, limit: int = 80) -> str:
 
 def alert(check: str, key: str, message: str) -> dict:
     return {"check": check, "key": key, "message": message}
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def lease_until(lease: dict | None, now: datetime) -> datetime | None:
+    """When a writer run lease lapses; None for no lease, a malformed one or a forged renewal."""
+    if not lease:
+        return None
+    expires, renewed = parse_ts(lease.get("expires_at")), parse_ts(lease.get("renewed_at"))
+    if expires and renewed and renewed <= now + LEASE_CLOCK_SKEW:
+        return min(expires, renewed + LEASE_TTL)
+    return None
 
 
 def run_json(cmd: list[str], *, timeout: float = 60) -> object:
@@ -399,25 +433,17 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
     queued = sorted(created for created, job in jobs if job.get("status") == "queued")
     # The writer holds queued Codex audits back while a maintainer run holds its lease (design
     # §2.6). Such an audit is not stuck until the lease lapses, and its wait counts from then.
-    lease_until = None
-    try:
-        lease = json.loads((bundle / ".okf" / "maint" / "lease-maintainer.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        lease = None
-    if isinstance(lease, dict):
-        expires, renewed = parse_ts(lease.get("expires_at")), parse_ts(lease.get("renewed_at"))
-        if expires and renewed and renewed <= now + LEASE_CLOCK_SKEW:
-            lease_until = min(expires, renewed + LEASE_TTL)
+    until = lease_until(read_json(bundle / ".okf" / "maint" / "lease-maintainer.json"), now)
     stuck = []
     for created, job in jobs:
         status = job.get("status")
         if status not in ("queued", "running"):
             continue
         since = (parse_ts(job.get("started")) or created) if status == "running" else created
-        if status == "queued" and job.get("kind") == "audit" and lease_until is not None:
-            if now < lease_until:
+        if status == "queued" and job.get("kind") == "audit" and until is not None:
+            if now < until:
                 continue
-            since = max(since, lease_until)
+            since = max(since, until)
         age = age_h(now, since)
         if age > args.stuck_hours:
             stuck.append({"id": job.get("id"), "status": status, "age_hours": age})
@@ -425,10 +451,136 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
                                 f"writer {name}：job {job.get('id')} 停在 {status} 已 {age}h"
                                 f"（阈值 {args.stuck_hours:g}h）"))
     facts = {"bundle": str(bundle), "last_commit": commit_fact, "jobs": len(jobs), "unreadable_jobs": unreadable,
-             "status_counts": counts, "queue_depth": len(queued), "maintainer_lease_until": iso(lease_until),
+             "status_counts": counts, "queue_depth": len(queued), "maintainer_lease_until": iso(until),
              "oldest_queued_age_hours": age_h(now, queued[0]) if queued else None, "stuck_jobs": stuck,
              "failed_in_window": failed, "failed_window_hours": args.failed_window_hours,
              "unresolved_failure_hours": args.unresolved_failure_hours}
+    return facts, alerts
+
+
+# --- maintainer queue ----------------------------------------------------------------------
+
+
+def maint_item_ok(item: dict | None, item_id: str) -> bool:
+    """The writer's own item check (maint_state._valid), plus a created_at the watchdog can age."""
+    if not item or item.get("id") != item_id or not all(
+            isinstance(item.get(key), kind) for key, kind in MAINT_FIELDS.items()):
+        return False
+    attempts = item["attempts"]
+    return (isinstance(item["origin"].get("kind"), str)
+            and all(isinstance(f, dict) and isinstance(f.get("name"), str) and isinstance(f.get("bytes"), int)
+                    and isinstance(f.get("sha256"), str) and SHA256.fullmatch(f["sha256"]) for f in item["files"])
+            and all(isinstance(v, dict) for v in item["versions"])
+            and isinstance(attempts.get("started"), int) and isinstance(attempts.get("counted"), int)
+            and isinstance(attempts.get("history"), list) and all(isinstance(h, dict) for h in attempts["history"])
+            and isinstance(item.get("resolution") or {}, dict) and isinstance(item.get("reopened", []), list)
+            and parse_ts(item["created_at"]) is not None)
+
+
+def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[dict, list[dict]]:
+    """The writer's maintainer queue in <bundle>/.okf/maint (service/maint_state.py), design §7 SLOs.
+    Until the bundle's cursors are seeded the directory is missing or holds no cursor: that is
+    quiet, not an error."""
+    name, root = bundle.name, bundle / ".okf" / "maint"
+    check = f"maint:{name}"
+    try:
+        dirs = sorted((root / "items").iterdir()) if (root / "items").is_dir() else []
+    except OSError as exc:
+        raise CheckError(f"cannot list {root / 'items'}: {exc}") from None
+    items, corrupt, alerts = [], [], []
+    for path in dirs:
+        if not MAINT_ITEM.fullmatch(path.name) or not (path / "item.json").exists():
+            continue  # an interrupted create, which the writer ignores too
+        item = read_json(path / "item.json")
+        if maint_item_ok(item, path.name):
+            items.append(item)
+            continue
+        # The writer skips it (maint next, maint status) and its admin routes answer 500
+        # item_corrupt: the item has left the queue, which must not read as a recovery.
+        corrupt.append(path.name)
+        alerts.append(alert(check, f"maint_item_corrupt:{name}:{path.name}",
+                            f"maint {name}：条目 {path.name} 的 item.json 已损坏，writer 不再处理它"))
+
+    counts, needs_human, ready = {}, [], []
+    for item in items:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+        if item["status"] == "needs_human":
+            resolution = item.get("resolution") if isinstance(item.get("resolution"), dict) else {}
+            why = "/".join(str(v) for v in (resolution.get("reason"), resolution.get("class")) if v) or "无原因"
+            needs_human.append({"id": item["id"], "topic_key": item.get("topic_key"), "since": item.get("updated_at"),
+                                "reason": why})
+            alerts.append(alert(check, f"maint_needs_human:{name}:{item['id']}",
+                                f"maint {name}：条目 {item['id']}（{short(item.get('topic_key'), 50)}）"
+                                f"转为 needs_human：{why}"))
+        elif item["status"] == "ready":
+            # The wait restarts when the item last came back to ready: an owner retry (reopened),
+            # an attempt that handed it back (attempts.history), or a new build re-admitting an
+            # attempt-capped item (build_retry, which only updated_at dates). Merged evidence
+            # alone does not restart it.
+            stamps = [parse_ts(item["created_at"])]
+            stamps += [parse_ts(r.get("at")) for r in item.get("reopened") or [] if isinstance(r, dict)]
+            stamps += [parse_ts(h.get("at")) for h in item["attempts"]["history"]]
+            if item.get("build_retry"):
+                stamps.append(parse_ts(item.get("updated_at")))
+            ready.append((max(filter(None, stamps)), item["id"]))
+    ready.sort()
+    stale = [(since, item_id) for since, item_id in ready if age_h(now, since) > args.ready_max_age_hours]
+    if stale:
+        alerts.append(alert(check, f"maint_ready_stale:{name}",
+                            f"maint {name}：{len(stale)} 个条目 ready 超过 {args.ready_max_age_hours:g}h"
+                            f"（最老 {stale[0][1]}，已 {age_h(now, stale[0][0])}h）"))
+
+    cursors: dict[str, dict | None] = {}
+    for cursor in MAINT_CURSORS:
+        path = root / "cursors" / f"{cursor}.json"
+        if not path.exists():
+            cursors[cursor] = None  # this collector has not run yet: nothing can fall behind
+            continue
+        record = read_json(path) or {}
+        updated = parse_ts(record.get("updated_at"))
+        # The repos collector rewrites its cursor even when a repository could not be read; that
+        # repository keeps its old row marked stale_since, so it has not advanced since then.
+        rows = record.get("value") if cursor == "repos" and isinstance(record.get("value"), dict) else {}
+        failing = sorted((ts, remote) for remote, row in rows.items()
+                         if isinstance(row, dict) and (ts := parse_ts(row.get("stale_since"))))
+        since = min(updated, failing[0][0]) if updated and failing else updated
+        cursors[cursor] = {"updated_at": iso(updated), "age_hours": age_h(now, since),
+                           "stale_repos": [remote for _ts, remote in failing]}
+        if updated is None:
+            alerts.append(alert(check, f"maint_cursor_stale:{name}:{cursor}",
+                                f"maint {name}：{cursor} 游标文件无法读取（{path}）"))
+        elif cursors[cursor]["age_hours"] > args.cursor_max_age_hours:
+            where = (f"{len(failing)} 个仓库未能扫描，最老 {failing[0][1]} 自 {iso(since)} 起" if since < updated
+                     else iso(updated))
+            alerts.append(alert(check, f"maint_cursor_stale:{name}:{cursor}",
+                                f"maint {name}：{cursor} 游标已 {cursors[cursor]['age_hours']}h 未推进"
+                                f"（{where}，阈值 {args.cursor_max_age_hours:g}h）"))
+
+    leases: dict[str, dict | None] = {}
+    for role in MAINT_ROLES:
+        lease = read_json(root / f"lease-{role}.json")
+        until = lease_until(lease, now)
+        acquired = parse_ts(lease.get("acquired_at")) if lease else None
+        leases[role] = lease and {"run": lease.get("run"), "holder": lease.get("holder"),
+                                  "acquired_at": iso(acquired), "until": iso(until),
+                                  "active": until is not None and now < until}
+        if until is None:
+            continue  # no lease, or one the writer would not honour either
+        # One condition for as long as the file names this run: `maint end` deletes it and the
+        # next `maint begin` rewrites it. A dead run's lease stays live up to 3h after its last
+        # renewal, so its lapse alone must not read as a recovery.
+        run, held = lease.get("run"), age_h(now, acquired or parse_ts(lease.get("renewed_at")))
+        if held > args.stuck_hours:
+            state = (f"有效至 {iso(until)}，最后续期 {iso(parse_ts(lease.get('renewed_at')))}" if now < until
+                     else f"于 {iso(until)} 过期，没有 maint end，也没有新 run 接手")
+            alerts.append(alert(check, f"maint_lease_stuck:{name}:{role}:{run}",
+                                f"maint {name}：run {run} 持有 {role} lease 已 {held}h"
+                                f"（阈值 {args.stuck_hours:g}h），{state}"))
+
+    oldest = ready[0] if ready else None
+    facts = {"path": str(root), "items": counts, "corrupt_items": corrupt, "needs_human": needs_human,
+             "oldest_ready": oldest and {"id": oldest[1], "since": iso(oldest[0]), "age_hours": age_h(now, oldest[0])},
+             "ready_stale": len(stale), "cursors": cursors, "leases": leases}
     return facts, alerts
 
 
@@ -480,6 +632,8 @@ def render_card(kind: str, label: str, result: dict, previous: dict) -> dict:
     else:
         items = [(a["key"], a["message"]) for a in result["alerts"]]
         items += [(f"error:{e['check']}", f"{e['check']}：{short(e['error'], 100)}") for e in result["errors"]]
+        old = set(previous.get("keys") or [])
+        items.sort(key=lambda item: item[0] in old)  # what changed leads its group, never cut off
         since = previous.get("alerting_since") if previous.get("fingerprint") else now
         elements = [{"tag": "markdown", "content": f"**{len(items)} 项需要关注** · 首次发现 {cst(since)}"}]
         shown = 0
@@ -608,9 +762,12 @@ def build_parser() -> argparse.ArgumentParser:
     t = p.add_argument_group("thresholds (hours)")
     t.add_argument("--checkpoint-max-age-hours", type=float, default=30)
     t.add_argument("--run-max-age-hours", type=float, default=26, help="no new autopilot run for this long")
-    t.add_argument("--stuck-hours", type=float, default=3, help="issues, runs and writer jobs")
+    t.add_argument("--stuck-hours", type=float, default=3, help="issues, runs, writer jobs and maint run leases")
     t.add_argument("--pending-max-age-hours", type=float, default=48)
     t.add_argument("--commit-max-age-hours", type=float, default=48)
+    t.add_argument("--ready-max-age-hours", type=float, default=72, help="a maint item waiting in ready")
+    t.add_argument("--cursor-max-age-hours", type=float, default=30,
+                   help="a maint collector cursor that exists but has not advanced")
     t.add_argument("--failed-window-hours", type=float, default=24, help="writer failures listed in the output")
     t.add_argument("--unresolved-failure-hours", type=float, default=168,
                    help="keep alerting on a writer failure with no later attempt for this long (default 7 days)")
@@ -669,6 +826,7 @@ def watch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     for bundle in args.bundle:
         path = Path(bundle).expanduser().resolve()
         plan.append((f"writer:{path.name}", lambda path=path: check_bundle(path, args, now)))
+        plan.append((f"maint:{path.name}", lambda path=path: check_maint(path, args, now)))
     for name, check in plan:
         try:
             facts, alerts = check()

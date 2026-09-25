@@ -255,6 +255,9 @@ def delete_bundle(name: str, authorization: str | None = Header(default=None)):
     try:
         with worker.serialized_lifecycle():
             _name, p = _resolve(name, principal)  # resolve while deletion is protected from ingest/create
+            if (ROOT / _name).is_symlink():  # a linked bundle lives elsewhere (B.discover): not this server's to delete
+                raise HTTPException(status_code=409, detail=f"bundle '{_name}' is linked into the bundles root; "
+                                                            "remove the link on the host instead")
             active = I.active_jobs(p)
             if active:
                 raise HTTPException(

@@ -145,7 +145,10 @@ The canonical query, maintenance, and curation skills live in [`skills/`](skills
 - `ai-wiki` — read-side status/trust/freshness gates;
 - `ai-wiki-maintainer` — deterministic collection (`checkpoint.py`, `scan_reference_repos.py`,
   `issue_delta.py`), the `ai-wiki maintain` ledger, and checkpoint orchestration;
-- `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker.
+- `ai-wiki-curating-maintainer` — the maintainer that curates: `doctor`, `maint begin/next`,
+  local curation, `validate`/`propose` through the writer's gate, and the `maint end` report;
+- `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker and, in its
+  remote maintainer mode, by the curating maintainer.
 
 Check an installed runtime for drift, then explicitly synchronize it:
 
@@ -244,7 +247,8 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_BUNDLES` | dir holding one bundle per subdirectory; each writable bundle owns its Git repo |
 | `AIWIKI_BUNDLE` | a single bundle dir; it must be the Git repo root when writes are enabled |
 | `AIWIKI_DEFAULT_BUNDLE` | bundle used when a request omits `?bundle=` (optional) |
-| `AIWIKI_TOKEN` | bearer token clients must present |
+| `AIWIKI_TOKEN` | legacy shared bearer token with every scope; with `AIWIKI_PRINCIPALS` it is honoured only through the principal holding its sha256 (`provision_principals.py add-legacy`) |
+| `AIWIKI_PRINCIPALS` | principals file: per-principal token sha256, scopes, bundles, limits (`src/aiwiki/service/auth.py`); edit it with `scripts/provision_principals.py`, SIGHUP reloads it |
 | `AIWIKI_PORT` | service port (default 8787) |
 | `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`) |
 | `AIWIKI_CURATE` | `auto` (default) or `off` to disable the curation trigger |
