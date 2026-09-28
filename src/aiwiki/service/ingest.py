@@ -74,8 +74,10 @@ def source_name(data: bytes, filename: str | None = None, title: str | None = No
     sha = hashlib.sha256(data).hexdigest()
     if not filename:  # pasted text, no filename → raw Markdown source (not a concept document)
         return f"{slugify(title, 'ingest')}-{sha}.md.source"
-    # Only letters, digits and dots: the name may be committed (service/inbox.py).
-    ext = re.sub(r"[^a-z0-9.]", "", Path(filename).suffix.lower())[:16] or ".source"
+    # A dot, then only letters and digits: the name may be committed (service/inbox.py), and a
+    # name ending in a dot is one Windows cannot check out.
+    ext = re.sub(r"[^a-z0-9]", "", Path(filename).suffix.lower())[:15]
+    ext = f".{ext}" if ext else ".source"
     # Raw Markdown is source evidence, not an OKF concept. Keep the submitted bytes
     # verbatim but prevent generic ``**/*.md`` tooling from parsing it as a concept.
     if ext == ".md":
