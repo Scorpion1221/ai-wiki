@@ -8,7 +8,8 @@ document, then stamps them deterministically with trusted time.
   substantively (whitespace, key order and scalar quoting do not count).
 * ``verified`` history is never edited by the editor; an audit verdict of
   ``verified`` appends one event.
-* audit also freezes ``sources`` and owns ``status`` (``draft`` becomes ``stable``).
+* audit also freezes ``sources`` and owns ``status`` (``draft`` becomes ``stable``); an
+  audit changeset (stage ``review``) freezes ``type``, ``title`` and ``stale_after`` too.
 * a curate changeset owns ``status`` too: a new concept starts ``draft``, an existing
   one keeps its value, and a deprecate operation sets ``deprecated``.
 
@@ -35,7 +36,10 @@ SERVICE_KEYS = {
     "curate": ("verified", "generated"),
     "audit": ("verified", "generated", "status", "sources"),
     "changeset": ("verified", "generated", "status"),
+    # An audit changeset (design §2.4, §5.4 A5) also freezes identity and freshness.
+    "review": ("verified", "generated", "status", "sources", "type", "title", "stale_after"),
 }
+_AUDITS = ("audit", "review")  # the stages that pass a verdict and own status
 VERDICTS = {"verified", "unverified"}
 # Verification-event fields an editor may drop to column 0 (a lost ``- ``): never content.
 _EVENT_FIELDS = ("by", "at")
@@ -50,6 +54,14 @@ _RESTORED = {
     "changeset": {
         "verified": "restored service-owned verification history without adding verification",
         "status": "restored service-owned status",
+    },
+    "review": {
+        "verified": "restored service-owned verification history",
+        "status": "restored service-owned status",
+        "sources": "restored immutable sources provenance",
+        "type": "restored identity-locked type",
+        "title": "restored identity-locked title",
+        "stale_after": "restored frozen stale_after",
     },
 }
 # A top-level YAML key at column 0; indented, list, comment and blank lines belong to it.
@@ -465,9 +477,9 @@ def apply_bookkeeping(
     """
     if stage not in SERVICE_KEYS:
         raise ValueError(f"unknown bookkeeping stage {stage!r}")
-    if verdict is not None and (stage != "audit" or verdict not in VERDICTS):
+    if verdict is not None and (stage not in _AUDITS or verdict not in VERDICTS):
         raise ValueError("only an audit may pass a verified/unverified verdict")
-    if before_text is None and (stage == "audit" or deprecate):
+    if before_text is None and (stage in _AUDITS or deprecate):
         raise ValueError("audit and deprecate bookkeeping require the pre-edit document")
     if deprecate and stage != "changeset":
         raise ValueError("only a changeset may deprecate a concept")
@@ -490,7 +502,7 @@ def apply_bookkeeping(
             raise BookkeepingError(f"pre-edit document is invalid: {exc}") from exc
     order = [key for key, _lines in (before_blocks or after_blocks) if key is not None]
     status = None
-    if stage == "audit":
+    if stage in _AUDITS:
         status = "deprecated" if before_doc.get("status") == "deprecated" else "stable"
     elif stage == "changeset":
         status = "deprecated" if deprecate else "draft" if before_text is None else None
@@ -527,7 +539,7 @@ def apply_bookkeeping(
             split_body_spill(after_body)[1] != split_body_spill(before_body)[1]
         ):
             repairs.append("discarded non-substantive formatting edits")
-        if stage != "audit" and not deprecate:
+        if stage not in _AUDITS and not deprecate:
             return before_text, repairs
         blocks, body = before_blocks, before_body
 

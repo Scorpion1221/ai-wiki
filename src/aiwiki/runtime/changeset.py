@@ -59,7 +59,7 @@ CODES = {
     "resource_unresolvable": 422, "broken_link": 422, "dangling_contradiction": 422,
     "duplicate_title": 422, "body_shrink": 422, "identity_locked": 422, "path_forbidden": 422,
     "service_owned_path": 422, "delete_forbidden": 422, "restructure_new_source": 422,
-    "secret_detected": 422, "validation": 422,
+    "secret_detected": 422, "validation": 422, "audit_scope": 422, "self_verification": 422,
 }
 HINTS = {
     "missing_key": "add the key to the frontmatter",
@@ -80,6 +80,8 @@ HINTS = {
     "secret_detected": "remove the secret; this is parked, not retried",
     "conflict": "workspace pull, then re-apply the change to the current version",
     "validation": "fix the reported problem",
+    "audit_scope": "review only what GET /audit/backlog lists; drop this review",
+    "self_verification": "no reviewer verifies its own generation, nor an auditor another auditor's; drop it",
 }
 # Validator, policy and lint messages -> error code; the first match wins.
 _MESSAGE_CODES = (
@@ -427,25 +429,32 @@ def _file_errors(files: object, lim: dict[str, int]) -> list[dict]:
 
 
 def _review_errors(reviews: object, lim: dict[str, int]) -> list[dict]:
+    """A review's shape. A missing or unusable verdict is not an error here: the audit gate
+    concludes such a review unverified (design §5.4 A8)."""
     if not isinstance(reviews, list) or not reviews:
         return [_error("input", "reviews must be a non-empty list")]
     errors = []
     if len(reviews) > lim["reviews"]:
         errors.append(_error("too_large", f"an audit changeset carries at most {lim['reviews']} reviews"))
+    paths = []
     for index, review in enumerate(reviews):
         if not isinstance(review, Mapping) or not isinstance(review.get("path"), str):
             errors.append(_error("input", f"reviews[{index}] must be a mapping with a path"))
             continue
         path = _nfc(review["path"])
-        corrected = review.get("verdict") == "corrected"
-        allowed = {"path", "base", "verdict", "note"} | ({"content"} if corrected else set())
+        paths.append(path)
         if (
-            set(review) - allowed or review.get("verdict") not in VERDICTS
+            set(review) - {"path", "base", "verdict", "note", "content"}
             or not isinstance(review.get("base"), str) or not _CONTENT_HASH.fullmatch(review["base"])
-            or not isinstance(review.get("note", ""), str) or corrected != isinstance(review.get("content"), str)
+            or not isinstance(review.get("note", ""), str) or len(review.get("note", "")) > 2000
+            or not isinstance(review.get("content", ""), str)
         ):
             errors.append(_error("input", "a review is {path, base, verdict, note}; corrected adds content", path))
+        elif len(review.get("content", "").encode("utf-8")) > lim["concept_bytes"]:
+            errors.append(_error("too_large", f"content exceeds {lim['concept_bytes']} bytes", path))
         errors.extend(filter(None, [_path_error(path)]))
+    if len(set(paths)) != len(paths):
+        errors.append(_error("input", "each path may be reviewed once per changeset"))
     return errors
 
 
