@@ -13,8 +13,9 @@ Config via env (read at import):
                          maint, admin, changesets, workspace)
   AIWIKI_INTAKE, AIWIKI_AUDIT, AIWIKI_CHANGESETS_COMMIT, AIWIKI_RESTRUCTURE, AIWIKI_CODEX_AUDIT_MANUAL
                          rollout switches reported by /whoami; unset keeps today's behaviour.
-                         AIWIKI_INTAKE=inbox turns /ingest and the inbox sweep into member work
-                         items for the curating maintainer instead of Codex curation. Only
+                         AIWIKI_INTAKE=inbox turns /ingest and the inbox sweep of each bundle in
+                         AIWIKI_CHANGESETS_COMMIT into member work items for the curating
+                         maintainer instead of Codex curation (other bundles keep Codex). Only
                          bundles listed in AIWIKI_CHANGESETS_COMMIT commit changesets (none while
                          AIWIKI_DISABLE=changesets); every bundle may dry-run. A committed changeset
                          queues its Codex audit unless its bundle is listed in
@@ -418,10 +419,12 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
     single serial worker processes one at a time, so concurrent ingests never race on the
     bundle/git. Other types are stored but flagged `needs-conversion`. Disabled with
     AIWIKI_CURATE=off; the whole endpoint is gated by AIWIKI_DISABLE=ingest.
-    With AIWIKI_INTAKE=inbox it queues a member work item instead (``_ingest_inbox``).
+    Under inbox intake (``worker.inbox_intake``) it queues a member work item instead
+    (``_ingest_inbox``).
     """
     principal = _auth(authorization, "submit")
     _enabled("ingest")
+    inbox_on = worker.inbox_intake(_resolve(bundle, principal)[1])
     if body.content_b64 is not None:
         try:
             data = base64.b64decode(body.content_b64, validate=True)
@@ -430,11 +433,11 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
         filename = body.filename or "upload"
     elif body.text is not None:
         data, filename = body.text.encode("utf-8"), body.filename
-    elif MODES["intake"] == "inbox" and body.url is not None:
+    elif inbox_on and body.url is not None:
         data, filename = None, None  # a link alone: recorded, never fetched
     else:
         raise HTTPException(status_code=400, detail="provide `text` or `content_b64`")
-    if MODES["intake"] == "inbox":
+    if inbox_on:
         return _ingest_inbox(body, data, filename, bundle, principal)
     try:
         with worker.serialized_lifecycle():

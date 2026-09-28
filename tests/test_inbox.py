@@ -71,7 +71,7 @@ def claim(gate: Gate, run: str = "WAIO-1") -> dict | None:
     return answer.json()["item"]
 
 
-def test_a_member_submission_becomes_a_work_item_not_a_codex_job(gate) -> None:
+def test_a_member_submission_becomes_a_work_item_not_a_codex_job(gate, monkeypatch) -> None:
     text = f"# Funnel status\n\nThe plugin funnel moved. Deploy key {FAKE_KEY}.\n"
     response = ingest(gate, text=text, title="Funnel status")
 
@@ -95,7 +95,12 @@ def test_a_member_submission_becomes_a_work_item_not_a_codex_job(gate) -> None:
     again = ingest(gate, text=text, title="renamed").json()
     assert again["deduplicated"] is True and again["id"] == receipt["id"] and again["item"] == item["id"]
     assert M.list_items(bundle(gate))["total"] == 1
-    worker.sweep_once([bundle(gate)])  # the verbatim source is known: the sweep leaves it alone
+    read = []  # the verbatim source is known by the sha in its name: the sweep never reads it again
+    reader = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda path: read.append(path.name) or reader(path))
+    assert worker.sweep_once([bundle(gate)]) == 0
+    monkeypatch.setattr(Path, "read_bytes", reader)
+    assert Path(receipt["source"]).name not in read
     worker._q.join()
     assert gate.curated == [] and I.active_jobs(bundle(gate)) == []
     assert job(gate, receipt["id"])["status"] == "ready"
@@ -349,3 +354,17 @@ def test_member_uploads_keep_binary_evidence_verbatim(gate) -> None:
     assert receipt["status"] == "ready" and item["origin"]["filename"] == "Funnel Chart.PNG"
     assert M.read_file(bundle(gate), item["id"], "source.PNG") == png and item["origin"]["redactions"] == 0
     assert git(bundle(gate), "status", "--porcelain") == ""  # sources/inbox and .okf stay out of Git
+
+
+def test_inbox_intake_applies_to_bundles_that_commit(gate) -> None:
+    """kb-b only dry-runs changesets: no maintainer curates it, so its submissions keep Codex."""
+    kb_b = gate.root / "kb-b"
+    receipt = gate.client.post("/ingest", params={"bundle": "kb-b"}, headers=gate.headers("member"),
+                               json={"text": "# kb-b note\n\nfact\n"}).json()
+    assert receipt["status"] == "queued" and receipt["curation"] == "queued" and "item" not in receipt
+    drop = kb_b / "sources" / "inbox" / "drop.md.source"
+    drop.write_bytes(b"# Drop\n")
+    assert worker.sweep_once([kb_b]) == 1
+    worker._q.join()
+    assert gate.curated == [receipt["source"], "sources/inbox/drop.md.source"]
+    assert M.list_items(kb_b)["total"] == 0
