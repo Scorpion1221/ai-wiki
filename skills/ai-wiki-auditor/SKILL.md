@@ -160,8 +160,10 @@ reviews never block; a deterministic watchdog pages humans.
 
 ## 6. Hard prohibitions
 
-- Never review your own output or another auditor's correction; never curate: no `propose`,
-  `maint`, `ingest`, `concept new`, new concepts, new sources or evidence of your own.
+- Never curate: no `propose`, `maint`, `ingest`, `concept new`, new concepts, new sources or
+  evidence of your own. The writer refuses a review of your own or another auditor's
+  generation (`self_verification`); a `reason: external` entry is a push by someone else
+  since then, so review it like any other, whoever generated the concept before.
 - Never write `generated`, `verified` or `status`, and never claim verification in prose.
 - Never touch `SCHEMA.md`, `purpose.md`, `index.md`, `log.md`, `sources/` or `$WS/.ai-wiki/`,
   never run Git in `$WS`, and never delete or rename a file.
