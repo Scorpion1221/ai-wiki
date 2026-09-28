@@ -8,15 +8,18 @@ collectors do, binaries verbatim) and names the submitter and the job; the job (
 names the item and answers ``GET /jobs/<id>`` from it, so the member follows one id to the
 changeset and commit that curated it.
 
-Every submission with content is also committed at once: an ``intake`` job commits the item's
-frozen file (its redacted copy) to ``sources/inbox/intake/<slug>-<sha256><ext>`` and pushes it
-in the writer transaction every service commit takes (strict pre-sync, commit, push, rollback;
-``commit``), as ``intake: <title> (<principal>)`` with an ``Intake:`` trailer the audit backlog
-reads as the service's own. The item records the path and commit (``intake``), and the job
-answers with them. The copy sits apart from the Git-ignored drop zone the sweep scans, so the
-sweep never takes it for a drop. A failed commit leaves the item ready; the sweep queues the job
-again once its failure's retry time has passed. A link sent alone has no content to commit.
-Only while inbox intake applies to the bundle does the worker commit one (``worker._run_intake``).
+Every submission the maintainer can curate (text, or an image) is also committed at once: an
+``intake`` job commits the item's frozen file (text redacted, an image as sent) to
+``sources/inbox/intake/<slug>-<sha256><ext>`` and pushes it in the writer transaction every
+service commit takes (strict pre-sync, commit, push, rollback; ``commit``), as
+``intake: <title> (<principal>)`` with an ``Intake:`` trailer the audit backlog reads as the
+service's own. The item records the path and commit (``intake``), and the job answers with
+them. The copy sits apart from the Git-ignored drop zone the sweep scans, so the sweep never
+takes it for a drop. A failed commit leaves the item ready; the sweep queues the job again once
+its failure's retry time has passed. A link sent alone has no content to commit, and an item
+closed at once (needs_access, needs_conversion) is not committed: nothing redacts a format the
+writer cannot read. Only while inbox intake applies to the bundle does the worker commit one
+(``worker._run_intake``).
 
 The writer never fetches a URL. A Feishu/Lark link sent without its content waits for the
 maintainer, whose ``maint next`` reads it as the wiki's read-only Feishu app; any other link is
@@ -166,10 +169,13 @@ def _register(bundle: Path, sha: str, file: dict, outcome: str | None, reason: s
         "files": [{"name": file["name"], "sha256": hashlib.sha256(frozen).hexdigest(), "bytes": len(frozen),
                    "data": frozen, "origin": {**origin, "kind": "member-source"}}]}])
     item = M.intake(bundle, planned, principal=submitter or "service", outcome=outcome, reason=reason)
-    # A link alone has no content to commit; an item already committed keeps its commit.
-    intake = None if file["name"] == "link.txt" else (item.get("intake") or {}).get("job") or _new_intake(
-        bundle, item["id"], job_id, file["name"], frozen, submitter=submitter, filename=filename, title=title,
-        label=title or filename or url or "pasted text")
+    # A link alone has no content to commit, and an item closed at once none the writer can
+    # redact; an item already committed keeps its commit.
+    intake = None
+    if file["name"] != "link.txt" and outcome is None:
+        intake = (item.get("intake") or {}).get("job") or _new_intake(
+            bundle, item["id"], job_id, file["name"], frozen, submitter=submitter, filename=filename, title=title,
+            label=title or filename or url or "pasted text")
     job = {"id": job_id, "kind": "ingest", "mode": "inbox", "status": "inbox", "item": item["id"], "sha256": sha,
            "submitter": submitter, "via": via, "created": I._now(), "service": service_identity(),
            **{key: value for key, value in (("source", source), ("title", title), ("original_name", filename),
@@ -227,10 +233,10 @@ def commit(bundle: Path, job_path: Path, may_submit: Callable[[str], bool]) -> N
     The serial worker holds the writer lock. It is the writer transaction of a revert without
     a gate: a clean tree, a strict pre-sync, the commit and its push (a rejected push rebases
     and retries, a lost acknowledgement counts as pushed), and a rollback on any failure. The
-    bytes are the item's frozen file, re-hashed; a text copy still matching a secret rule is
-    never committed, nor is the submission of a principal ``may_submit`` no longer admits (a
-    revoked token). A copy Git already holds (another submission's, or a lost answer's) is
-    done with the commit that holds it. Never raises.
+    bytes are the item's frozen file, re-hashed; a text copy still matching a secret rule, or
+    bytes that are neither text nor an image, are never committed, nor is the submission of a
+    principal ``may_submit`` no longer admits (a revoked token). A copy Git already holds
+    (another submission's, or a lost answer's) is done with the commit that holds it. Never raises.
     """
     try:
         job = json.loads(job_path.read_text(encoding="utf-8"))
@@ -267,8 +273,10 @@ def _commit(root: Path | None, bundle: Path, job: dict, job_path: Path,
         return _failed(job, "internal", "intake", str(exc), retryable=False)
     try:
         found = secrets.scan(data.decode("utf-8"))
-    except UnicodeDecodeError:
-        found = []  # a binary is committed as submitted, as a changeset commits its packet
+    except UnicodeDecodeError:  # an image is committed as sent, as a changeset commits its packet
+        if Path(job["file"]).suffix.lower() not in I._READABLE_BINARY_EXT:
+            return _failed(job, "input", "intake", "only text and images are committed at intake")
+        found = []
     target = bundle / job["path"]
     if found:
         return _failed(job, "input", "intake", f"the redacted copy still matches secret rule {found[0][0]}; "

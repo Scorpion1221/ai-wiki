@@ -389,6 +389,35 @@ def test_secrets_never_reach_git(gate, monkeypatch) -> None:
     assert [path.name for path in (bundle(gate) / inbox.INTAKE_DIR).iterdir()] == [Path(named["path"]).name]
 
 
+def test_only_text_and_images_are_committed_at_intake(gate) -> None:
+    """Nothing redacts or scans bytes that are not UTF-8: a file the writer cannot read closes
+    needs_conversion and is never committed, whatever it holds, nor is such a drop."""
+    head = gate.remote_head()
+    unreadable = {"notes.txt": f"café, key {FAKE_KEY}\n".encode("latin-1"),
+                  "env.txt": f"KEY={FAKE_KEY}\n".encode("utf-16"),
+                  "vault.kdbx": b"\x03\xd9\xa2\x9a" + FAKE_KEY.encode(),
+                  "q3.pdf": b"%PDF-1.4\n" + FAKE_KEY.encode()}
+    receipts = {}
+    for filename, data in unreadable.items():
+        receipts[filename] = ingest(gate, content_b64=base64.b64encode(data).decode(), filename=filename).json()
+        assert receipts[filename]["status"] == "needs_conversion" and "intake" not in receipts[filename]
+    drop = bundle(gate) / "sources" / "inbox" / "dump.csv"
+    drop.write_bytes(f"name;key\nJosé;{FAKE_KEY}\n".encode("latin-1"))
+    assert worker.sweep_once([bundle(gate)]) == 1
+    worker._q.join()
+    assert gate.remote_head() == head and not (bundle(gate) / inbox.INTAKE_DIR).exists()
+
+    # An intake job queued for such bytes all the same commits nothing either.
+    item = M.get_item(bundle(gate), receipts["notes.txt"]["item"])
+    frozen = M.read_file(bundle(gate), item["id"], "source.txt")
+    intake = inbox._new_intake(bundle(gate), item["id"], receipts["notes.txt"]["id"], "source.txt", frozen,
+                               submitter=MEMBER, filename="notes.txt", title=None, label="notes.txt")
+    worker._run_intake(bundle(gate), I.job_path(bundle(gate), intake))
+    stored = I.read_job(bundle(gate), intake)
+    assert stored["status"] == "failed" and stored["error"] == "only text and images are committed at intake"
+    assert stored["failure"]["retryable"] is False and gate.remote_head() == gate.head() == head
+
+
 def test_intake_commits_only_while_inbox_intake_applies_and_the_submitter_may_submit(gate, monkeypatch) -> None:
     """A rollback to curate or AIWIKI_DISABLE=changesets stops intake commits as it stops
     changesets: a queued one waits, uncommitted, until intake applies again. The submission of a
