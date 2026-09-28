@@ -179,7 +179,7 @@ current item and go to §5.
   jobs or resubmit by hand.
 - A run that dies needs no cleanup: the lease expires within 3 h and the next `begin` returns
   its item uncounted (`interrupted`) and resets the workspace.
-- Parked and needs_human items are the watchdog's to alert on: report them, never retry them.
+- Parked, rejected and needs_human items are the watchdog's: report them; never retry or block on them.
 
 ## 5. End and report
 
@@ -200,9 +200,9 @@ multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin < "${TMPDIR:-/tmp}
 multica issue status "$MULTICA_ISSUE_ID" <done|blocked> --no-start   # the report's status=
 ```
 
-A comment not opening with the report's first line is a defect: post the file again. No report
-(preflight or `begin` failed closed): post that output, set blocked. Parked, rejected and
-needs_human items never block the issue.
+No report (preflight or `begin` failed closed, or `end` failed twice per §4 so the file opens with
+`error:`): post it once, set blocked, stop; the lease lapses and the next `begin` resumes. Else a
+comment not opening with the report's first line is a defect: post the file again.
 
 ## 6. Hard prohibitions
 

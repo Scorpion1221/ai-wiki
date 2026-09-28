@@ -44,6 +44,6 @@ cfg="$HOME/.ai-wiki/maint-solvely-wiki.json"        # 采集参数，内容见�
 ## 结项
 
 - **评论第一行必须是 `maint end` 报告的第一行（`AI Wiki maintenance <run> … status=…`）。** 按 Skill §5 把 `maint end --format md` 的输出直接重定向进评论文件：报告原样（英文，不翻译、不改写、不摘要、不重排）在最前面，之后只允许在文件末尾追加最多 5 行中文知识变化。不要先写总结再贴报告，也不要只贴总结。
-- 按报告第一行的 `status=` 设置 issue（`--no-start`）：`blocked` 只出现在预检或 begin 退出 4、或采集失败时，写明原因；其他情况都是 `done`。
+- 按报告第一行的 `status=` 设置 issue（`--no-start`）：`blocked` 只出现在预检或 begin 退出 4、采集失败，或 `maint end` 两次失败（文件以 `error:` 开头，见 Skill §5）时，写明原因；其他情况都是 `done`。
 - parked、needs_human、被拒的条目只写进报告，不影响结项，watchdog 负责告警。
 - 不要手工 POST changeset；`~/.ai-wiki/state` 里只改 `$WS` 下的概念文件，其他文件和 `$WS/.ai-wiki/` 都不碰；不要为一次失败写长篇恢复计划：下一次运行自动续跑。collection_mode=serial，不创建子 agent。
