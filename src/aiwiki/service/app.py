@@ -445,8 +445,8 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
         with worker.serialized_lifecycle():
             _name, BUNDLE = _resolve(bundle, principal)  # re-resolve inside the delete exclusion window
             job, deduplicated = I.receive_source(BUNDLE, data, filename, body.title)
-            if deduplicated:
-                return {**job, "deduplicated": True}
+            if deduplicated:  # possibly a member item's job, from before a rollback to Codex
+                return {**inbox.view(BUNDLE, job), "deduplicated": True}
             source_rel = job["source"]
             curatable = job["status"] == "queued"
             if curatable and CURATE_ON:
@@ -1086,11 +1086,13 @@ def admin_item_resolve(item_id: str, body: dict, bundle: str | None = None,
 @app.post("/admin/inbox/requeue")
 def admin_inbox_requeue(body: dict | None = None, bundle: str | None = None,
                         authorization: str | None = Header(default=None)):
-    """Hand ready and parked member items back to Codex curation: the rollback of
+    """Hand unfinished member items back to Codex curation: the rollback of
     AIWIKI_INTAKE=inbox, valid only while the writer still has the Codex path (else 409).
 
-    Body ``{items?: [<item id>], reason?}``, every member item by default. Each becomes
-    ``requeued`` and its job a queued Codex ingest; an item a maintainer run holds stays with it.
+    Body ``{items?: [<item id>], reason?}``, every unfinished member item by default. Each
+    becomes ``requeued`` and its job a queued Codex ingest. Answers ``{requeued, held,
+    unavailable}``: an item the live maintainer run holds stays with it, and one Codex cannot
+    take says why.
     """
     with _maint(bundle, authorization, "admin", area="admin", write=True) as (path, admin):
         if shutil.which(curate_runtime.AGENT_BIN) is None:

@@ -98,7 +98,7 @@ def add_parser(sub, common: dict) -> None:
     inbox = verbs.add_parser("inbox", help="member work items", command_path="ai-wiki admin inbox",
                              epilog=cli._examples("ai-wiki admin inbox requeue"), **common)
     requeue_ = inbox.add_subparsers(dest="inbox_action", required=True).add_parser(
-        "requeue", help="hand ready and parked member items back to Codex curation (the inbox rollback)",
+        "requeue", help="hand unfinished member items back to Codex curation (the inbox rollback)",
         command_path="ai-wiki admin inbox requeue",
         epilog=cli._examples("ai-wiki admin inbox requeue --reason 'intake rolled back'",
                              "ai-wiki admin inbox requeue --item it_0123456789ab"), **common)
@@ -450,7 +450,7 @@ def _cursors(report: Path) -> dict[str, dict]:
 
 
 def inbox_requeue(bundle: str | None, *, items: list[str] | None, reason: str | None, as_json: bool) -> int:
-    """POST /admin/inbox/requeue; exit 1 when an item stayed (held by a run, or its source gone)."""
+    """POST /admin/inbox/requeue; exit 1 when an item stayed (held by the live run, or unavailable)."""
     body = {key: value for key, value in (("items", items), ("reason", reason)) if value is not None}
     status, _headers, raw = request("POST", "/admin/inbox/requeue", bundle=bundle, body=body)
     result = _json(status, raw)

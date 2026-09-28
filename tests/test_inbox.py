@@ -1,7 +1,9 @@
 """Inbox intake (design §6, §10.1): with AIWIKI_INTAKE=inbox a member's upload, pasted text or
-link and an out-of-band inbox drop become maintainer work items, never Codex curation. The job
-follows its item to the changeset that curated it, the writer never fetches a URL, and
-POST /admin/inbox/requeue hands waiting items back to Codex. AIWIKI_INTAKE=curate is today's path.
+link and an out-of-band inbox drop become maintainer work items of a committing bundle, never
+Codex curation. The job follows its item to the changeset that curated it, the writer never
+fetches a URL (the maintainer reads a Feishu link as the wiki's app), a quota bounds what one
+principal queues, and POST /admin/inbox/requeue hands unfinished items back to Codex.
+AIWIKI_INTAKE=curate is today's path.
 """
 from __future__ import annotations
 
@@ -62,6 +64,10 @@ def job(gate: Gate, job_id: str, token: str = "member") -> dict:
 
 def bundle(gate: Gate) -> Path:
     return gate.root / "kb-a"
+
+
+def requeue(gate: Gate, token: str = "owner", **body):
+    return gate.client.post("/admin/inbox/requeue", params={"bundle": "kb-a"}, headers=gate.headers(token), json=body)
 
 
 def maintainer_host(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
@@ -267,6 +273,9 @@ def test_requeue_hands_waiting_member_items_back_to_codex(gate, tmp_path, monkey
     assert {row["item"] for row in again["unavailable"]} == {gone, forged}
     worker._q.join()
     assert len(gate.curated) == 3 and job(gate, late["id"])["status"] == "queued"
+    gate.app()  # rolled back to curate: a resend of a waiting item's content answers from that item
+    resent = ingest(gate, text="# Forged\n\nforged fact\n").json()
+    assert resent["deduplicated"] is True and resent["status"] == "ready" and resent["item"] == forged
 
 
 def test_curate_intake_is_todays_codex_path(tmp_path, monkeypatch) -> None:
@@ -416,6 +425,39 @@ def test_the_maintainer_reads_a_member_link_as_the_wiki_app(gate, tmp_path, monk
     run(capsys, "maint", "end", "--run", "WAIO-7", "--state-dir", st)
 
 
+def test_a_resubmission_relinks_an_item_whose_job_was_lost(gate, monkeypatch) -> None:
+    """The item follows the submission's job: after a requeue whose Codex job failed, or a job
+    write that failed after its item's, the same content again gets a live item."""
+    text = "# Retry cap\n\nWe cap retries at 3.\n"
+    receipt = ingest(gate, text=text).json()
+    assert [row["item"] for row in requeue(gate).json()["requeued"]] == [receipt["item"]]
+    worker._q.join()
+    failed = I.read_job(bundle(gate), receipt["id"])
+    failed.update(status="failed", phase="rolled_back")
+    I._write_atomic(I.job_path(bundle(gate), receipt["id"]), failed)
+
+    again = ingest(gate, text=text).json()
+    assert again["deduplicated"] is False and again["item"] == receipt["item"] and again["status"] == "ready"
+    item = M.get_item(bundle(gate), receipt["item"])
+    assert item["origin"]["job"] == again["id"] and item["reopened"][-1]["from"] == "requeued"
+    assert ingest(gate, text=text).json()["id"] == again["id"]
+
+    writer = I._write_atomic
+
+    def disk_full(path: Path, value: dict) -> None:
+        if value.get("mode") == "inbox":
+            raise OSError(28, "No space left on device")
+        writer(path, value)
+
+    monkeypatch.setattr(I, "_write_atomic", disk_full)
+    with pytest.raises(OSError):
+        ingest(gate, text="# Disk\n\nfull\n")
+    monkeypatch.setattr(I, "_write_atomic", writer)
+    retried = ingest(gate, text="# Disk\n\nfull\n").json()
+    assert M.get_item(bundle(gate), retried["item"])["origin"]["job"] == retried["id"]
+    assert {row["item"] for row in requeue(gate).json()["requeued"]} == {receipt["item"], retried["item"]}
+
+
 def test_text_larger_than_one_evidence_packet_is_refused(gate, monkeypatch) -> None:
     monkeypatch.setenv("AIWIKI_CHANGESET_MAX_PACKET_TEXT_BYTES", "4096")
     big = "# Big\n\n" + "one fact per line\n" * 300
@@ -448,6 +490,51 @@ def test_submissions_per_day_bound_what_one_principal_queues(gate, monkeypatch) 
     assert ingest(gate, text="# Note 3\n").status_code == 200
 
 
+def test_requeue_takes_back_a_dead_runs_item_and_accounts_for_every_item(gate, monkeypatch, capsys) -> None:
+    for n in range(4):
+        ingest(gate, text=f"# Note {n}\n\nfact {n}\n")
+    link = ingest(gate, url=FEISHU).json()["item"]
+    dead = claim(gate, "WAIO-1")["id"]  # its run dies; three hours on its lease is gone
+    rest = sorted({row["id"] for row in M.list_items(bundle(gate), origin="member")["items"]} - {dead, link})
+    stuck, lost = rest[:2]
+    edit(gate, stuck, status="needs_human", resolution={"outcome": "needs_human", "reason": "attempt_cap"})
+    I.job_path(bundle(gate), M.get_item(bundle(gate), lost)["origin"]["job"]).unlink()
+    now = M._now
+    monkeypatch.setattr(M, "_now", lambda: now() + timedelta(hours=4))
+
+    result = requeue(gate, reason="rollback").json()
+
+    assert {row["item"] for row in result["requeued"]} == {dead, stuck, rest[2]} and result["held"] == []
+    assert {row["item"]: row["error"] for row in result["unavailable"]} == {
+        lost: "its job record is missing or invalid",
+        link: "a link with no stored source: Codex cannot take it; close it with POST /admin/items/<id>/resolve"}
+    history = M.get_item(bundle(gate), dead)["attempts"]["history"]
+    assert history[-1]["class"] == "interrupted" and M.get_item(bundle(gate), dead)["status"] == "requeued"
+
+    for item_id in (link, lost):  # what Codex cannot take, the owner closes by hand
+        closing = gate.client.post(f"/admin/items/{item_id}/resolve", params={"bundle": "kb-a"},
+                                   headers=gate.headers("owner"),
+                                   json={"outcome": "needs_access", "reason": "rollback"})
+        assert closing.status_code == 200, closing.text
+
+    # One the live run claims while the requeue runs is held by it, not dropped; unknown ids say so.
+    late = ingest(gate, text="# Late\n\nlate fact\n").json()["item"]
+    real = M.requeue
+
+    def racing(path, ids, **kwargs):
+        M.acquire_lease(path, "maintainer", principal="process:ai-wiki-maintainer", run="WAIO-2")
+        M.next_item(path, principal="process:ai-wiki-maintainer", run="WAIO-2")
+        return real(path, ids, **kwargs)
+
+    monkeypatch.setattr(M, "requeue", racing)
+    gate.connect("owner")
+    capsys.readouterr()
+    code = cli.main(["admin", "inbox", "requeue", "--item", late, "--item", "it_000000000000", "--json"])
+    answer = json.loads(capsys.readouterr().out)
+    assert code == 1 and answer["held"] == [late] and answer["requeued"] == [], answer
+    assert answer["unavailable"] == [{"item": "it_000000000000", "error": "no such member item"}]
+
+
 def test_inbox_intake_applies_to_bundles_that_commit(gate) -> None:
     """kb-b only dry-runs changesets: no maintainer curates it, so its submissions keep Codex."""
     kb_b = gate.root / "kb-b"
@@ -460,3 +547,8 @@ def test_inbox_intake_applies_to_bundles_that_commit(gate) -> None:
     worker._q.join()
     assert gate.curated == [receipt["source"], "sources/inbox/drop.md.source"]
     assert M.list_items(kb_b)["total"] == 0
+
+
+def edit(gate: Gate, item_id: str, **fields) -> None:
+    record = bundle(gate) / ".okf" / "maint" / "items" / item_id / "item.json"
+    record.write_text(json.dumps({**json.loads(record.read_text(encoding="utf-8")), **fields}), encoding="utf-8")

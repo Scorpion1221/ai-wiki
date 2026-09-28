@@ -12,7 +12,7 @@ The writer never fetches a URL. A Feishu/Lark link sent without its content wait
 maintainer, whose ``maint next`` reads it as the wiki's read-only Feishu app; any other link is
 needs_access at once. A format nothing reads (a PDF) is needs_conversion. Text larger than one
 evidence packet is refused, and an inbox drop of it is needs_conversion. ``requeue`` hands
-ready and parked member items back to Codex curation, the rollback while Codex exists.
+unfinished member items back to Codex curation, the rollback while Codex exists.
 
 Deterministic: nothing here runs an LLM or opens a connection.
 """
@@ -38,7 +38,7 @@ NEEDS_ACCESS = ("nothing reads this link for you: the writer never fetches URLs 
 NEEDS_CONVERSION = "the writer reads no such format: convert it to text or Markdown and ingest that"
 TOO_LARGE = ("{size} bytes of text is more than one evidence packet holds ({limit}): split it into parts and "
              "ingest each")
-_REQUEUE = ("ready", "parked", "requeued")
+_UNFINISHED = ("ready", "parked", "in_progress", "needs_human", "requeued")
 _JOB_ID = re.compile(r"[0-9a-f]{12}")
 _DAY = timedelta(days=1)
 
@@ -122,7 +122,7 @@ def _register(bundle: Path, sha: str, file: dict, outcome: str | None, reason: s
               submitter: str | None, via: str, title: str | None, filename: str | None, url: str | None,
               fetched: dict | None) -> dict:
     """The item first, then the job naming it: a crash between them leaves an item the next
-    submission (or sweep) finds again by its item_key."""
+    submission (or sweep) finds again by its item_key and links to its own job."""
     job_id = uuid.uuid4().hex[:12]
     declared = {"title": title, "filename": filename, "url": url, "fetched": fetched, "source": source}
     origin = {"kind": M.MEMBER, "submitter": submitter, "via": via, "job": job_id, "sha256": sha,
@@ -167,35 +167,40 @@ def _state(bundle: Path, item_id: object, depth: int = 0) -> dict:
 
 def requeue(bundle: Path, *, principal: str, reason: str | None,
             only: list[str] | None = None) -> tuple[dict, list[tuple[str, Path]]]:
-    """Hand ready and parked member items back to the Codex path (the inbox rollback).
+    """Hand unfinished member items (or ``only`` these) back to the Codex path, the inbox rollback.
 
     Each becomes requeued and its job an ordinary queued Codex ingest of its verbatim inbox
-    source; the caller submits the returned ``(source, job path)`` pairs to the worker. An
-    item a run holds stays with that run; one whose source is gone stays in the queue.
+    source; the caller submits the returned ``(source, job path)`` pairs to the worker. An item
+    the live maintainer run holds stays with it (``held``); one Codex cannot take, or no longer
+    unfinished, is ``unavailable`` with the reason.
     """
-    rows = [item for item in M.list_items(bundle, origin=M.MEMBER, limit=10 ** 9)["items"]
-            if only is None or item["id"] in only]
-    held = [item["id"] for item in rows if item["status"] == "in_progress"]
-    unavailable, ready = [], []
-    for item in rows:
-        if item["status"] not in _REQUEUE:
+    items = {item["id"]: item for item in M.list_items(bundle, origin=M.MEMBER, limit=10 ** 9)["items"]}
+    ids = list(dict.fromkeys(only)) if only is not None else [
+        item_id for item_id, item in items.items() if item["status"] in _UNFINISHED]
+    intact, unavailable = [], []
+    for item_id in ids:
+        item = items.get(item_id)
+        job = _job(bundle, item) if item else None
+        if item is not None and item["status"] == "requeued" and job and job.get("mode") != "inbox":
+            if only is not None:  # handed over before; by default a finished requeue is no news
+                unavailable.append({"item": item_id, "error": f"it went to Codex already as job {job['id']}"})
             continue
-        job = _job(bundle, item)
-        if item["status"] == "requeued" and (job or {}).get("mode") != "inbox":
-            continue  # its job already went to Codex
-        rel, intact = (job or {}).get("source"), False
-        # .okf is written in place by the Codex audit: a job read back must name an inbox file.
-        if isinstance(rel, str) and rel.startswith("sources/inbox/") and ".." not in rel.split("/"):
-            with contextlib.suppress(OSError):
-                source = bundle / rel
-                digest = None if source.is_symlink() else hashlib.sha256(source.read_bytes()).hexdigest()
-                intact = digest is not None and digest == job.get("sha256")
-        if intact:
-            ready.append(item["id"])
+        if item is None:
+            error = "no such member item"
+        elif job is None:
+            error = "its job record is missing or invalid"
+        elif not job.get("source"):
+            error = "a link with no stored source: Codex cannot take it; close it with POST /admin/items/<id>/resolve"
+        elif not _intact(bundle, job):
+            error = "its verbatim source is missing from sources/inbox"
         else:
-            unavailable.append({"item": item["id"], "error": "its verbatim source is missing from sources/inbox"})
+            intact.append(item_id)
+            continue
+        unavailable.append({"item": item_id, "error": error})
+    closed = M.requeue(bundle, intact, principal=principal, reason=reason)
+    unavailable += closed["refused"]
     queued, requeued = [], []
-    for item in M.requeue(bundle, ready, principal=principal, reason=reason):
+    for item in closed["requeued"]:
         job = _job(bundle, item)
         if (job or {}).get("mode") != "inbox":
             continue
@@ -206,7 +211,19 @@ def requeue(bundle: Path, *, principal: str, reason: str | None,
         I._write_atomic(path, job)
         queued.append((job["source"], path))
         requeued.append({"item": item["id"], "job": job["id"]})
-    return {"requeued": requeued, "held": held, "unavailable": unavailable}, queued
+    return {"requeued": requeued, "held": closed["held"], "unavailable": unavailable}, queued
+
+
+def _intact(bundle: Path, job: dict) -> bool:
+    """The job's verbatim source is in sources/inbox with its sha. ``.okf`` is written in place
+    by the Codex audit, so a job read back must name an inbox file."""
+    rel = job["source"]
+    if not (isinstance(rel, str) and rel.startswith("sources/inbox/") and ".." not in rel.split("/")):
+        return False
+    source = bundle / rel
+    with contextlib.suppress(OSError):
+        return not source.is_symlink() and hashlib.sha256(source.read_bytes()).hexdigest() == job.get("sha256")
+    return False
 
 
 def _job(bundle: Path, item: dict) -> dict | None:
