@@ -7,12 +7,16 @@ auditor anywhere reads GET /audit/backlog and proposes verdicts; the service sta
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from gate_fixture import AI_STUDY, AIO_AB, METRIC, Gate, clone, concept, git, wait_for
 
+from aiwiki.cli import main as cli
+from aiwiki.cli import workspace
 from aiwiki.engine.document import parse_document
 from aiwiki.engine.validate import body_spill_errors
 from aiwiki.runtime import audit, changeset
@@ -468,3 +472,52 @@ def test_the_read_mirror_never_serves_the_backlog(gate) -> None:
     response = gate.client.get("/audit/backlog", params={"bundle": "kb-a"}, headers=gate.headers("auditor"))
     assert response.status_code == 403
 
+
+# --- the review verbs (design §3) ----------------------------------------------------------------
+
+
+def wiki(capsys, *args) -> tuple[int, dict]:
+    capsys.readouterr()
+    try:
+        code = cli.main([str(arg) for arg in (*args, "--json")])
+    except SystemExit as exit_:
+        code = exit_.code
+    out = capsys.readouterr().out
+    return code, json.loads(out[out.rfind("\n{\n") + 1:] if not out.startswith("{") else out)
+
+
+def test_review_verbs_keep_the_workspace_clean_and_drop_what_the_writer_refuses(gate, capsys, monkeypatch) -> None:
+    tools = gate.tmp / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setattr(workspace, "RETRY_DELAYS_S", (0, 0, 0))
+    gate.connect("auditor")
+    state = gate.tmp / "auditor-state"
+    code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--max", 1, "--state-dir", state)
+    assert code == 0 and begun["backlog"] == 1, begun
+    code, taken = wiki(capsys, "review", "next", "--state-dir", state)
+    assert code == 0 and (taken["path"], taken["reason"]) == (AIO_AB, "generation")
+    concept = gate.tmp / "auditor-state" / "reviews"
+    concept = next(concept.glob("*/ws")) / AIO_AB
+    assert wiki(capsys, "review", "next", "--state-dir", state)[0] == 11  # --max 1
+
+    assert wiki(capsys, "review", "verdict", AIO_AB, "corrected", "--note", "n", "--state-dir", state)[0] == 2
+    concept.write_text(narrowed(concept.read_text(encoding="utf-8")), encoding="utf-8")
+    assert wiki(capsys, "review", "verdict", AIO_AB, "verified", "--note", "n", "--state-dir", state)[0] == 2
+    code, recorded = wiki(capsys, "review", "verdict", AIO_AB, "corrected", "--note", "overstated", "--state-dir",
+                          state)
+    assert code == 0 and recorded["pending"] == 1 and "Redacted fixture body." in concept.read_text(encoding="utf-8")
+    code, judged = wiki(capsys, "review", "submit", "--dry-run", "--state-dir", state)
+    assert code == 0 and judged["reviews"][0]["outcome"] == "corrected" and judged["pending"] == 1
+    head = gate.remote_head()
+
+    push(gate, AIO_AB, git(gate.remote, "show", f"main:{AIO_AB}") + "\nA hand note.\n")
+    code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
+
+    assert code == 6 and sent["dropped"] == [{"path": AIO_AB, "code": "conflict"}] and sent["pending"] == 0, sent
+    assert gate.remote_head() != head and "A hand note." in git(gate.remote, "show", f"main:{AIO_AB}")
+    code, report = wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)
+    assert code == 0 and report["reviewed"] == 0 and report["dropped"] == sent["dropped"]
+    assert report["backlog_remaining"] == 1 and report["lease"]["released"] is True  # the push is due again

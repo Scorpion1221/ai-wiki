@@ -134,7 +134,7 @@ def _command_path(args: list[str]) -> str:
             positionals.append(arg)
     if not positionals:
         return "ai-wiki"
-    depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint") \
+    depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint", "review") \
         and len(positionals) > 1 else 1
     return "ai-wiki " + " ".join(positionals[:depth])
 
@@ -557,10 +557,11 @@ def main(argv=None) -> int:
                             help="maximum wait per stage; timeout preserves job ID (default: 3600)")
     p_maintain.add_argument("--json", action="store_true",
                             help="emit the run summary as JSON (receipts stay in <state-dir>/state.json)")
-    from aiwiki.cli import admin, maint
+    from aiwiki.cli import admin, maint, review
 
     admin.add_parser(sub, common)
     maint.add_parser(sub, common)
+    review.add_parser(sub, common)
 
     # curation through changesets (design §3): a local workspace judged by the gate's own code
     p_doctor = sub.add_parser(
@@ -681,6 +682,8 @@ def main(argv=None) -> int:
         return admin.command(a, bsel)
     if a.cmd == "maint":
         return maint.command(a, a.bundle)  # a run keeps its bundle; only -b may contradict it
+    if a.cmd == "review":
+        return review.command(a, a.bundle)
 
     if a.cmd == "maintain":
         from aiwiki.cli import maintain

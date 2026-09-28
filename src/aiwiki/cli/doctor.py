@@ -23,7 +23,7 @@ from aiwiki.version import VERSION
 MIN_FREE_BYTES = 2 * 1024 ** 3
 TOOLS = {"curator": ("git", "uv", "multica"), "auditor": ("git", "uv"), "member": ()}
 SKILLS = {"curator": ("ai-wiki-curating-maintainer", "okf-knowledge-curator"),
-          "auditor": ("ai-wiki",), "member": ("ai-wiki",)}
+          "auditor": ("ai-wiki-auditor",), "member": ("ai-wiki",)}
 _IGNORED = {"multica-metadata.json", ".DS_Store"}  # as scripts/sync_skills.py
 
 

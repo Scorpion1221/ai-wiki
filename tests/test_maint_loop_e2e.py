@@ -23,6 +23,7 @@ from gate_fixture import CURATOR, METRIC, Gate, git
 from aiwiki import version
 from aiwiki.cli import main as cli
 from aiwiki.cli import maint, workspace
+from aiwiki.engine.document import parse_document
 from aiwiki.maint import collect_repos
 from aiwiki.runtime import failure
 
@@ -555,3 +556,77 @@ def test_the_item_verbs_never_guess_between_two_bundles_runs(loop, capsys) -> No
     assert mine in (0, 10)  # kb-a's own run, whichever item it holds
     assert wiki_json(capsys, "maint", "end", "--run", "R-1", "--state-dir", st)[0] == 0
     assert shadow.is_file() and not (st / "runs" / f"current-{maint._slug('kb-a')}.json").exists()
+
+
+# --- the external auditor (design §5, §10.4; acceptance §13 W17) -----------------------------------
+
+
+CAP = "playbooks/funnel-owner.md"
+
+
+def fake_auditor(capsys, evidence: list[Path], concept: Path) -> str:
+    """Deterministic triage: verified only when every claim of the body is in the evidence word
+    for word. The concept and the frozen evidence are all it reads; never a hand-off."""
+    known = "\n".join(path.read_text(encoding="utf-8") for path in evidence)
+    body = concept.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    claims = [re.sub(r"\[\^[^\]]+\]", "", line).strip() for line in body.splitlines()
+              if line.strip() and not line.startswith(("#", "[^", "  - {"))]
+    return "verified" if claims and all(claim in known for claim in claims) else "unverified"
+
+
+def test_an_external_auditor_verifies_what_the_maintainer_proposed(loop, capsys) -> None:
+    gate, st, ast = loop["gate"], loop["st"], loop["tmp"] / "auditor-state"
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH="2026-09-20T00:00:00Z")
+    # The maintainer: one item of two frozen Git files, curated and proposed through the gate.
+    files = [{"name": name, "content_b64": base64.b64encode(text.encode()).decode(),
+              "origin": {"kind": "git-file", "remote": str(loop["remote"]), "commit": loop["first"], "path": path}}
+             for name, path, text in (("S1-README.md", "tasks/funnel/README.md", "# Funnel task\n\nOwner: web team\n"),
+                                      ("S2-learnings.md", "memory/learnings.md", "- first lesson\n"))]
+    queued = gate.client.post("/maint/items", params={"bundle": "kb-a"}, headers=gate.headers(), json={
+        "items": [{"origin": {"kind": "repo"}, "topic_key": "repo:control#tasks/funnel", "priority": 999,
+                   "brief": "funnel owner", "files": files}]})
+    assert queued.status_code == 200, queued.text
+    ws = begin(capsys, loop, "R-1")["workspace"]
+    code, brief = wiki_json(capsys, "maint", "next", "--state-dir", st)
+    assert code == 0 and brief["topic_key"] == "repo:control#tasks/funnel", brief
+    assert wiki(capsys, "concept", "new", CAP, "--dir", ws, "--type", "Playbook", "--title", "Funnel owner",
+                "--description", "Who owns the funnel task", "--tags", "funnel", "--source-id", "funnel-owner")[0] == 0
+    with (Path(ws) / CAP).open("a", encoding="utf-8") as concept:
+        concept.write("Owner: web team[^funnel-owner]\n\n[^funnel-owner]: the task README\n")
+    code, receipt = wiki_json(capsys, "propose", "--dir", ws, "--item", brief["item"], "--state-dir", st)
+    assert code == 0 and receipt["status"] == "done" and receipt["audit"] == {"mode": "external"}, receipt
+    assert wiki_json(capsys, "maint", "end", "--run", "R-1", "--state-dir", st)[0] == 0
+
+    # The auditor: its own token, lease, workspace and verdicts; the service stamps them.
+    gate.connect("auditor")
+    code, begun = wiki_json(capsys, "review", "begin", "--run", "AUD-1", "--state-dir", ast)
+    assert code == 0 and begun["backlog"] == 2, begun  # the fixture's unverified AIO_AB, then the new concept
+    decided = {}
+    while (answer := wiki_json(capsys, "review", "next", "--state-dir", ast))[0] == 0:
+        taken = answer[1]
+        code, checked = wiki_json(capsys, "review", "evidence", taken["path"], "--state-dir", ast,
+                                  "--config", loop["config"])
+        assert code == 0, checked
+        if taken["path"] == CAP:  # both Git parts re-read from this host's checkout, byte for byte
+            assert [row["status"] for row in checked["evidence"]] == ["frozen", "match", "match"], checked
+        decided[taken["path"]] = fake_auditor(capsys, [Path(path) for path in taken["evidence"]],
+                                              Path(taken["concept"]))
+        code, _ = wiki_json(capsys, "review", "verdict", taken["path"], decided[taken["path"]], "--note",
+                            "claims compared with the frozen evidence word for word", "--state-dir", ast)
+        assert code == 0
+    assert answer[0] == 10 and decided == {CAP: "verified", "experiments/web-landing-page-aio-ab.md": "unverified"}
+    code, sent = wiki_json(capsys, "review", "submit", "--state-dir", ast)
+    assert code == 0 and sorted((row["path"], row["outcome"]) for row in sent["reviews"]) == [
+        ("experiments/web-landing-page-aio-ab.md", "unverified"), (CAP, "verified")], sent
+    code, report = wiki_json(capsys, "review", "end", "--run", "AUD-1", "--state-dir", ast)
+    assert code == 0 and (report["reviewed"], report["verified"], report["unverified"]) == (2, 1, 1)
+    assert report["backlog_remaining"] == 0 and report["lease"]["released"] is True
+
+    published = parse_document(git(gate.remote, "show", f"main:{CAP}") + "\n").frontmatter
+    assert published["status"] == "stable" and published["generated"]["by"] == CURATOR
+    assert published["verified"][-1]["by"] == "process:ai-wiki-auditor"
+    metadata = gate.client.get("/cat", params={"bundle": "kb-a", "path": CAP}, headers=gate.headers()).json()
+    assert (metadata["metadata"]["trust"], metadata["metadata"]["verification_current"]) == ("machine-confirmed", True)
+    # The maintainer can never have reached that tier: its token has no audit scope.
+    assert gate.post({"schema": "ai-wiki.changeset/v1", "kind": "audit", "base_revision": gate.head(),
+                      "reviews": [{"path": CAP, "base": "ch1:" + "0" * 64, "verdict": "verified"}]}).status_code == 403
