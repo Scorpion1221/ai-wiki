@@ -20,6 +20,7 @@ from gate_fixture import EVIDENCE_ID, METRIC, Gate, cited, git
 
 from aiwiki.cli import main as cli
 from aiwiki.cli import workspace
+from aiwiki.runtime import changeset
 from aiwiki.service import inbox, worker
 from aiwiki.service import ingest as I
 from aiwiki.service import maint_state as M
@@ -61,6 +62,26 @@ def job(gate: Gate, job_id: str, token: str = "member") -> dict:
 
 def bundle(gate: Gate) -> Path:
     return gate.root / "kb-a"
+
+
+def maintainer_host(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]:
+    """PATH as the curator doctor wants it, with a lark-cli that reads only doxcnOK; ``(config,
+    state dir, lark-cli argument log)``."""
+    tools, log = tmp_path / "bin", tmp_path / "lark-args"
+    tools.mkdir()
+    content = f"# Retry cap\n\nWe cap retries at 3; key {FAKE_KEY}.\n"
+    document = {"ok": True, "data": {"document": {"document_id": "doxcnOK", "revision_id": 3, "content": content}}}
+    scripts = {"multica": "exit 0\n", "uv": "exit 0\n",
+               "lark-cli": f"printf '%s\\n' \"$@\" >> '{log}'\ncase \"$*\" in\n  *doxcnOK*) printf '%s' "
+                           f"'{json.dumps(document)}' ;;\n  *) printf '%s' '{{\"ok\": false}}'; exit 1 ;;\nesac\n"}
+    for name, script in scripts.items():
+        (tools / name).write_text("#!/bin/sh\n" + script, encoding="utf-8")
+        (tools / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setattr(workspace, "POLL_S", 0.02)
+    config = tmp_path / "maint.json"
+    config.write_text(json.dumps({"audits": {"resubmit": False}}), encoding="utf-8")
+    return config, tmp_path / "st", log
 
 
 def claim(gate: Gate, run: str = "WAIO-1") -> dict | None:
@@ -109,21 +130,13 @@ def test_a_member_submission_becomes_a_work_item_not_a_codex_job(gate, monkeypat
 def test_a_member_item_goes_through_the_maintainer_loop_to_its_changeset(gate, tmp_path, monkeypatch,
                                                                          capsys) -> None:
     """The curating maintainer's own CLI: begin, next (the member item first), propose, end."""
-    tools = tmp_path / "bin"
-    tools.mkdir()
-    for name in ("multica", "uv"):  # the curator doctor wants them on PATH
-        (tools / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        (tools / name).chmod(0o755)
-    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
-    monkeypatch.setattr(workspace, "POLL_S", 0.02)
+    config, st, _log = maintainer_host(tmp_path, monkeypatch)
     collected = gate.client.post("/maint/items", params={"bundle": "kb-a"}, headers=gate.headers(), json={"items": [{
         "origin": {"kind": "repo"}, "topic_key": "repo:x#tasks/funnel", "priority": 70, "brief": "task docs",
         "files": [{"name": "S1-status.md", "content_b64": base64.b64encode(b"# Status\n").decode(),
                    "origin": {"kind": "git-file"}}]}]})
     assert collected.status_code == 200, collected.text
     receipt = ingest(gate, text=f"# Funnel status\n\nThe funnel moved; key {FAKE_KEY}.\n", title="Funnel").json()
-    config, st = tmp_path / "maint.json", tmp_path / "st"
-    config.write_text(json.dumps({"audits": {"resubmit": False}}), encoding="utf-8")
     gate.connect("curator")
 
     code, begun = run(capsys, "maint", "begin", "--run", "WAIO-9", "--only", "repos", "--config", config,
@@ -167,13 +180,17 @@ def test_the_writer_never_fetches_a_link(gate, monkeypatch) -> None:
     monkeypatch.setattr(socket, "create_connection", refuse)
     receipt = ingest(gate, url=FEISHU, title="Retry cap").json()
 
-    assert receipt["status"] == "needs_access" and "never fetches URLs" in receipt["reason"]
+    # A Feishu link waits for the maintainer, who reads it as the wiki's app (maint next).
+    assert receipt["status"] == "ready" and "reason" not in receipt
     assert "source" not in receipt and not list((bundle(gate) / "sources" / "inbox").glob("*"))
     item = M.get_item(bundle(gate), receipt["item"])
     assert item["origin"]["url"] == FEISHU
     assert M.read_file(bundle(gate), item["id"], "link.txt") == f"{FEISHU}\n".encode()
-    assert claim(gate) is None  # closed at once: no maintainer spends a run on it
     assert ingest(gate, url=FEISHU).json()["deduplicated"] is True
+    # Any other link nothing here reads: needs_access at once, no maintainer spends a run on it.
+    other = ingest(gate, url="https://example.com/post").json()
+    assert other["status"] == "needs_access" and "never fetches URLs" in other["reason"]
+    assert claim(gate)["id"] == receipt["item"]
     for url in ("ftp://example.com/x", "https://user:" + "s3cr3tvalue@example.com/doc", "https://a b"):
         assert ingest(gate, url=url).status_code == 400, url
     assert ingest(gate, url=FEISHU, fetched={"cookie": "x"}).status_code == 400
@@ -329,23 +346,30 @@ def test_cli_reads_feishu_links_as_the_member_and_submits_the_content(gate, tmp_
     assert item["origin"]["fetched"] == {"tool": "lark-cli", "document_id": "doxcnFAKE", "revision_id": 7}
     assert M.read_file(bundle(gate), item["id"], "source.md") == b"# Retry cap\n\nWe cap retries at 3.\n"
 
-    # lark-cli that cannot read it, or none at all: the link alone, needs_access, and why.
+    # lark-cli that cannot read it, or none at all: the link alone waits for the maintainer.
     fake.write_text("#!/bin/sh\nprintf '%s' '{\"ok\": false}'\nexit 1\n", encoding="utf-8")
     code, out = run(capsys, "ingest", FEISHU + "?from=wiki")
-    assert code == 0 and out["submissions"][0]["state"] == "needs_access"
-    assert out["submissions"][0]["detail"].startswith("lark-cli could not read it; the writer never fetches URLs")
+    assert code == 0 and out["submissions"][0]["state"] == "ready"
+    assert out["submissions"][0]["detail"] == ("lark-cli could not read it; the maintainer reads it as the wiki's "
+                                               "Feishu app")
     fake.unlink()
     code, out = run(capsys, "ingest", "https://example.com/post")  # not Feishu: never handed to lark-cli
     assert code == 0 and out["submissions"][0]["state"] == "needs_access"
-    assert out["submissions"][0]["detail"].startswith("the writer never fetches URLs")
+    assert out["submissions"][0]["detail"].startswith("nothing reads this link for you")
     code, out = run(capsys, "ingest", FEISHU + "?v=2")
     assert out["submissions"][0]["detail"].startswith("lark-cli is not installed here;")
 
-    gate.app()  # AIWIKI_INTAKE=curate: the CLI says it needs the content, before sending anything
-    capsys.readouterr()
-    with pytest.raises(SystemExit) as refused:
-        cli.main(["ingest", "https://example.com/other"])
-    assert refused.value.code == 2 and "takes content, not links" in capsys.readouterr().out
+    # A bundle that takes no links: refused before anything is sent, the file ahead of it too.
+    notes = tmp_path / "notes.md"
+    notes.write_text("# Notes\n\nsent first\n", encoding="utf-8")
+    jobs = set((bundle(gate) / ".okf" / "jobs").glob("*.json"))
+    for gate_env in ({"AIWIKI_INTAKE": "inbox", "AIWIKI_CHANGESETS_COMMIT": "kb-b"}, {}):
+        gate.app(**gate_env)
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as refused:
+            cli.main(["ingest", str(notes), "https://example.com/other"])
+        assert refused.value.code == 2 and "bundle kb-a takes content, not links" in capsys.readouterr().out
+    assert set((bundle(gate) / ".okf" / "jobs").glob("*.json")) == jobs
 
 
 def test_member_uploads_keep_binary_evidence_verbatim(gate) -> None:
@@ -355,6 +379,41 @@ def test_member_uploads_keep_binary_evidence_verbatim(gate) -> None:
     assert receipt["status"] == "ready" and item["origin"]["filename"] == "Funnel Chart.PNG"
     assert M.read_file(bundle(gate), item["id"], "source.PNG") == png and item["origin"]["redactions"] == 0
     assert git(bundle(gate), "status", "--porcelain") == ""  # sources/inbox and .okf stay out of Git
+
+
+def test_the_maintainer_reads_a_member_link_as_the_wiki_app(gate, tmp_path, monkeypatch, capsys) -> None:
+    """A Feishu link sent alone: ``maint next`` reads it with lark-cli --as bot and freezes it beside
+    the link, or closes it needs_access and serves the next item (design §6 step 2)."""
+    config, st, log = maintainer_host(tmp_path, monkeypatch)
+    private = ingest(gate, url=FEISHU + "?private").json()
+    gate.connect("curator")
+
+    code, begun = run(capsys, "maint", "begin", "--run", "WAIO-7", "--only", "inbox", "--max-items", "3",
+                      "--config", config, "--state-dir", st)
+    assert code == 0 and begun["collect"] == {"inbox": {"status": "ok", "ready": 1}}, begun
+    code, empty = run(capsys, "maint", "next", "--state-dir", st)
+    assert code == 10 and empty["closed"] == [{"item": private["item"], "status": "needs_access"}], empty
+    followed = job(gate, private["id"])
+    assert followed["status"] == "needs_access" and followed["reason"].startswith(
+        "the wiki's Feishu app cannot read it (lark-cli could not read it): ingest the link where lark-cli")
+
+    shared = ingest(gate, url="https://example.feishu.cn/docx/doxcnOK").json()
+    code, brief = run(capsys, "maint", "next", "--state-dir", st)
+    assert code == 0 and brief["item"] == shared["item"] and "closed" not in brief, brief
+    assert [file["name"] for file in brief["files"]] == ["link.txt", "source.md"]
+    assert log.read_text(encoding="utf-8").split()[-8:] == [
+        "docs", "+fetch", "--doc", "https://example.feishu.cn/docx/doxcnOK", "--doc-format", "markdown", "--as", "bot"]
+    item = M.get_item(bundle(gate), shared["item"])
+    frozen = M.read_file(bundle(gate), item["id"], "source.md").decode()
+    assert frozen.startswith("# Retry cap") and FAKE_KEY not in frozen
+    assert item["files"][1]["origin"]["fetched"] == {"tool": "lark-cli", "as": "bot", "document_id": "doxcnOK",
+                                                     "revision_id": 3}
+    parts = [changeset.EvidenceFile(f"{item['id']}/{file['name']}", M.read_file(bundle(gate), item["id"], file["name"]),
+                                    file["origin"]) for file in item["files"]]
+    packet, errors = changeset.build_packet({"id": "retry-cap-2026-09-28", "item_files": [p.name for p in parts]},
+                                            parts)
+    assert errors == [] and b"doxcnOK" in packet.data  # both parts, text: one packet the gate takes
+    run(capsys, "maint", "end", "--run", "WAIO-7", "--state-dir", st)
 
 
 def test_text_larger_than_one_evidence_packet_is_refused(gate, monkeypatch) -> None:

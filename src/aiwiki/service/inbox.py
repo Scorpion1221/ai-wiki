@@ -8,8 +8,9 @@ collectors do, binaries verbatim) and names the submitter and the job; the job (
 names the item and answers ``GET /jobs/<id>`` from it, so the member follows one id to the
 changeset and commit that curated it.
 
-The writer never fetches a URL: a link submitted without its content is recorded as a
-needs_access item. A format nothing reads (a PDF) is needs_conversion. Text larger than one
+The writer never fetches a URL. A Feishu/Lark link sent without its content waits for the
+maintainer, whose ``maint next`` reads it as the wiki's read-only Feishu app; any other link is
+needs_access at once. A format nothing reads (a PDF) is needs_conversion. Text larger than one
 evidence packet is refused, and an inbox drop of it is needs_conversion. ``requeue`` hands
 ready and parked member items back to Codex curation, the rollback while Codex exists.
 
@@ -32,9 +33,8 @@ from ..runtime import changeset, secrets
 from . import ingest as I
 from . import maint_state as M
 
-NEEDS_ACCESS = ("the writer never fetches URLs, so nothing was read from this link: fetch it where you have "
-                "access (with lark-cli installed, `ai-wiki ingest <url>` reads a Feishu/Lark doc on your "
-                "machine) or export it and ingest the file")
+NEEDS_ACCESS = ("nothing reads this link for you: the writer never fetches URLs and the maintainer reads only "
+                "Feishu/Lark docs; save or export it and ingest the file")
 NEEDS_CONVERSION = "the writer reads no such format: convert it to text or Markdown and ingest that"
 TOO_LARGE = ("{size} bytes of text is more than one evidence packet holds ({limit}): split it into parts and "
              "ingest each")
@@ -84,7 +84,8 @@ def _freeze(data: bytes | None, filename: str | None, url: str | None) -> tuple[
     """The item's one evidence file ``{name, data, redactions}``, and the outcome closing it at
     once with its reason (``too_large``: text no evidence packet holds)."""
     if data is None:
-        return {"name": "link.txt", "data": f"{url}\n".encode(), "redactions": 0}, "needs_access", NEEDS_ACCESS
+        file = {"name": "link.txt", "data": f"{url}\n".encode(), "redactions": 0}
+        return (file, None, None) if planner.lark_link(str(url)) else (file, "needs_access", NEEDS_ACCESS)
     suffix = re.sub(r"[^A-Za-z0-9.]", "", Path(filename or "pasted.md").suffix)[:16]
     file = {"name": f"source{suffix}", "data": data, "redactions": 0}
     outcome = reason = None

@@ -132,6 +132,8 @@ def _collector(name: str, result: dict) -> str:
     if result.get("status") in BLOCKING:
         return f"{name} {result['status']}: {result.get('error')}"
     line = f"{name} {result.get('status')}"
+    if name == "inbox":
+        return line + f", {result.get('ready', 0)} member items ready"
     if name == "repos":
         line += (f" {result.get('scanned', 0)} scanned (changed {result.get('changed', 0)}, "
                  f"new {result.get('new', 0)}, rebaselined {result.get('rebaselined', 0)}, "

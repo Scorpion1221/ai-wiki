@@ -473,9 +473,10 @@ def _ingest_inbox(body: IngestBody, data: bytes | None, filename: str | None, bu
     """Inbox intake: store the submission and queue its member work item (service/inbox.py).
 
     The job answers ``GET /jobs/<id>`` from the item until the maintainer's changeset curates
-    it. The writer never fetches ``url``: a link alone becomes a needs_access item. New
-    submissions count against the principal's ``submissions_per_day`` for the bundle (429 past
-    it), so a leaked member token can only queue that much.
+    it. The writer never fetches ``url``: the maintainer reads a Feishu/Lark link sent alone,
+    any other is needs_access. New submissions count against the principal's
+    ``submissions_per_day`` for the bundle (429 past it), so a leaked member token can only
+    queue that much.
     """
     if not CURATE_ON:
         raise HTTPException(status_code=403, detail="inbox intake requires the writer (AIWIKI_CURATE enabled)")
