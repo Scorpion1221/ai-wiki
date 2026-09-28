@@ -1100,20 +1100,21 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
         if frontmatter.get("status") == "deprecated" or (rel, base) in reviewed:
             continue
         current = bool(current_verified(frontmatter))
-        entry = {"path": rel, "base": base, **{key: None if frontmatter.get(key) is None else str(frontmatter[key])
-                                              for key in ("type", "title", "status")},
-                 "generated": {"by": by or None, "at": at or None}, "verification_current": current,
-                 "sources": _local_sources(frozen, rel, frontmatter)}
         generated_at = _instant(at)
         pushed = [external[path] for path in {rel, *_cited(rel, frontmatter)} if path in external]
         if pushed:  # the concept, or evidence it cites, changed past the service
-            fresh.append({**entry, "reason": "external", "since": max(pushed, key=_instant)})
+            reason, since = "external", max(pushed, key=_instant)
         elif current or by in auditors:
             continue
         elif epoch is None or (generated_at is not None and generated_at >= epoch):
-            fresh.append({**entry, "reason": "generation", "since": at or None})
+            reason, since = "generation", at or None
         else:
-            older.append({**entry, "reason": "seed", "since": at or None})
+            reason, since = "seed", at or None
+        (older if reason == "seed" else fresh).append({
+            "path": rel, "base": base, **{key: None if frontmatter.get(key) is None else str(frontmatter[key])
+                                          for key in ("type", "title", "status")},
+            "generated": {"by": by or None, "at": at or None}, "verification_current": current,
+            "sources": _local_sources(frozen, rel, frontmatter), "reason": reason, "since": since})
 
     def oldest(entry: dict) -> tuple:
         return _instant(entry["since"]) or datetime.min.replace(tzinfo=UTC), entry["path"]
