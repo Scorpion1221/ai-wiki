@@ -124,7 +124,9 @@ ai-wiki -b solvely-wiki doctor --role curator      # or --role auditor, --role m
 
 `doctor` fails closed (exit `4`) when the token's scopes are not exactly the role's, the
 writer's API is newer than the CLI, the bundle is not served, or a tool (`git`, `uv`,
-`multica`) is missing. Fix the host; never widen a token to pass it.
+`multica`) is missing. Fix the host; never widen a token to pass it. `maint begin` reruns it
+for the tools its run needs: `multica` only when it collects issues (or repositories through
+the Multica registry).
 
 ## 4. Attach the skills and the prompt
 
@@ -138,10 +140,12 @@ writer's API is newer than the CLI, the bundle is not served, or a tool (`git`, 
    as a `create_issue` autopilot (Multica) or the task text of any scheduler. The prompt
    supplies only workspace parameters; the skill carries the procedure.
 4. Outside Multica, the prompt's `$MULTICA_ISSUE_ID` is simply the run id: any unique,
-   stable string per run (1 to 128 of `A-Z a-z 0-9 _ . : @ / -`). A maintainer still needs a
-   logged-in `multica` CLI on its host, whatever runs it: the issues collector reads the
-   conversations through it, `doctor --role curator` checks for it, and a run whose collector
-   is `unavailable` reports `status=blocked`. An auditor or a member needs no `multica`.
+   stable string per run (1 to 128 of `A-Z a-z 0-9 _ . : @ / -`). The scheduled maintainer
+   still needs a logged-in `multica` CLI on its host, whatever runs it: the issues collector
+   reads the conversations through it, `doctor --role curator` checks for it, and a run whose
+   collector is `unavailable` reports `status=blocked`. A run that only drains the member
+   inbox by hand (`maint begin --only inbox`, e.g. from the owner's laptop while no Multica
+   runtime is up) needs none. An auditor or a member needs no `multica`.
 
 ## 5. Run
 
@@ -191,7 +195,7 @@ multica agent update <agent-id> --runtime-id <runtime-id>    # another runtime o
 - A new host must pass `doctor` for the role (§3) before its first scheduled run.
 - An auditor should stay on another model family than the maintainer's: independence comes
   from the model as well as from the principal.
-- A maintainer's new runtime needs the `multica` CLI too (§4).
+- A maintainer's new runtime needs the `multica` CLI too, unless it only drains the inbox (§4).
 
 ## 7. Revoke
 

@@ -413,7 +413,12 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
     state = _read(folder / "run.json")
     if state and state.get("bundle") != bundle:
         raise MaintError(f"run {run} maintains bundle {state['bundle']!r}, not {bundle!r}", USAGE)
-    checked = doctor.run("curator", bundle=bundle, state_dir=state_dir, skills_dir=None)
+    # Only the issues collector and the repos collector's Multica registry run `multica`: a run
+    # that drains the member inbox needs no Multica host (design §7, the owner's laptop).
+    repos = settings.get("repos")
+    multica = "issues" in only or ("repos" in only and isinstance(repos, dict) and repos.get("registry") == "multica")
+    checked = doctor.run("curator", bundle=bundle, state_dir=state_dir, skills_dir=None,
+                         tools=tuple(tool for tool in doctor.TOOLS["curator"] if multica or tool != "multica"))
     if not checked["ok"]:
         failed = [row for row in checked["checks"] if not row["ok"]]
         return PREFLIGHT, {"run": run, "failed": "doctor", "checks": failed}

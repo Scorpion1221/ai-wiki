@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -364,6 +365,24 @@ def test_the_budget_stops_the_run_and_a_preflight_failure_fails_closed(loop, cap
                              "--config", loop["config"])
     assert code == 4 and failed["failed"] == "doctor"
     assert {row["check"] for row in failed["checks"]} >= {"tool:git", "tool:multica"}
+
+
+def test_a_run_that_collects_no_issues_needs_no_multica(loop, capsys, monkeypatch) -> None:
+    """Draining the member inbox (or scanning repositories without the Multica registry) never
+    runs `multica`, so a host without it, such as the owner's laptop (design §7), may do it."""
+    tools = loop["tmp"] / "bin"
+    (tools / "multica").unlink()
+    (tools / "git").symlink_to(shutil.which("git"))
+    monkeypatch.setenv("PATH", str(tools))  # git and uv only
+    st = loop["st"]
+    for only in ("inbox", "repos"):
+        code, begun = wiki_json(capsys, "maint", "begin", "--run", f"WAIO-{only}", "--only", only,
+                                "--state-dir", st, "--config", loop["config"])
+        assert code == 0 and "failed" not in begun, (only, begun)
+        assert wiki_json(capsys, "maint", "end", "--run", f"WAIO-{only}", "--state-dir", st)[0] == 0
+    code, failed = wiki_json(capsys, "maint", "begin", "--run", "WAIO-12", "--only", "issues", "--state-dir", st,
+                             "--config", loop["config"])
+    assert code == 4 and [row["check"] for row in failed["checks"]] == ["tool:multica"]
 
 
 def test_add_evidence_extracts_only_what_the_collectors_may_cite(loop, capsys) -> None:

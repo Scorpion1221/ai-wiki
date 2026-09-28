@@ -89,7 +89,9 @@ def _server(role: str, bundle: str | None, check) -> None:
           f"bundle {health.get('bundle')} okf_version {health.get('okf_version')}" if status == 200 else detail)
 
 
-def run(role: str, *, bundle: str | None, state_dir: Path, skills_dir: Path | None) -> dict:
+def run(role: str, *, bundle: str | None, state_dir: Path, skills_dir: Path | None,
+        tools: tuple[str, ...] | None = None) -> dict:
+    """The role's checks; ``tools`` narrows the role's tools to those a run will shell out to."""
     checks: list[dict] = []
 
     def check(name: str, ok: bool, detail: str) -> None:
@@ -110,7 +112,7 @@ def run(role: str, *, bundle: str | None, state_dir: Path, skills_dir: Path | No
     else:
         check("state_dir", True, str(state_dir))
         check("disk", free > MIN_FREE_BYTES, f"{free / 1024 ** 3:.1f} GB free at {state_dir}")
-    for tool in TOOLS[role]:
+    for tool in TOOLS[role] if tools is None else tools:
         found = shutil.which(tool)
         check(f"tool:{tool}", found is not None, found or "not on PATH")
     for name in SKILLS[role] if skills_dir else ():
