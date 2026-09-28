@@ -15,10 +15,10 @@ You turn on each group of checks with a flag. Every threshold can be changed wit
 
 | Flag | Source | Alerts when (default) |
 |---|---|---|
-| `--multica` | `multica` CLI, autopilot `5c80732b-…` (`--autopilot-id`) | The newest `ai_wiki_incremental_checkpoint_v4.completed_at` found in any run issue's metadata is older than `--checkpoint-max-age-hours` (30). The latest run failed and no checkpoint was written after that run started. The latest run is older than `--run-max-age-hours` (26), which means the schedule did not fire. A run issue has been in `todo`/`in_progress` longer than `--stuck-hours` (3). A run has not reached a terminal state after `--stuck-hours`, and its issue is not done or cancelled. |
+| `--multica` | `multica` CLI, autopilot `5c80732b-…` (`--autopilot-id`) | The newest `ai_wiki_incremental_checkpoint_v4.completed_at` found in any run issue's metadata is older than `--checkpoint-max-age-hours` (30). The latest run failed and no checkpoint was written after that run started. The latest run is older than `--run-max-age-hours` (26), which means the schedule did not fire. A run issue has been in `todo`/`in_progress` longer than `--stuck-hours` (3). A run has not reached a terminal state after `--stuck-hours`, and its issue is not done or cancelled. `--no-checkpoint` (the final state: the curating maintainer writes no v4 checkpoint) drops both checkpoint checks, so a failed latest run alerts until a later run succeeds. |
 | `--ledger PATH` | `ai-wiki maintain` `state.json`, or its state directory | An entry is `needs_repair`. An entry has been pending longer than `--pending-max-age-hours` (48); the pending time is measured from the earlier of its frozen evidence mtime and its first job. `done` and `superseded` entries are ignored. |
 | `--bundle PATH` (repeatable) | The writer's bundle directory | The bundle's last Git commit is older than `--commit-max-age-hours` (48). A job in `<bundle>/.okf/jobs/` failed within the last `--unresolved-failure-hours` (168, 7 days) and no later attempt on the same source SHA (ingest) or parent job (audit) is done, queued or running. A queued or running job is older than `--stuck-hours`. The output lists every failure from the last `--failed-window-hours` (24) with the attempt that resolved it, and reports queue depth and the age of the oldest queued job. |
-| `--bundle PATH` (same flag) | The maintainer queue in `<bundle>/.okf/maint/` (`service/maint_state.py`, design §7) | An item is `needs_human` (one alert per item, so each new one posts at once). An item's `item.json` fails the writer's own item check, so the writer no longer sees the item (one alert per item). Some item has waited in `ready` longer than `--ready-max-age-hours` (72); the wait restarts when the item last came back to `ready` (an owner retry, an attempt that handed it back, or a new build re-admitting an attempt-capped item), and one alert per bundle names the count and the oldest item. The `repos` or `issues` cursor has not advanced for `--cursor-max-age-hours` (30); for `repos` that includes a repository the collector could not scan and carried forward with `stale_since`, even though the collector still rewrites the cursor. A cursor that does not exist yet never alerts. A maintainer or auditor run lease still names a run that acquired it more than `--stuck-hours` ago, live or lapsed, until `maint end` or the next `maint begin` replaces it. A missing `.okf/maint` is quiet, not an error. |
+| `--bundle PATH` (same flag) | The maintainer queue in `<bundle>/.okf/maint/` (`service/maint_state.py`, design §7) | An item is `needs_human` (one alert per item, so each new one posts at once). An item's `item.json` fails the writer's own item check, so the writer no longer sees the item (one alert per item). Some item has waited in `ready` longer than `--ready-max-age-hours` (72); the wait restarts when the item last came back to `ready` (an owner retry, an attempt that handed it back, or a new build re-admitting an attempt-capped item), and one alert per bundle names the count and the oldest item. A member's submission (`origin.kind` `member`, `AIWIKI_INTAKE=inbox`) has waited in `ready` longer than `--member-ready-max-age-hours` (24), with the same restart rule and one alert per bundle. The `repos` or `issues` cursor has not advanced for `--cursor-max-age-hours` (30); for `repos` that includes a repository the collector could not scan and carried forward with `stale_since`, even though the collector still rewrites the cursor. A cursor that does not exist yet never alerts. A maintainer or auditor run lease still names a run that acquired it more than `--stuck-hours` ago, live or lapsed, until `maint end` or the next `maint begin` replaces it. A missing `.okf/maint` is quiet, not an error. |
 
 The script prints one JSON document containing `status`, `alerts[]`, `errors[]`, per-check
 `checks` facts, and `notify`. Exit codes:
@@ -156,6 +156,25 @@ them as the worker's user (`admin`). Git then owns the repository it reads, so t
 
    The watchdog only reads, so writer deploys and restarts do not need to wait for it.
 
+### Final state
+
+The watchdog runs once a day, at 07:00 CST, after the 04:00 maintainer run, on two hosts
+(docs/final-cutover-runbook.md step 10 installs both):
+
+- The writer host, `--bundle <production bundle>`: the curating maintainer's progress lives on
+  the writer, so its maint checks page on cursors that stopped advancing (the maintainer did
+  not run), items waiting too long (a member's submission after 24 h, any item after 72 h) or
+  needing a human, and stuck run leases.
+- The maintainer's runtime host, `--multica --no-checkpoint`, once for the maintainer's
+  autopilot and once with `--autopilot-id <the Auditor's autopilot>`: failed, overdue and stuck
+  runs and issues. `--no-checkpoint` is required: the curating maintainer writes no v4
+  checkpoint, so the checkpoint checks would alert `checkpoint_missing` forever.
+
+`--ledger` reads the legacy `maintain` ledger, and the checkpoint checks the legacy v4
+checkpoint; both return with a rollback. The runbook removes the shadow's `--bundle` when the
+shadow agent retires. The audit backlog's age (design §7, 72 h) has no check yet: the
+Auditor's failed or missing runs page through its autopilot.
+
 ### Maintainer queue across the migration
 
 - The production bundle gets its cursors only at Phase 3a Day 0 (`maint import-v4`, design
@@ -240,6 +259,9 @@ been reassigned away from the agent. On 2026-09-23 a run made 6 calls and finish
 - **`maint_ready_stale`**: maintainer runs are not draining the queue (not scheduled, failing,
   or too few items per run). It clears once no item has waited in `ready` longer than the
   threshold.
+- **`maint_member_ready_stale`**: a member's submission missed a daily maintainer run. Member
+  items go first, so check that run's issue (failed, blocked, stopped early). It clears once
+  the maintainer claims it.
 - **`maint_cursor_stale`**: no `maint collect` has succeeded for that collector, or, for
   `repos`, some repository has not been scanned since its `stale_since`
   (`cursors.repos.stale_repos` in the JSON output names them). It clears on the next collect

@@ -7,10 +7,12 @@ read or write legacy v0.1 concepts; migrate the whole bundle before upgrading th
 
 Agents read the bundle like a filesystem — `ls` / `cat` / `grep` plus ranked,
 CJK-aware search — over a token-authed HTTP API, so no one needs a full local clone.
-They *maintain* it by **submitting a source**: a headless-agent curation pass folds the
-source into the bundle as probationary concepts, flags contradictions, and runs the
-deterministic close-out. Reads stay deterministic (no LLM in the service); only curation
-and adversarial audit use agents.
+Members **submit sources**; a maintainer agent curates them, with the evidence it collects
+from repositories and conversations, in a pulled workspace and **proposes changesets** to the
+writer's deterministic gate; a separate auditor agent verifies. The service itself runs no
+LLM: reads are deterministic, and every write passes validation, service-owned bookkeeping,
+commit and push. Any agent or model that holds a credential of a role can take it
+([docs/external-agents.md](docs/external-agents.md)).
 
 ## Design
 
@@ -26,10 +28,36 @@ and adversarial audit use agents.
 - **CLI** (`src/aiwiki/cli/`) — `ai-wiki`, a thin stdlib-only, agent-first client. Its no-args home view
   shows live bundle context; structured output is compact TOON (with `--json` escape hatches), while
   `cat` stays raw Markdown.
-- **Runtime** (`src/aiwiki/runtime/`) — triggers headless curation and adversarial-audit
-  passes. These are the only LLM-using parts; disable them for a pure read deploy.
+- **Runtime** (`src/aiwiki/runtime/`) — the changeset gate (`changeset.py`, `policy.py`,
+  shared with the CLI's `validate`), reverts, and the legacy server-side Codex curation and
+  audit runner, which only a rollback uses. `AIWIKI_LLM=off` guarantees the service never
+  starts it.
+
+### Final state: the server runs no LLM
+
+Curation and audit run in external agents with their own credentials; the writer is the
+deterministic gate. The final state is these writer flags
+([docs/final-cutover-runbook.md](docs/final-cutover-runbook.md)):
+
+| Variable | Final value | Effect |
+|---|---|---|
+| `AIWIKI_LLM` | `off` | the writer never starts an agent process and never reads `config.agent`; the legacy Codex routes (`POST /ingest` under `curate`, `POST /jobs/{id}/audit`) answer 409 |
+| `AIWIKI_INTAKE` | `inbox` | `POST /ingest` turns a submission into a work item for the maintainer agent |
+| `AIWIKI_AUDIT` | `external` | an auditor agent submits audit changesets over the backlog the server derives |
+| `AIWIKI_CHANGESETS_COMMIT` | `solvely-wiki,solvely-wiki-shadow` | the bundles whose changesets commit (the shadow stays as the canary bundle) |
+
+Unset, each switch keeps the legacy behaviour (`codex`, `curate`, `codex`, no bundle), so a
+deploy changes nothing until the flags flip. Removing them is the rollback, as long as the
+Codex agent config and its credentials are still on the writer host. `AIWIKI_CURATE=off` is a
+different switch: it turns off curation, changesets, the workspace and `/maint`, but `POST
+/ingest` still stores a submission and its job unless `AIWIKI_DISABLE` lists `ingest` too, as
+the read mirror's does.
 
 ### Read/write split (multi-writer)
+
+This section and the next two describe the legacy Codex writer, which a rollback restores
+(`AIWIKI_LLM=codex`, `AIWIKI_INTAKE=curate`, `AIWIKI_AUDIT=codex`). The mirror split and the
+Git recovery rules hold in the final state too.
 
 A public **read-only mirror** (`AIWIKI_DISABLE=ingest,audit,create,delete`) and a team **ingest
 worker** (curation enabled, with `codex` + a writable git remote) can be two deployments
@@ -84,10 +112,8 @@ ai-wiki cat <path>         # raw Markdown preview; add --full only if truncated
 ai-wiki cat <path> --json  # path + content + derived OKF metadata
 ai-wiki search "<query>"
 ai-wiki log --tail 30      # newest change-ledger lines first
-ai-wiki ingest notes.md    # submit a source for curation (needs `codex` + AIWIKI_CURATE!=off)
-ai-wiki jobs <ingest-job-id>
-ai-wiki audit <ingest-job-id>  # adversarial review of a completed ingest; returns an audit job
-ai-wiki jobs <audit-job-id>
+ai-wiki ingest notes.md    # submit a source: a work item the maintainer agent curates
+ai-wiki jobs <job-id>      # follow it until a changeset curates it or it is skipped
 okf-render-viz <bundle> [out.html]  # generate a local HTML knowledge-graph snapshot
 ```
 
@@ -142,11 +168,12 @@ profile. Use `--conformance-only` only when testing third-party interoperability
 
 The canonical query, maintenance, and curation skills live in [`skills/`](skills/):
 
-- `ai-wiki` — read-side status/trust/freshness gates;
-- `ai-wiki-maintainer` — deterministic collection (`checkpoint.py`, `scan_reference_repos.py`,
-  `issue_delta.py`), the `ai-wiki maintain` ledger, and checkpoint orchestration;
+- `ai-wiki` — read-side status/trust/freshness gates, and member submissions;
 - `ai-wiki-curating-maintainer` — the maintainer that curates: `doctor`, `maint begin/next`,
   local curation, `validate`/`propose` through the writer's gate, and the `maint end` report;
+- `ai-wiki-auditor` — the external auditor's `review` loop over the server-derived backlog;
+- `ai-wiki-maintainer` — rollback only: the legacy `ai-wiki maintain` ledger over the
+  server's Codex ingest and audit;
 - `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker and, in its
   remote maintainer mode, by the curating maintainer.
 
@@ -172,6 +199,7 @@ The CLI is non-interactive: usage/API failures are structured on stdout with exi
 
 ### Optional Codex subscription / API-wrapper selection
 
+Legacy, rollback only: with `AIWIKI_LLM=off` (the final state) the writer reads none of this.
 Both ingest and audit use the same Codex-compatible executable. On the **worker host**, merge
 an optional `agent` object into `~/.ai-wiki/config.json` (or the file selected by
 `AIWIKI_CONFIG`), preserving the existing connection/token/bundle fields:
@@ -251,7 +279,9 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_PRINCIPALS` | principals file: per-principal token sha256, scopes, bundles, limits (`src/aiwiki/service/auth.py`); edit it with `scripts/provision_principals.py`, SIGHUP reloads it |
 | `AIWIKI_PORT` | service port (default 8787) |
 | `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`) |
-| `AIWIKI_CURATE` | `auto` (default) or `off` to disable the curation trigger |
+| `AIWIKI_CURATE` | `auto` (default) makes a writer; `off` turns off curation, changesets, the workspace and `/maint` (a read mirror also sets `AIWIKI_DISABLE=ingest,audit,…`, else `POST /ingest` still stores submissions) |
+| `AIWIKI_LLM` | `codex` (default) or `off`: off, the writer never starts an agent process, ignores `config.agent` and `AIWIKI_AGENT_*`, and answers the legacy Codex routes with 409 |
+| `AIWIKI_INTAKE`, `AIWIKI_AUDIT`, `AIWIKI_CHANGESETS_COMMIT`, `AIWIKI_RESTRUCTURE`, `AIWIKI_CODEX_AUDIT_MANUAL` | rollout switches, reported by `GET /whoami` under `modes` (see "Final state" above and `src/aiwiki/service/app.py`) |
 | `AIWIKI_CONFIG` | local client / worker JSON config (default `~/.ai-wiki/config.json`) |
 | `AIWIKI_AGENT_BIN` | override `agent.bin`; Codex executable or compatible wrapper (default `codex`) |
 | `AIWIKI_AGENT_MODEL` | override `agent.model` for curator and auditor (default `gpt-5.6-sol`) |
@@ -277,6 +307,10 @@ While `build` is `null`, `maintain` never grants its extra attempt for a newly d
 major.minor); maintenance automation fails closed when `compatible` is false.
 
 ## Maintenance recovery
+
+Legacy, rollback only: the `maintain` ledger drives the server's Codex ingest and audit. In the
+final state the maintainer agent's progress lives on the writer (`ai-wiki maint status`), and
+this section applies only after a rollback.
 
 `ai-wiki ingest --json` returns machine-readable submission IDs. `ai-wiki jobs
 --pending-audit --json` discovers successful ingests older than 24 hours without an active
@@ -355,9 +389,13 @@ rules.
 
 [`docs/maintenance-watchdog.md`](docs/maintenance-watchdog.md) describes
 `scripts/maintenance_watchdog.py`, a read-only, LLM-free check (Python 3.11+ on the host where
-it is installed) that pages Feishu about a stale checkpoint, stuck issues and runs,
-`needs_repair` (`ledger_needs_repair`) or long-pending ledger entries, and writer job failures
-that have no later attempt (`job_failed`, for up to 7 days).
+it is installed). In the final state it runs once a day at 07:00 CST, on two hosts. On the
+writer host, `--bundle` pages Feishu about collector cursors that stopped advancing, work items
+that wait too long (a member's submission after a day) or need a human, stuck run leases, a
+stale bundle commit, and writer job failures that have no later attempt (`job_failed`, for up to
+7 days). On the maintainer's runtime host, `--multica --no-checkpoint` pages about failed,
+overdue or stuck maintainer and auditor runs. The checkpoint checks and `--ledger` read the
+legacy v4 checkpoint and ledger and belong to a rollback.
 
 ## Development and CI
 

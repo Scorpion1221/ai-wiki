@@ -147,6 +147,22 @@ def test_reassigned_run_issue_is_fetched_individually(tmp_path: Path) -> None:
     assert ["issue", "get", target["id"], "--output", "json"] in [json.loads(x) for x in log.read_text().splitlines()]
 
 
+def test_without_a_checkpoint_the_multica_side_still_watches_runs_and_issues() -> None:
+    """The final state: the curating maintainer writes no v4 checkpoint (its cursors live on the
+    writer), so --no-checkpoint drops only the checkpoint checks; failed and stuck runs still page."""
+    code, result = run("--multica", "--multica-bin", multica_bin(), "--now", "2026-09-23T19:03:07Z",
+                       "--no-checkpoint")
+    assert (code, result["checks"]["multica"]["checkpoint"], result["errors"]) == (1, None, [])
+    assert keys(result) == {STUCK_499, STUCK_512, STUCK_545, RUN_STUCK_545,
+                            "latest_run_failed:01a0cab4-a405-7cfd-baff-8dbcdfb7ac69"}  # WAIO-587
+    code, result = run("--multica", "--multica-bin", multica_bin(), "--now", "2026-09-13T23:00:00Z",
+                       "--no-checkpoint")
+    assert (code, result["alerts"], result["errors"]) == (0, [], [])
+    both = subprocess.run([sys.executable, str(SCRIPT), "--multica", "--no-checkpoint", "--checkpoint-key", "k"],
+                          capture_output=True, text=True, timeout=60)
+    assert both.returncode == 2 and "exclude each other" in both.stderr
+
+
 def test_unreachable_multica_is_an_error_not_healthy() -> None:
     code, result = run("--multica", "--multica-bin", shlex.join([sys.executable, "-c", "raise SystemExit(3)"]))
     assert code == 2
@@ -546,6 +562,28 @@ def test_a_build_retry_restarts_the_ready_wait(tmp_path: Path, monkeypatch) -> N
         "id": row["id"], "since": iso(t0 + timedelta(hours=120)), "age_hours": 1.0}
     _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=193)))
     assert maint_keys(result) == {"maint_ready_stale:solvely-wiki"}
+
+
+def test_a_member_submission_pages_after_a_day_in_ready(tmp_path: Path, monkeypatch) -> None:
+    t0 = datetime(2026, 10, 16, 20, 0, tzinfo=UTC)
+    monkeypatch.setattr(M, "_now", lambda: t0)
+    bundle = make_bundle(tmp_path, iso(t0), [])
+    member = {**maint_item("member:0123456789abcdef", 100), "origin": {"kind": "member"}}
+    _repo, submitted = (row["id"] for row in M.enqueue(bundle, [maint_item("repo:x#a", 40), member],
+                                                       principal=MAINTAINER)["items"])
+
+    def at(hours: float, *extra: str) -> dict:
+        _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=hours)), *extra)
+        assert result["errors"] == []
+        return result
+
+    assert maint_keys(at(23)) == set()
+    late = at(25)
+    assert maint_keys(late) == {"maint_member_ready_stale:solvely-wiki"}  # the repo item has 72h
+    assert late["checks"]["maint:solvely-wiki"]["member_ready_stale"] == 1
+    [message] = [a["message"] for a in late["alerts"]]
+    assert f"1 个成员投递 ready 超过 24h（最老 {submitted}，已 25.0h）" in message
+    assert maint_keys(at(25, "--member-ready-max-age-hours", "48")) == set()
 
 
 def corrupt(bundle: Path, item_id: str, text: str) -> None:

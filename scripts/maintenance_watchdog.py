@@ -4,17 +4,18 @@
 Each check group is opt-in:
 
   --multica        Multica (via the `multica` CLI): latest autopilot run status/age, age of the
-                   newest checkpoint `completed_at` in run-issue metadata, run issues stuck in
-                   todo/in_progress, and runs stuck before a terminal state.
+                   newest checkpoint `completed_at` in run-issue metadata (not with
+                   --no-checkpoint), run issues stuck in todo/in_progress, and runs stuck before
+                   a terminal state.
   --ledger PATH    `ai-wiki maintain` state.json (or its state directory): pending ages and
                    needs_repair entries.
   --bundle PATH    Writer host bundle (repeatable): last Git commit age, the worker's job files in
                    <bundle>/.okf/jobs (unresolved failures, queue depth, stuck jobs), and the
                    maintainer queue in <bundle>/.okf/maint (needs_human and corrupt items, stale
-                   ready items, collector cursors that stopped advancing once they exist, stuck
-                   run leases). With --writer-url, also the external audit backlog each bundle's
-                   writer reports on GET /maint/status (AIWIKI_AUDIT=external; token in
-                   $AIWIKI_WATCHDOG_TOKEN): an alert when its oldest entry waits past 72h.
+                   ready items and member submissions, collector cursors that stopped advancing
+                   once they exist, stuck run leases). With --writer-url, also the external audit
+                   backlog each bundle's writer reports on GET /maint/status (AIWIKI_AUDIT=external;
+                   token in $AIWIKI_WATCHDOG_TOKEN): an alert when its oldest entry waits past 72h.
 
 Prints one JSON document. Exit 0 = ok, 1 = alert, 2 = error (a check or the notification
 failed, or bad usage). With --feishu-webhook, a Feishu card (red alert, grouped by check, with
@@ -62,6 +63,7 @@ LEASE_TTL = timedelta(hours=3)
 LEASE_CLOCK_SKEW = timedelta(minutes=5)
 MAINT_ROLES = ("maintainer", "auditor")
 MAINT_CURSORS = ("repos", "issues")
+MEMBER_ORIGIN = "member"  # origin.kind of a member submission (service/inbox.py, AIWIKI_INTAKE=inbox)
 MAINT_ITEM = re.compile(r"it_[0-9a-f]{12}")
 # service/maint_state._valid: an item.json that fails it is invisible to the writer.
 MAINT_FIELDS = {"id": str, "status": str, "origin": dict, "topic_key": str, "item_key": str, "priority": int,
@@ -224,8 +226,9 @@ def check_multica(args: argparse.Namespace, now: datetime) -> tuple[dict, list[d
                 newest = (completed, key, issue)
     if newest is None:
         checkpoint_fact = None
-        alerts.append(alert("multica", "checkpoint_missing",
-                            f"最近 {len(runs)} 个 run 的 issue 里没有 {'/'.join(args.checkpoint_key)} checkpoint"))
+        if args.checkpoint_key:  # none with --no-checkpoint
+            alerts.append(alert("multica", "checkpoint_missing",
+                                f"最近 {len(runs)} 个 run 的 issue 里没有 {'/'.join(args.checkpoint_key)} checkpoint"))
     else:
         completed, key, issue = newest
         checkpoint_fact = {"key": key, "issue": issue.get("identifier") or issue["id"],
@@ -507,7 +510,7 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
         alerts.append(alert(check, f"maint_item_corrupt:{name}:{path.name}",
                             f"maint {name}：条目 {path.name} 的 item.json 已损坏，writer 不再处理它"))
 
-    counts, needs_human, ready = {}, [], []
+    counts, needs_human, ready, members = {}, [], [], []
     for item in items:
         counts[item["status"]] = counts.get(item["status"], 0) + 1
         if item["status"] == "needs_human":
@@ -529,12 +532,20 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
             if item.get("build_retry"):
                 stamps.append(parse_ts(item.get("updated_at")))
             ready.append((max(filter(None, stamps)), item["id"]))
+            if item["origin"]["kind"] == MEMBER_ORIGIN:
+                members.append(ready[-1])
     ready.sort()
+    members.sort()
     stale = [(since, item_id) for since, item_id in ready if age_h(now, since) > args.ready_max_age_hours]
     if stale:
         alerts.append(alert(check, f"maint_ready_stale:{name}",
                             f"maint {name}：{len(stale)} 个条目 ready 超过 {args.ready_max_age_hours:g}h"
                             f"（最老 {stale[0][1]}，已 {age_h(now, stale[0][0])}h）"))
+    late = [(since, item_id) for since, item_id in members if age_h(now, since) > args.member_ready_max_age_hours]
+    if late:  # design §7: a member waits one daily run at most
+        alerts.append(alert(check, f"maint_member_ready_stale:{name}",
+                            f"maint {name}：{len(late)} 个成员投递 ready 超过 {args.member_ready_max_age_hours:g}h"
+                            f"（最老 {late[0][1]}，已 {age_h(now, late[0][0])}h）"))
 
     cursors: dict[str, dict | None] = {}
     for cursor in MAINT_CURSORS:
@@ -586,7 +597,7 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
     oldest = ready[0] if ready else None
     facts = {"path": str(root), "items": counts, "corrupt_items": corrupt, "needs_human": needs_human,
              "oldest_ready": oldest and {"id": oldest[1], "since": iso(oldest[0]), "age_hours": age_h(now, oldest[0])},
-             "ready_stale": len(stale), "cursors": cursors, "leases": leases}
+             "ready_stale": len(stale), "member_ready_stale": len(late), "cursors": cursors, "leases": leases}
     return facts, alerts
 
 
@@ -798,6 +809,9 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--autopilot-id", default=DEFAULT_AUTOPILOT)
     m.add_argument("--multica-bin", default="multica", help="command prefix, e.g. 'multica --profile prod'")
     m.add_argument("--runs-limit", type=int, default=30, help="autopilot runs to inspect (default 30)")
+    m.add_argument("--no-checkpoint", action="store_true",
+                   help="skip the checkpoint checks: the curating maintainer keeps its progress in the writer's "
+                        "cursors, which --bundle watches")
     m.add_argument("--checkpoint-key", action="append",
                    help=f"issue metadata key (repeatable; default {DEFAULT_CHECKPOINT_KEY})")
     t = p.add_argument_group("thresholds (hours)")
@@ -807,6 +821,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--pending-max-age-hours", type=float, default=48)
     t.add_argument("--commit-max-age-hours", type=float, default=48)
     t.add_argument("--ready-max-age-hours", type=float, default=72, help="a maint item waiting in ready")
+    t.add_argument("--member-ready-max-age-hours", type=float, default=24,
+                   help="a member submission (maint item) waiting in ready")
     t.add_argument("--audit-max-age-hours", type=float, default=72, help="the oldest external audit backlog entry")
     t.add_argument("--cursor-max-age-hours", type=float, default=30,
                    help="a maint collector cursor that exists but has not advanced")
@@ -860,7 +876,9 @@ def watch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             parser.error("--now must be an RFC 3339 timestamp")
         if args.feishu_webhook or args.state_file:
             parser.error("--now is a dry replay; do not combine it with --feishu-webhook or --state-file")
-    args.checkpoint_key = args.checkpoint_key or [DEFAULT_CHECKPOINT_KEY]
+    if args.no_checkpoint and args.checkpoint_key:
+        parser.error("--no-checkpoint and --checkpoint-key exclude each other")
+    args.checkpoint_key = [] if args.no_checkpoint else args.checkpoint_key or [DEFAULT_CHECKPOINT_KEY]
 
     result: dict = {"status": "ok", "now": iso(now), "alerts": [], "errors": [], "checks": {}}
     plan = []

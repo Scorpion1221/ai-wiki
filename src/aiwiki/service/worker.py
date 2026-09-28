@@ -15,6 +15,9 @@ holds nothing back.
 On startup, queued jobs left by a previous run are re-enqueued (a changeset from its
 request in ``.okf/changesets``, a revert from its own job). Interrupted running jobs are
 reconciled from durable Git transaction metadata before being marked failed.
+
+Under AIWIKI_LLM=off no Codex audit or ingest is ever queued (``_put`` refuses one), so the
+worker runs only changesets and reverts: Git, and never an agent.
 """
 from __future__ import annotations
 
@@ -37,6 +40,7 @@ from . import ingest as I
 from . import maint_state as M
 
 PRIORITY = {"changeset": 0, "revert": 0, "audit": 1, "ingest": 2}  # lower runs first
+CODEX_KINDS = ("audit", "ingest")  # the kinds a Codex agent runs: never queued under AIWIKI_LLM=off
 # Installed by the app (design §2.11): the bundles whose changesets commit (none while
 # AIWIKI_DISABLE=changesets), and whether a principal may still propose one to a bundle.
 # A queued changeset is checked again when it runs, so a rollback or a revoked principal
@@ -322,6 +326,8 @@ def _classify_failed(job_path: Path) -> None:
 
 
 def _put(kind: str, bundle: Path, subject: str, job_path: Path) -> None:
+    if kind in CODEX_KINDS and not curate.agents_enabled():
+        raise curate.AgentDisabled(f"AIWIKI_LLM=off: this server queues no Codex {kind}")
     # A bundle's Codex audits go ahead of Codex ingests only once its changesets commit and
     # queue their own audits; a manual (shadow) bundle's audits never pass production's work.
     priority = PRIORITY["ingest"] if kind == "audit" and bundle.name not in AUDIT_BUNDLES else PRIORITY[kind]
@@ -529,6 +535,8 @@ def _register_audit(bundle: Path, job: dict) -> dict:
     mode = os.environ.get("AIWIKI_AUDIT", "").strip() or "codex"
     if mode != "codex":
         return {"mode": mode}
+    if not curate.agents_enabled():  # the parent stays in /jobs/pending-audit for a rollback
+        return {"mode": "llm_off"}
     if bundle.name not in AUDIT_BUNDLES:
         return {"mode": "manual"}
     audit_job, existing = I.receive_audit(bundle, job["id"], audit.concept_files(bundle, job))
@@ -602,6 +610,8 @@ def sweep_once(bundles: list[Path]) -> int:
                     queued += 1
                     continue
                 curatable = I.is_curatable(source_rel, data)
+                if not curate.agents_enabled():
+                    continue  # only Codex curates a drop from here: under AIWIKI_LLM=off none is queued
                 job = I.new_job(b, source_rel, sha, curatable, filename=f.name)
                 known.add(sha)
                 if curatable:
@@ -690,6 +700,8 @@ def recover(bundles: list[Path]) -> bool:
         _closeout(bundle, job)
         _save_job(job_path, job)
     for kind, bundle, subject, job_path in queued:
+        if kind in CODEX_KINDS and not curate.agents_enabled():
+            continue  # stays queued on disk: a rollback to AIWIKI_LLM=codex runs it
         if kind == "audit":
             submit_audit(bundle, subject, job_path)
         elif kind == "changeset":

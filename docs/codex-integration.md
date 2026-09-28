@@ -1,5 +1,10 @@
 # Codex integration: subscriptions, API wrappers, and read-only access
 
+> **Legacy, rollback only.** The final state runs no LLM on the server (`AIWIKI_LLM=off`, see
+> the README's "Final state"): the writer never starts Codex and never reads the `agent`
+> configuration below. This guide applies only after a rollback to the Codex writer
+> (docs/final-cutover-runbook.md). The read-only access section holds either way.
+
 There are two independent directions:
 
 1. **Reader:** Codex → `ai-wiki` CLI → service read endpoints. Reads invoke no server-side LLM.

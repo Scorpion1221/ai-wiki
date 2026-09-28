@@ -115,7 +115,7 @@ class Gate:
                     "AIWIKI_CHANGESETS_COMMIT": "kb-a", "AIWIKI_CHANGESET_WAIT_S": "30", **env}
         self.monkeypatch.delenv("AIWIKI_BUNDLE", raising=False)
         self.monkeypatch.delenv("AIWIKI_DEFAULT_BUNDLE", raising=False)
-        for name in ("AIWIKI_AUDIT", "AIWIKI_INTAKE", "AIWIKI_RESTRUCTURE", "AIWIKI_CODEX_AUDIT_MANUAL",
+        for name in ("AIWIKI_AUDIT", "AIWIKI_INTAKE", "AIWIKI_RESTRUCTURE", "AIWIKI_CODEX_AUDIT_MANUAL", "AIWIKI_LLM",
                      "AIWIKI_CHANGESETS_PER_HOUR", "AIWIKI_CHANGESETS_PER_DAY", "AIWIKI_DEPRECATIONS_PER_DAY",
                      "AIWIKI_REVIEWS_PER_DAY", "AIWIKI_BACKLOG_EPOCH", "AIWIKI_AUDIT_SEED_PER_DAY"):
             self.monkeypatch.delenv(name, raising=False)
