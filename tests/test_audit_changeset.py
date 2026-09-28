@@ -485,14 +485,14 @@ def test_a_note_is_never_evidence(gate) -> None:
 @pytest.mark.parametrize("source", ["unrecorded", "drifted"])
 def test_only_sources_the_ledger_froze_are_evidence(gate, source) -> None:
     """A file a push added, or a cited source a push rewrote, is not in sources/.hashes.yaml as
-    it stands: it is no frozen evidence, so it cannot carry a verification."""
+    it stands: it is no frozen evidence, so it cannot carry a verification. A push that only
+    rewrites the evidence puts the concepts citing it under review too."""
     cited = parse_document(gate.read(METRIC)).frontmatter["sources"][0]["resource"].lstrip("/")
-    text = gate.read(METRIC).replace("# Summary", "# Summary\n\nA hand note.", 1)
-    if source == "unrecorded":
-        text = text.replace(f"resource: /{cited}", "resource: /sources/fake-note.md")
-        cited = "sources/fake-note.md"
     other = clone(gate.remote, gate.tmp / "other-evidence")
-    (other / METRIC).write_text(text, encoding="utf-8")
+    if source == "unrecorded":
+        text = gate.read(METRIC).replace(f"resource: /{cited}", "resource: /sources/fake-note.md")
+        cited = "sources/fake-note.md"
+        (other / METRIC).write_text(text, encoding="utf-8")
     (other / cited).write_text("The funnel moved. (agent-written note)\n", encoding="utf-8")
     git(other, "add", "-A")
     git(other, "commit", "-qm", "hand edit")
@@ -505,6 +505,9 @@ def test_only_sources_the_ledger_froze_are_evidence(gate, source) -> None:
     job = submit(gate, review(gate, METRIC)).json()
 
     assert (job["reviews"][0]["outcome"], job["reviews"][0]["downgrade"]) == ("unverified", "D_NO_EVIDENCE"), job
+    metadata = gate.client.get("/cat", params={"bundle": "kb-a", "path": METRIC},
+                               headers=gate.headers("auditor")).json()["metadata"]
+    assert metadata["verification_current"] is False
 
 
 # --- replay of the real Codex audits 71ea85ca9c20 / e94c8b707aea -------------------------------------

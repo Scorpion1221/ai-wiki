@@ -1000,15 +1000,20 @@ def _frozen(tree: Path) -> Callable[[str], bool]:
     return frozen
 
 
-def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping) -> list[str]:
-    """The cited sources that are frozen files of the bundle: the only evidence an audit weighs."""
+def _cited(rel: str, frontmatter: Mapping) -> set[str]:
+    """The ``sources/`` files a concept cites."""
     found = set()
     for source in frontmatter.get("sources") if isinstance(frontmatter.get("sources"), list) else []:
         resource = source.get("resource") if isinstance(source, dict) else None
         target = _source_resource_rel(resource.strip(), rel) if isinstance(resource, str) else None
-        if target and target.startswith("sources/") and frozen(target):
+        if target and target.startswith("sources/"):
             found.add(target)
-    return sorted(found)
+    return found
+
+
+def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping) -> list[str]:
+    """The cited sources that are frozen files of the bundle: the only evidence an audit weighs."""
+    return sorted(target for target in _cited(rel, frontmatter) if frozen(target))
 
 
 def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str]]:
@@ -1069,7 +1074,7 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     """The audit backlog (design §5.3): derived, never stored, so it can be rebuilt at any time.
 
     A concept is due when it is not deprecated, no done audit changeset reviewed its current
-    content, and either a commit the service did not write changed it since
+    content, and either a commit the service did not write changed it or a source it cites since
     ``AIWIKI_BACKLOG_EPOCH`` (``external``, whoever generated it), or an auditor did not
     generate it and it has an unverified generation since the epoch (``generation``) or is
     among the oldest unverified concepts from before the epoch, released
@@ -1100,8 +1105,9 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
                  "generated": {"by": by or None, "at": at or None}, "verification_current": current,
                  "sources": _local_sources(frozen, rel, frontmatter)}
         generated_at = _instant(at)
-        if rel in external:
-            fresh.append({**entry, "reason": "external", "since": external[rel]})
+        pushed = [external[path] for path in {rel, *_cited(rel, frontmatter)} if path in external]
+        if pushed:  # the concept, or evidence it cites, changed past the service
+            fresh.append({**entry, "reason": "external", "since": max(pushed, key=_instant)})
         elif current or by in auditors:
             continue
         elif epoch is None or (generated_at is not None and generated_at >= epoch):
