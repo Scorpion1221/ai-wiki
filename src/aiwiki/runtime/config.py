@@ -1,4 +1,8 @@
-"""Optional, local writer-agent settings; credentials remain owned by Codex/wrappers."""
+"""Optional, local writer-agent settings; credentials remain owned by Codex/wrappers.
+
+AIWIKI_LLM=off is the final state (design §9 phase 5): the writer is only the deterministic
+gate, it never starts an agent process, and it never reads ``config.agent`` or AIWIKI_AGENT_*.
+"""
 from __future__ import annotations
 
 import json
@@ -10,6 +14,16 @@ DEFAULT_AGENT = {"bin": "codex", "model": "gpt-5.6-sol", "reasoning_effort": "hi
 # bounded curation repair pass. Observed xhigh ingest p90 was ~675s against a fixed 900s.
 DEFAULT_TIMEOUTS = {"timeout_s": 1500, "audit_timeout_s": 1200, "repair_timeout_s": 600}
 TIMEOUT_RANGE = (60, 7200)
+LLM_MODES = ("codex", "off")
+
+
+def llm_mode() -> str:
+    """AIWIKI_LLM: ``codex`` (the default) keeps the writer's legacy Codex curation and audit;
+    ``off`` means the server never starts an agent process. Anything else fails closed."""
+    value = os.environ.get("AIWIKI_LLM", "").strip() or LLM_MODES[0]
+    if value not in LLM_MODES:
+        raise ValueError(f"AIWIKI_LLM must be one of {', '.join(LLM_MODES)}; got {value!r}")
+    return value
 
 
 def _agent_section() -> dict:
@@ -37,13 +51,16 @@ def _agent_section() -> dict:
     return agent
 
 
-def load_agent_config() -> dict[str, str]:
-    """Resolve env > config.agent > defaults once when the worker starts.
+def load_agent_config() -> dict[str, str] | None:
+    """Resolve env > config.agent > defaults once when the worker starts; None under
+    AIWIKI_LLM=off, which reads neither.
 
     A missing default config preserves env-only deployments. An explicitly selected
     missing/invalid config fails closed rather than silently selecting another account.
     Never include configuration contents (which may contain tokens) in errors.
     """
+    if llm_mode() == "off":
+        return None
     agent = _agent_section()
     resolved = {}
     for key, default in DEFAULT_AGENT.items():
@@ -61,8 +78,11 @@ def load_agent_timeouts() -> dict[str, int]:
     """Resolve env > config.agent > defaults for the agent wall-clock budgets.
 
     Each value must be an integer number of seconds in ``TIMEOUT_RANGE``; anything else
-    fails closed instead of silently running with an unintended budget.
+    fails closed instead of silently running with an unintended budget. Under AIWIKI_LLM=off
+    no agent runs, so neither is read and the defaults stand.
     """
+    if llm_mode() == "off":
+        return dict(DEFAULT_TIMEOUTS)
     agent = _agent_section()
     low, high = TIMEOUT_RANGE
     resolved = {}

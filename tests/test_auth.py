@@ -198,7 +198,7 @@ def test_sighup_handler_needs_a_principals_file() -> None:
 # --- through the service ---------------------------------------------------------------
 
 MODE_ENV = ("AIWIKI_INTAKE", "AIWIKI_AUDIT", "AIWIKI_CHANGESETS_COMMIT", "AIWIKI_RESTRUCTURE",
-            "AIWIKI_CODEX_AUDIT_MANUAL")
+            "AIWIKI_CODEX_AUDIT_MANUAL", "AIWIKI_LLM")
 # (method, path, query, body, scopes of which any one passes; None = any valid token).
 # Bodies/ids are chosen so an authorized call stops at a harmless 4xx/200 without side effects.
 ROUTES = [
@@ -381,7 +381,7 @@ def test_whoami_reports_identity_contract_and_modes(monkeypatch, root: Path, pri
     assert set(body["service"]) == {"version", "build"}
     # Dark launch: unset switches report today's behaviour.
     assert body["modes"] == {"intake": "curate", "audit": "codex", "changesets_commit": [], "restructure": "off",
-                             "codex_audit_manual": []}
+                             "codex_audit_manual": [], "llm": "codex"}
 
     roles = {name: client.get("/whoami", headers=_bearer(TOKENS[name])).json() for name in SPECS}
     assert {name: who["role"] for name, who in roles.items()} == {

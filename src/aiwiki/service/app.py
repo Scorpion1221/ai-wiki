@@ -11,6 +11,8 @@ Config via env (read at import):
   AIWIKI_TOKEN           legacy shared bearer token with every scope, used when no principals file
   AIWIKI_DISABLE         comma-list of endpoints to 403 (ingest, audit, search, grep, create, delete,
                          maint, admin, changesets, workspace)
+  AIWIKI_LLM             ``codex`` (default) or ``off``: off, the writer never starts an agent process
+                         and ignores config.agent; the legacy Codex routes answer 409 (runtime/config.py)
   AIWIKI_INTAKE, AIWIKI_AUDIT, AIWIKI_CHANGESETS_COMMIT, AIWIKI_RESTRUCTURE, AIWIKI_CODEX_AUDIT_MANUAL
                          rollout switches reported by /whoami; unset keeps today's behaviour. Only
                          bundles listed in AIWIKI_CHANGESETS_COMMIT commit changesets (none while
@@ -54,6 +56,7 @@ from aiwiki.version import VERSION, build, service_identity
 from ..runtime import audit as audit_runtime
 from ..runtime import changeset, secrets
 from ..runtime import curate as curate_runtime
+from ..runtime.config import LLM_MODES
 from ..runtime.failure import failure
 from . import auth, worker
 from . import bundle as B
@@ -108,6 +111,7 @@ MODES = {
     "changesets_commit": [] if "changesets" in DISABLED else _bundles("AIWIKI_CHANGESETS_COMMIT"),
     "restructure": _mode("AIWIKI_RESTRUCTURE", ("off",)),
     "codex_audit_manual": _bundles("AIWIKI_CODEX_AUDIT_MANUAL"),
+    "llm": _mode("AIWIKI_LLM", LLM_MODES),  # off: no agent process, ever (the final state)
 }
 API = {"changesets": 1}
 CLIENT_MIN = "0.3.0"
@@ -417,6 +421,9 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
     """
     principal = _auth(authorization, "submit")
     _enabled("ingest")
+    if MODES["intake"] == "curate" and CURATE_ON and not curate_runtime.agents_enabled():
+        raise HTTPException(status_code=409, detail="this writer runs no LLM (AIWIKI_LLM=off), so it curates no "
+                                                    "submission; it takes them with AIWIKI_INTAKE=inbox")
     if body.content_b64 is not None:
         try:
             data = base64.b64decode(body.content_b64, validate=True)
@@ -486,6 +493,8 @@ def audit(ingest_job_id: str, bundle: str | None = None,
     _enabled("audit")
     if MODES["audit"] == "external":
         raise HTTPException(status_code=409, detail="audit is external")
+    if not curate_runtime.agents_enabled():
+        raise HTTPException(status_code=409, detail="this writer runs no LLM (AIWIKI_LLM=off): no server audit")
     if not CURATE_ON:
         raise HTTPException(status_code=403, detail="audit requires AIWIKI_CURATE to be enabled")
     with worker.serialized_lifecycle():

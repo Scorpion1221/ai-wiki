@@ -365,8 +365,10 @@ def _audits(bundle: str) -> dict:
     from aiwiki.runtime.failure import classify
 
     who = _call("GET", "/whoami", bundle=bundle)[1]
-    if (who.get("modes") or {}).get("audit") != "codex":
-        return {"mode": (who.get("modes") or {}).get("audit"), "resubmitted": [], "needs_human": []}
+    modes = who.get("modes") or {}
+    mode = "llm_off" if modes.get("llm") == "off" else modes.get("audit")  # a writer without Codex audits nothing
+    if mode != "codex":
+        return {"mode": mode, "resubmitted": [], "needs_human": []}
     build = (who.get("service") or {}).get("build")
     pending = _call("GET", "/jobs/pending-audit", bundle=bundle, params={"older_than_hours": 1, "limit": 100})[1]
     resubmitted, needs_human, refused = [], [], []
