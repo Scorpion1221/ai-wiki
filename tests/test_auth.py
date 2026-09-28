@@ -239,6 +239,7 @@ ROUTES = [
     ("GET", "/maint/status", {"bundle": "kb-a"}, None, {"read"}),
     ("POST", "/admin/items/it_000000000000/retry", {"bundle": "kb-a"}, {}, {"admin"}),
     ("POST", "/admin/items/it_000000000000/resolve", {"bundle": "kb-a"}, {}, {"admin"}),
+    ("POST", "/admin/inbox/requeue", {"bundle": "kb-a"}, {}, {"admin"}),
 ]
 
 

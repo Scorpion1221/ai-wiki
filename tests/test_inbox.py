@@ -1,7 +1,7 @@
 """Inbox intake (design §6, §10.1): with AIWIKI_INTAKE=inbox a member's upload, pasted text or
 link and an out-of-band inbox drop become maintainer work items, never Codex curation. The job
-follows its item to the changeset that curated it and the writer never fetches a URL.
-AIWIKI_INTAKE=curate is today's path.
+follows its item to the changeset that curated it, the writer never fetches a URL, and
+POST /admin/inbox/requeue hands waiting items back to Codex. AIWIKI_INTAKE=curate is today's path.
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import socket
+import sys
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,7 @@ def gate(tmp_path, monkeypatch):
     gate = Gate(tmp_path, monkeypatch, AIWIKI_INTAKE="inbox")
     gate.curated = []  # sources the Codex path was handed; no agent ever runs
     monkeypatch.setattr(worker.curate, "run", lambda _bundle, source, _job_path: gate.curated.append(source))
+    monkeypatch.setattr(worker.curate, "AGENT_BIN", sys.executable)  # Codex still exists on this writer
 
     def send(request):  # the CLI's JSON calls (ingest, jobs, whoami); gate.connect() routes the rest
         url = urllib.parse.urlsplit(request.full_url)
@@ -192,10 +194,63 @@ def test_the_sweep_registers_inbox_drops_as_member_items(gate) -> None:
     assert gate.curated == []
 
 
+def test_requeue_hands_waiting_member_items_back_to_codex(gate, tmp_path, monkeypatch, capsys) -> None:
+    ids = [ingest(gate, text=f"# Note {n}\n\nfact {n}\n").json()["id"] for n in range(4)]
+    items = {I.read_job(bundle(gate), job_id)["item"]: job_id for job_id in ids}
+    parked = claim(gate)["id"]
+    parking = gate.client.post(f"/maint/items/{parked}/resolve", params={"bundle": "kb-a"},
+                               headers=gate.headers(run="WAIO-1"),
+                               json={"outcome": "parked", "class": "model_output", "reason": "yaml twice"})
+    assert parking.status_code == 200, parking.text
+    held = gate.client.post("/maint/items/next", params={"bundle": "kb-a"},
+                            headers=gate.headers(run="WAIO-1")).json()["item"]["id"]
+    ready = sorted(set(items) - {parked, held})
+    gone = ready.pop()  # its verbatim source was lost: it stays in the queue
+    (bundle(gate) / I.read_job(bundle(gate), items[gone])["source"]).unlink()
+    route = {"params": {"bundle": "kb-a"}, "json": {"reason": "intake rolled back"}}
+    assert gate.client.post("/admin/inbox/requeue", headers=gate.headers("curator"), **route).status_code == 403
+    monkeypatch.setattr(worker.curate, "AGENT_BIN", str(tmp_path / "no-codex"))
+    gone_codex = gate.client.post("/admin/inbox/requeue", headers=gate.headers("owner"), **route)
+    assert gone_codex.status_code == 409 and "Codex path is gone" in gone_codex.json()["detail"]
+    monkeypatch.setattr(worker.curate, "AGENT_BIN", sys.executable)
+
+    gate.connect("owner")
+    capsys.readouterr()
+    code = cli.main(["admin", "inbox", "requeue", "--reason", "intake rolled back", "--json"])
+    result = json.loads(capsys.readouterr().out)
+
+    assert code == 1 and result["held"] == [held] and [row["item"] for row in result["unavailable"]] == [gone]
+    assert sorted(row["item"] for row in result["requeued"]) == sorted([parked, *ready])
+    worker._q.join()
+    for item_id in (parked, *ready):
+        item = M.get_item(bundle(gate), item_id)
+        assert item["status"] == "requeued" and item["resolution"]["reason"] == "intake rolled back"
+        followed = job(gate, items[item_id])  # an ordinary Codex ingest from now on
+        assert followed["status"] == "queued" and followed["requeued"]["item"] == item_id
+        assert followed["source"] in gate.curated and "mode" not in followed
+    assert M.get_item(bundle(gate), held)["status"] == "in_progress"
+    assert M.get_item(bundle(gate), gone)["status"] == "ready"
+    # Nothing is handed over twice; a requeue that stopped before its job was queued finishes.
+    late = ingest(gate, text="# Late\n\nlate fact\n").json()
+    M.requeue(bundle(gate), [late["item"]], principal="human:owner", reason=None)
+    # .okf is writable by the in-place Codex audit: an item naming a job outside .okf/jobs stays.
+    forged = ingest(gate, text="# Forged\n\nforged fact\n").json()["item"]
+    record = bundle(gate) / ".okf" / "maint" / "items" / forged / "item.json"
+    value = json.loads(record.read_text(encoding="utf-8"))
+    value["origin"]["job"] = "../../../x"
+    record.write_text(json.dumps(value), encoding="utf-8")
+    again = gate.client.post("/admin/inbox/requeue", headers=gate.headers("owner"), **route).json()
+    assert [row["item"] for row in again["requeued"]] == [late["item"]]
+    assert {row["item"] for row in again["unavailable"]} == {gone, forged}
+    worker._q.join()
+    assert len(gate.curated) == 3 and job(gate, late["id"])["status"] == "queued"
+
+
 def test_curate_intake_is_todays_codex_path(tmp_path, monkeypatch) -> None:
     gate = Gate(tmp_path, monkeypatch)
     curated = []
     monkeypatch.setattr(worker.curate, "run", lambda _bundle, source, _job_path: curated.append(source))
+    monkeypatch.setattr(worker.curate, "AGENT_BIN", sys.executable)
     try:
         receipt = ingest(gate, text="# Note\n\nfact\n", title="note").json()
         assert receipt["status"] == "queued" and receipt["curation"] == "queued" and "item" not in receipt
@@ -206,6 +261,9 @@ def test_curate_intake_is_todays_codex_path(tmp_path, monkeypatch) -> None:
         worker._q.join()
         assert curated == [receipt["source"], "sources/inbox/drop.md.source"]
         assert M.list_items(bundle(gate))["total"] == 0
+        assert gate.client.post("/admin/inbox/requeue", params={"bundle": "kb-a"},
+                                headers=gate.headers("owner")).json() == {"requeued": [], "held": [],
+                                                                         "unavailable": []}
     finally:
         gate.close()
 

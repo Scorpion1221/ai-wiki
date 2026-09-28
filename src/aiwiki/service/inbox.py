@@ -9,7 +9,8 @@ item and answers ``GET /jobs/<id>`` from it, so the member follows one id to the
 and commit that curated it.
 
 The writer never fetches a URL: a link submitted without its content is recorded as a
-needs_access item, and a format nothing reads (a PDF) as needs_conversion.
+needs_access item, and a format nothing reads (a PDF) as needs_conversion. ``requeue`` hands
+ready and parked member items back to Codex curation, the rollback while Codex exists.
 
 Deterministic and stdlib only: nothing here runs an LLM or opens a connection.
 """
@@ -32,6 +33,8 @@ NEEDS_ACCESS = ("the writer never fetches URLs, so nothing was read from this li
                 "access (with lark-cli installed, `ai-wiki ingest <url>` reads a Feishu/Lark doc on your "
                 "machine) or export it and ingest the file")
 NEEDS_CONVERSION = "the writer reads no such format: convert it to text or Markdown and ingest that"
+_REQUEUE = ("ready", "parked", "requeued")
+_JOB_ID = re.compile(r"[0-9a-f]{12}")
 
 
 def receive(bundle: Path, data: bytes | None, *, filename: str | None, title: str | None, url: str | None,
@@ -114,3 +117,58 @@ def _state(bundle: Path, item_id: object, depth: int = 0) -> dict:
         state["children"] = [_state(bundle, child, depth + 1) for child in resolution.get("children") or []]
     return state
 
+
+def requeue(bundle: Path, *, principal: str, reason: str | None,
+            only: list[str] | None = None) -> tuple[dict, list[tuple[str, Path]]]:
+    """Hand ready and parked member items back to the Codex path (the inbox rollback).
+
+    Each becomes requeued and its job an ordinary queued Codex ingest of its verbatim inbox
+    source; the caller submits the returned ``(source, job path)`` pairs to the worker. An
+    item a run holds stays with that run; one whose source is gone stays in the queue.
+    """
+    rows = [item for item in M.list_items(bundle, origin=M.MEMBER, limit=10 ** 9)["items"]
+            if only is None or item["id"] in only]
+    held = [item["id"] for item in rows if item["status"] == "in_progress"]
+    unavailable, ready = [], []
+    for item in rows:
+        if item["status"] not in _REQUEUE:
+            continue
+        job = _job(bundle, item)
+        if item["status"] == "requeued" and (job or {}).get("mode") != "inbox":
+            continue  # its job already went to Codex
+        rel, intact = (job or {}).get("source"), False
+        # .okf is written in place by the Codex audit: a job read back must name an inbox file.
+        if isinstance(rel, str) and rel.startswith("sources/inbox/") and ".." not in rel.split("/"):
+            with contextlib.suppress(OSError):
+                source = bundle / rel
+                digest = None if source.is_symlink() else hashlib.sha256(source.read_bytes()).hexdigest()
+                intact = digest is not None and digest == job.get("sha256")
+        if intact:
+            ready.append(item["id"])
+        else:
+            unavailable.append({"item": item["id"], "error": "its verbatim source is missing from sources/inbox"})
+    queued, requeued = [], []
+    for item in M.requeue(bundle, ready, principal=principal, reason=reason):
+        job = _job(bundle, item)
+        if (job or {}).get("mode") != "inbox":
+            continue
+        path = I.job_path(bundle, job["id"])
+        job.pop("mode")
+        job.update(status="queued", curation="queued",
+                   requeued={"item": item["id"], "by": principal, "at": I._now()})
+        I._write_atomic(path, job)
+        queued.append((job["source"], path))
+        requeued.append({"item": item["id"], "job": job["id"]})
+    return {"requeued": requeued, "held": held, "unavailable": unavailable}, queued
+
+
+def _job(bundle: Path, item: dict) -> dict | None:
+    """The job an item names, when it is a well-formed job of that id."""
+    job_id = item["origin"].get("job")
+    if not (isinstance(job_id, str) and _JOB_ID.fullmatch(job_id)):
+        return None
+    try:
+        job = I.read_job(bundle, job_id)
+    except (OSError, ValueError):
+        return None
+    return job if isinstance(job, dict) and job.get("id") == job_id else None

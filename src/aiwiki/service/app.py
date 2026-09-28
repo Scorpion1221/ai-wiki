@@ -1072,6 +1072,35 @@ def admin_item_resolve(item_id: str, body: dict, bundle: str | None = None,
         return M.admin_resolve(path, item_id, body, principal=principal)
 
 
+@app.post("/admin/inbox/requeue")
+def admin_inbox_requeue(body: dict | None = None, bundle: str | None = None,
+                        authorization: str | None = Header(default=None)):
+    """Hand ready and parked member items back to Codex curation: the rollback of
+    AIWIKI_INTAKE=inbox, valid only while the writer still has the Codex path (else 409).
+
+    Body ``{items?: [<item id>], reason?}``, every member item by default. Each becomes
+    ``requeued`` and its job a queued Codex ingest; an item a maintainer run holds stays with it.
+    """
+    with _maint(bundle, authorization, "admin", area="admin", write=True) as (path, admin):
+        if shutil.which(curate_runtime.AGENT_BIN) is None:
+            raise HTTPException(status_code=409, detail="the Codex path is gone from this writer "
+                                                        f"({curate_runtime.AGENT_BIN} not found): member items "
+                                                        "stay with the maintainer")
+        items, reason = (body or {}).get("items"), (body or {}).get("reason")
+        if items is not None and not (isinstance(items, list) and len(items) <= 1000
+                                      and all(isinstance(item, str) for item in items)):
+            raise HTTPException(status_code=400, detail="items must be a list of work item ids")
+        if reason is not None and not (isinstance(reason, str) and len(reason) <= 500 and not secrets.scan(reason)):
+            raise HTTPException(status_code=400, detail="reason must be a string of at most 500 characters, "
+                                                        "without secrets")
+        result, queued = inbox.requeue(path, principal=admin, reason=reason, only=items)
+        if queued:
+            worker.ensure_started()
+        for source, job_path in queued:
+            worker.submit(path, source, job_path)
+    return result
+
+
 # --- incident response: what a principal changed, and reverting it (design §8.5) --------------
 
 _ROW = ("id", "status", "principal", "actor", "run", "created", "finished", "commit", "noop", "work_items",

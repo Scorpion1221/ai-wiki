@@ -4,6 +4,7 @@
     revert          revert changesets on the writer, newest first, stopping at the first conflict
     compare         side-by-side diff of what a live and a shadow bundle changed since a base
     cursor import   restore collector cursors from a maintenance report after writer disk loss
+    inbox requeue   hand waiting member items back to Codex curation (the AIWIKI_INTAKE=inbox rollback)
 
 Only the owner runs these. They talk HTTP to the writer and never touch Git.
 """
@@ -34,13 +35,15 @@ REJECTED, CONFLICT = 6, 7
 def add_parser(sub, common: dict) -> None:
     """Register ``ai-wiki admin`` and its verbs on the root parser's subcommands."""
     admin = sub.add_parser(
-        "admin", help="owner verbs: changesets, revert, compare, cursor import", command_path="ai-wiki admin",
+        "admin", help="owner verbs: changesets, revert, compare, cursor import, inbox requeue",
+        command_path="ai-wiki admin",
         epilog=cli._examples(
             "ai-wiki admin changesets --principal process:ai-wiki-maintainer --since 2026-10-16T00:00:00Z",
             "ai-wiki admin revert --principal process:ai-wiki-maintainer --since 2026-10-16T00:00:00Z",
             "ai-wiki admin compare --live solvely-wiki --shadow solvely-wiki-shadow --since <R0>",
             "ai-wiki admin compare --live solvely-wiki --shadow solvely-wiki-shadow --since <R0> --blind key.json",
             "ai-wiki admin cursor import report.json",
+            "ai-wiki admin inbox requeue --reason 'intake rolled back'",
         ), **common)
     verbs = admin.add_subparsers(dest="action", required=True)
     listing = verbs.add_parser(
@@ -92,6 +95,16 @@ def add_parser(sub, common: dict) -> None:
     importing.add_argument("--replace", action="store_true", help="also overwrite cursors the writer already has")
     importing.add_argument("--run", default="admin:cursor-import", help="run recorded on each cursor")
     importing.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    inbox = verbs.add_parser("inbox", help="member work items", command_path="ai-wiki admin inbox",
+                             epilog=cli._examples("ai-wiki admin inbox requeue"), **common)
+    requeue_ = inbox.add_subparsers(dest="inbox_action", required=True).add_parser(
+        "requeue", help="hand ready and parked member items back to Codex curation (the inbox rollback)",
+        command_path="ai-wiki admin inbox requeue",
+        epilog=cli._examples("ai-wiki admin inbox requeue --reason 'intake rolled back'",
+                             "ai-wiki admin inbox requeue --item it_0123456789ab"), **common)
+    requeue_.add_argument("--item", action="append", help="only this item (repeatable; default: every one)")
+    requeue_.add_argument("--reason", help="why, kept on each item")
+    requeue_.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
 
 
 def command(a: argparse.Namespace, bundle: str | None) -> int:
@@ -107,6 +120,8 @@ def command(a: argparse.Namespace, bundle: str | None) -> int:
         if a.seed is not None and a.blind is None:
             cli._fail("--seed goes with --blind", help_command="ai-wiki admin compare --help", code=2)
         return compare(live=a.live, shadow=a.shadow, since=a.since, width=a.width, blind=a.blind, seed=a.seed)
+    if a.action == "inbox":
+        return inbox_requeue(bundle, items=a.item, reason=a.reason, as_json=a.json)
     return cursor_import(bundle, a.report, replace=a.replace, run=a.run, as_json=a.json)
 
 
@@ -432,6 +447,20 @@ def _cursors(report: Path) -> dict[str, dict]:
     if not values:
         cli._fail(f"{report} holds no cursors", code=2)
     return values
+
+
+def inbox_requeue(bundle: str | None, *, items: list[str] | None, reason: str | None, as_json: bool) -> int:
+    """POST /admin/inbox/requeue; exit 1 when an item stayed (held by a run, or its source gone)."""
+    body = {key: value for key, value in (("items", items), ("reason", reason)) if value is not None}
+    status, _headers, raw = request("POST", "/admin/inbox/requeue", bundle=bundle, body=body)
+    result = _json(status, raw)
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        emit(table_lines("requeued", result.get("requeued") or [], ("item", "job")),
+             table_lines("held", ({"item": item} for item in result.get("held") or []), ("item",)),
+             table_lines("unavailable", result.get("unavailable") or [], ("item", "error")))
+    return 1 if result.get("held") or result.get("unavailable") else 0
 
 
 def cursor_import(bundle: str | None, report: Path, *, replace: bool, run: str, as_json: bool) -> int:

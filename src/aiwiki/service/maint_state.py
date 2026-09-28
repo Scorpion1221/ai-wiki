@@ -12,7 +12,8 @@ Items move ready -> in_progress(run) -> curated | skipped | duplicate | split |
 needs_access | needs_conversion | needs_human, or -> parked, which returns to ready when the
 next maintainer run takes the lease. Attempt caps and non-retryable failures move an item to
 needs_human; that only raises an alert and never blocks any other item. A member submission
-(``origin.kind`` member, see ``service.inbox``) is queued without a lease.
+(``origin.kind`` member, see ``service.inbox``) is queued without a lease, and a ready or
+parked one leaves the queue as requeued when an admin hands it back to the Codex path.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -51,7 +52,7 @@ MAX_STARTED = 8
 AGING_PER_DAY = 5
 DEFAULT_PRIORITY = 40
 TERMINAL = frozenset({"curated", "skipped", "duplicate", "split", "needs_access", "needs_conversion",
-                      "needs_human"})
+                      "needs_human", "requeued"})
 SKIP_REASONS = frozenset({"no_durable_knowledge", "insufficient_evidence", "out_of_scope"})
 AGENT_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conversion", "parked", "split"})
 MERGEABLE = frozenset({"ready", "parked"})  # not yet claimed again: newer evidence folds in
@@ -523,6 +524,25 @@ def intake(bundle: Path, planned: dict, *, principal: str, outcome: str | None =
             _close(item, outcome, reason, by="service", run=None, now=now)
             _save(bundle, item, now)
         return item
+
+
+def requeue(bundle: Path, item_ids: list[str], *, principal: str, reason: str | None) -> list[dict]:
+    """Close the ready or parked member items among ``item_ids`` as requeued: the Codex path
+    curates them instead (the inbox rollback). One already requeued comes back too, so a retry
+    finishes a requeue that stopped before its job was queued."""
+    requeued = []
+    with _LOCK:
+        now = _now()
+        for item_id in item_ids:
+            item = _read_item(bundle, item_id)
+            if item is None or item["origin"].get("kind") != MEMBER:
+                continue
+            if item["status"] in ("ready", "parked"):
+                _close(item, "requeued", reason, by=principal, run=None, now=now, job=item["origin"].get("job"))
+                _save(bundle, item, now)
+            if item["status"] == "requeued":
+                requeued.append(item)
+    return requeued
 
 
 def _effective_priority(item: dict, now: datetime) -> int:
