@@ -65,9 +65,9 @@ ai-wiki -b "$bundle" review next --json
 ```
 
 Exit `0`: `path`, `base` (the content hash your verdict judges), `reason` (`generation`: new
-content; `external`: a push past the service changed it; `seed`: an older unaudited concept),
-`concept` (the file in `$WS`) and `evidence` (its frozen sources in `$WS`). Exit `10` (backlog
-empty) or `11` (budget spent): go to §3.5, then §4.
+content; `external`: a push past the service changed it or a source it cites; `seed`: an
+older unaudited concept), `concept` (the file in `$WS`) and `evidence` (its frozen sources in
+`$WS`). Exit `10` (backlog empty) or `11` (budget spent): go to §3.5, then §4.
 
 ### 3.2 Check the evidence
 
@@ -102,9 +102,10 @@ Hold each to the evidence boundary:
   link (`contradictions` included) that the concept or its cited evidence does not already
   hold, grow the body or a text key by more than 20%, add a key or list item, raise
   `confidence` or touch `contested`/`contradictions`: the writer downgrades any such
-  correction to unverified (`D_NOVEL_TOKEN`, `D_NEW_LINK`, `D_GROWTH`) and keeps the old text. `type`, `title`, `sources`,
-  `stale_after`, `generated`, `verified` and `status` are restored whatever you write; a
-  correction of only those ends unverified (`D_RESTORED`), so say in the note what is wrong.
+  correction to unverified (`D_NOVEL_TOKEN`, `D_NEW_LINK`, `D_GROWTH`) and keeps the old
+  text. `type`, `title`, `sources`, `stale_after`, `generated`, `verified` and `status` are
+  restored whatever you write; a correction of only those ends unverified (`D_RESTORED`), so
+  say in the note what is wrong.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is
   unreliable, or the concept cites no frozen source (`D_NO_EVIDENCE`: a note is never
   evidence). An earlier verification of the version then stops being current. The
