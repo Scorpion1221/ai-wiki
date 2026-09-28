@@ -638,6 +638,23 @@ def test_maint_status_counts_the_backlog_in_external_mode(gate) -> None:
     assert (status["audit"]["pending"], status["audit"]["oldest_finished"]) == (1, entry["since"])
 
 
+def test_disabling_audit_stops_audit_changesets_too(gate) -> None:
+    """AIWIKI_DISABLE=audit is the incident switch for a misbehaving auditor: a raw POST of a
+    review is refused like the backlog, while curate changesets go on."""
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=EPOCH, AIWIKI_DISABLE="audit")
+    lease(gate)
+    head = gate.head()
+
+    assert gate.client.get("/audit/backlog", params={"bundle": "kb-a"}, headers=gate.headers("auditor")).status_code \
+        == 403
+    for dry_run in (True, False):
+        refused = submit(gate, review(gate, AIO_AB), dry_run=dry_run)
+        assert refused.status_code == 403 and "'audit' is disabled" in refused.json()["detail"], dry_run
+    gate.assert_untouched(head)
+    assert gate.jobs() == []
+    assert gate.post(gate.request(), token="owner").status_code == 201
+
+
 def test_the_read_mirror_never_serves_the_backlog(gate) -> None:
     gate.app(AIWIKI_CURATE="off")
     response = gate.client.get("/audit/backlog", params={"bundle": "kb-a"}, headers=gate.headers("auditor"))

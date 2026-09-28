@@ -278,7 +278,7 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_TOKEN` | legacy shared bearer token with every scope; with `AIWIKI_PRINCIPALS` it is honoured only through the principal holding its sha256 (`provision_principals.py add-legacy`) |
 | `AIWIKI_PRINCIPALS` | principals file: per-principal token sha256, scopes, bundles, limits (`src/aiwiki/service/auth.py`); edit it with `scripts/provision_principals.py`, SIGHUP reloads it |
 | `AIWIKI_PORT` | service port (default 8787) |
-| `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`) |
+| `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`); `audit` also refuses audit changesets |
 | `AIWIKI_CURATE` | `auto` (default) makes a writer; `off` turns off curation, changesets, the workspace and `/maint` (a read mirror also sets `AIWIKI_DISABLE=ingest,audit,…`, else `POST /ingest` still stores submissions) |
 | `AIWIKI_LLM` | `codex` (default) or `off`: off, the writer never starts an agent process, ignores `config.agent` and `AIWIKI_AGENT_*`, and answers the legacy Codex routes with 409 |
 | `AIWIKI_INTAKE`, `AIWIKI_AUDIT`, `AIWIKI_CHANGESETS_COMMIT`, `AIWIKI_RESTRUCTURE`, `AIWIKI_CODEX_AUDIT_MANUAL` | rollout switches, reported by `GET /whoami` under `modes` (see "Final state" above and `src/aiwiki/service/app.py`) |

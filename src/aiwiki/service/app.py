@@ -10,7 +10,7 @@ Config via env (read at import):
   AIWIKI_PRINCIPALS      principals file (hashed tokens + scopes, see auth.py); SIGHUP reloads it
   AIWIKI_TOKEN           legacy shared bearer token with every scope, used when no principals file
   AIWIKI_DISABLE         comma-list of endpoints to 403 (ingest, audit, search, grep, create, delete,
-                         maint, admin, changesets, workspace)
+                         maint, admin, changesets, workspace); audit covers audit changesets too
   AIWIKI_LLM             ``codex`` (default) or ``off``: off, the writer never starts an agent process
                          and ignores config.agent; the legacy Codex routes answer 409 (runtime/config.py)
   AIWIKI_INTAKE, AIWIKI_AUDIT, AIWIKI_CHANGESETS_COMMIT, AIWIKI_RESTRUCTURE, AIWIKI_CODEX_AUDIT_MANUAL
@@ -924,6 +924,8 @@ def changesets(raw: bytes = Depends(_raw_body), bundle: str | None = None, dry_r
     principal = _auth(authorization, *_CHANGESET_SCOPES.get(kind if isinstance(kind, str) else "",
                                                             ("curate", "audit", "admin")))
     _enabled("changesets")
+    if kind == "audit":  # AIWIKI_DISABLE=audit stops reviews, not only the routes that list them
+        _enabled("audit")
     if not dry_run and not CURATE_ON:
         raise HTTPException(status_code=403, detail="committing a changeset requires the writer (AIWIKI_CURATE)")
     if principal.actor is None:
