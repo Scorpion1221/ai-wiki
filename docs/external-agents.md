@@ -18,18 +18,25 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier.
 
 ## 1. Rules the server enforces
 
-- **One maintainer at a time per bundle.** `maint begin` takes the bundle's maintainer lease
-  (3 h, renewed by every call of the run). Another run gets 409 naming the holder and exits
-  `4`; it never waits or retries. Two maintainer agents on one bundle therefore take turns;
-  give them schedules that do not overlap.
+- **One maintainer and one auditor at a time per bundle.** `maint begin` takes the bundle's
+  maintainer lease and the auditor's `review begin` its auditor lease (3 h, renewed by every
+  call of the run). Another run of the same role gets 409 naming the holder and exits `4`; it
+  never waits or retries. Two agents of one role on one bundle therefore take turns: give them
+  schedules that do not overlap.
 - **The auditor is never the generator.** A `process:` principal may not hold both `curate`
   and `audit` (the service refuses to start, and the provisioning script refuses to write
   such a file), nor `admin` or `human_verify`. The gate stamps `generated`, `verified` and
   `status`: a maintainer's changeset never verifies anything, whatever it writes.
 - **No self-audit.** An auditor may review only the backlog the server derives and never a
-  revision its own principal (or role) generated. Run the maintainer and the auditor under
-  different OS users or hosts: under one uid either could read the other's token from
-  `/proc/<pid>/environ`.
+  revision its own principal (or role) generated. The server knows principals, not agents: a
+  maintainer that reaches the auditor's token (or the reverse) audits its own work unnoticed.
+  So neither may reach the other's token, which leaks two ways:
+  - one OS user: either reads the other's token from `/proc/<pid>/environ`. Run them under
+    different OS users or hosts;
+  - the Multica login on a runtime host: every agent there runs `multica` as the daemon's
+    account, and `multica agent env get` returns an agent's custom env to that agent's owner
+    and to every workspace owner or admin. Check it from each host before an auditor goes
+    live (§3); the runbook's step 2 does, without printing a token.
 - **Evidence is never an agent's own text.** A process cites frozen work-item files; only a
   `human:` principal uploads a packet.
 - **Quotas.** Changesets per hour and per day and deprecations per day are metered per
@@ -57,10 +64,10 @@ docker kill -s HUP ai-wiki                                              # the re
   and removes the file (`shred -u`) once the agent holds it.
 - `--bundle`, `--limit NAME=N` and `--expires YYYY-MM-DD` narrow a preset. A member always
   needs `--id member:<name>`; members are never written into `generated` or `verified`.
-- One principal per role serves any number of model swaps (§4). A second agent of a role that
-  must run in parallel (auditors only; maintainers serialize on the lease anyway) gets its own
-  id with the role in its name, for example `pp add auditor --id process:ai-wiki-auditor-mini`,
-  so receipts tell the two apart.
+- One principal per role serves any number of model swaps (§6). A second agent of a role gets
+  its own id with the role in its name, for example `pp add auditor --id
+  process:ai-wiki-auditor-mini`, so receipts tell the two apart. It shares the role's lease
+  (§1), so it adds no parallelism: give it a schedule that does not overlap the first's.
 - Confirm the reload in an admin's `GET /whoami` (`auth.principals` lists the id, and
   `auth.reload_error` is null). A refused reload only logs and keeps the previous file.
 
@@ -90,6 +97,21 @@ injection), and point the CLI at the writer once, without a token:
 uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<deployed revision>" && hash -r
 ai-wiki config set --endpoint https://ai-wiki.yqbqnn.com/
 ```
+
+Two checks on the agent's host, as its OS user, before its first run:
+
+- **The other role's token is out of reach.** `multica agent env get <the other role's agent id>
+  >/dev/null 2>&1 && echo READABLE || echo refused` must print `refused` (the output is
+  discarded, so no token is printed). `READABLE` means this host's Multica account owns that
+  agent or is a workspace owner or admin. Then either run this runtime's daemon under a
+  Multica member account that is neither, or keep the token out of Multica: a mode-600
+  environment file of an OS user and host that run only this agent, loaded by whatever starts
+  it. Do not go live with `READABLE` unless the owner accepts that risk in writing.
+- **No other credential is saved.** The CLI falls back to the token in
+  `~/.ai-wiki/config.json` when `AIWIKI_TOKEN` is unset, and an agent can unset its own
+  environment. `env -u AIWIKI_TOKEN ai-wiki -b solvely-wiki doctor --role member --json` shows
+  whose it is (`config` failing means none is saved). Only a `member:` principal may stay there;
+  remove any other with `jq 'del(.token)'` on that file (mode 600).
 
 Then preflight on the agent's own host, with its own token in the environment:
 
@@ -131,17 +153,34 @@ writer's API is newer than the CLI, the bundle is not served, or a tool (`git`, 
 ## 6. Swap the model or the runtime
 
 Nothing else changes: the principal, the token, the skills and the prompts stay. Only one
-variable at a time, and canary it on the shadow bundle first:
+variable at a time, and canary it on the shadow bundle (`solvely-wiki-shadow`) first:
 
 ```bash
 multica agent update <agent-id> --model <model>              # a model of the same runtime
 multica agent update <agent-id> --runtime-id <runtime-id>    # another runtime or host
 ```
 
-- The canary: restore the shadow maintainer (`multica agent restore c10a1e06-8255-42ce-9b52-266aef42f2a6`),
-  set the candidate model or runtime on it, give it one issue with the shadow prompt and
-  `max_items=3`, and compare the receipts (gate first-pass rate, parks, `admin compare`).
-  Archive it again after.
+- The canary runs the production texts against the shadow bundle, not the Phase 2 shadow
+  prompt (that one predates the Auditor and the verbatim report). On the laptop, in the
+  release checkout, with `AUDITOR_AGENT` set:
+
+  ```bash
+  SHADOW_AGENT=c10a1e06-8255-42ce-9b52-266aef42f2a6
+  multica agent restore $SHADOW_AGENT
+  awk 'f;/^---$/{f=1}' docs/prompts/production-agent-instructions.md | sed 's/solvely-wiki/solvely-wiki-shadow/g' > canary-instructions.md
+  sed -e 's/solvely-wiki/solvely-wiki-shadow/g' -e 's/^max_items=6 /max_items=3 /' \
+      -e "s/<Auditor agent id>/$AUDITOR_AGENT/" docs/prompts/production-autopilot-prompt.md > canary-prompt.md
+  multica agent update $SHADOW_AGENT --instructions "$(cat canary-instructions.md)"   # plus the candidate --model or --runtime-id
+  multica issue create --title "[CANARY] AI Wiki shadow, <candidate>" --assignee-id $SHADOW_AGENT \
+    --description-file canary-prompt.md --output json | jq -r '.id // .issue.id'       # CANARY_ISSUE
+  multica issue metadata set <CANARY_ISSUE> --key ai_wiki_ops --value true
+  ```
+
+  The shadow keeps its own token (`process:ai-wiki-maintainer-shadow`, curator on the shadow
+  only); a new runtime passes `doctor` first (§3). Its cursors are as old as its last run, so
+  it collects that whole window, which does not matter for the comparison: the gate's
+  first-pass rate, parks and receipts (`admin compare`). Archive the agent again after
+  (`multica agent archive $SHADOW_AGENT`).
 - A new host must pass `doctor` for the role (§3) before its first scheduled run.
 - An auditor should stay on another model family than the maintainer's: independence comes
   from the model as well as from the principal.
