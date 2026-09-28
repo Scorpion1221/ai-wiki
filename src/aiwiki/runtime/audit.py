@@ -1124,8 +1124,9 @@ def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: dateti
     result has the curate gate's shape: ``status`` would_apply, noop or rejected; ``files`` the
     stamped bytes; ``reviews`` one record per review, which the backlog reads back; ``audit``
     the verdict summary of a Codex audit receipt. Scope, base and self-verification problems
-    reject the changeset (409 for a stale base); a correction that does more than narrow, an
-    unusable verdict, or a concept without frozen evidence only downgrades to unverified.
+    reject the changeset (409 for a stale base); a correction that does more than narrow or
+    changes only what A5 restores, an unusable verdict, or a concept without frozen evidence
+    only downgrades to unverified.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -1197,11 +1198,15 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
                                          for source in sources)])
             try:
                 downgrade = _narrowing(before, content, known)
-                bookkeeping.apply_bookkeeping(before, content, actor=actor, trusted_now=now, stage="review",
-                                              verdict="verified")
+                kept = bookkeeping.apply_bookkeeping(before, content, actor=actor, trusted_now=now, stage="review",
+                                                     verdict="verified")[0]
             except (bookkeeping.BookkeepingError, OKFDocumentError) as exc:
                 errors.append(changeset._yaml_error(rel, content, exc))
                 continue
+            if downgrade is None and bookkeeping.substantive_change(before, content, stage="changeset") \
+                    and not bookkeeping.substantive_change(before, kept, stage="review"):
+                # A5 restored all the correction changed: the concept stands as it was judged wrong.
+                downgrade = "D_RESTORED"
             if downgrade is None:
                 edited = content
             else:

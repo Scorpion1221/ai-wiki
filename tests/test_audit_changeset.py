@@ -356,6 +356,27 @@ def test_a6_a_correction_that_adds_is_downgraded_not_failed(gate, edit, code) ->
     assert due(gate) == []  # reviewed at this content: the maintainer brings new evidence first
 
 
+@pytest.mark.parametrize("edit", [
+    lambda text: text.replace("title: Redacted title\n", "title: Redacted\n", 1),
+    lambda text: re.sub(r"resource: /sources/\S+", "resource: https://example.com/elsewhere", text, count=1),
+    lambda text: text.replace("confidence: medium\n", "confidence: medium\nstale_after: 2026-10-01\n"),
+])
+def test_a5_a_correction_it_restores_entirely_is_no_verification(gate, edit) -> None:
+    """The reviewer judged the concept wrong where a review may not change it: nothing of the
+    correction lands, so the concept ends unverified, never verified as it stood."""
+    lease(gate)
+    before = gate.read(AIO_AB)
+
+    job = submit(gate, review(gate, AIO_AB, "corrected", content=edit(before), note="the title overstates")).json()
+
+    assert job["status"] == "done", job
+    assert (job["reviews"][0]["outcome"], job["reviews"][0]["downgrade"]) == ("unverified", "D_RESTORED")
+    after = published(gate, AIO_AB)
+    assert (after["title"], after["sources"]) == (parse_document(before).frontmatter["title"],
+                                                  parse_document(before).frontmatter["sources"])
+    assert "stale_after" not in after and after["verified"] == parse_document(before).frontmatter["verified"]
+
+
 def test_a6_whole_words_decide_what_a_correction_adds() -> None:
     before = "---\ntype: Metric\ntitle: T\n---\n# Summary\n\nRelease v2 shipped 5k seats on 2026-09-17T10:00Z.\n"
     known = before + "\nsha256 a55e99db8c\n"

@@ -101,7 +101,8 @@ Hold each to the evidence boundary:
   link that the concept or its cited evidence does not already hold, and grow the body by at
   most 20%: the writer downgrades any such correction to unverified (`D_NOVEL_TOKEN`,
   `D_GROWTH`, `D_NEW_LINK`) and keeps the old text. `type`, `title`, `sources`,
-  `stale_after`, `generated`, `verified` and `status` are restored whatever you write.
+  `stale_after`, `generated`, `verified` and `status` are restored whatever you write; a
+  correction of only those ends unverified (`D_RESTORED`), so say in the note what is wrong.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is
   unreliable, or the concept cites no frozen source (`D_NO_EVIDENCE`: a note is never
   evidence). An earlier verification of the version then stops being current. The
