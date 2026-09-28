@@ -242,6 +242,48 @@ def test_member_items_come_first_and_age_like_every_item(tmp_path, monkeypatch) 
     assert [claimed(), claimed()] == [ancient, fresh]  # 105: ageing starves nothing, members included
 
 
+def test_cli_reads_feishu_links_as_the_member_and_submits_the_content(gate, tmp_path, monkeypatch,
+                                                                     capsys) -> None:
+    tools, log = tmp_path / "lark-bin", tmp_path / "lark-args"
+    tools.mkdir()
+    document = {"ok": True, "data": {"document": {"document_id": "doxcnFAKE", "revision_id": 7,
+                                                   "content": "# Retry cap\n\nWe cap retries at 3.\n"}}}
+    fake = tools / "lark-cli"
+    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{log}'\nprintf '%s' '{json.dumps(document)}'\n",
+                    encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools))
+    gate.connect("member")
+
+    code, out = run(capsys, "ingest", FEISHU)
+
+    [row] = out["submissions"]
+    assert code == 0 and row["state"] == "ready" and "detail" not in row, out
+    assert log.read_text(encoding="utf-8").split() == ["docs", "+fetch", "--doc", FEISHU, "--doc-format", "markdown"]
+    item = M.get_item(bundle(gate), job(gate, row["job"])["item"])
+    assert item["origin"]["url"] == FEISHU and item["origin"]["title"] == "Retry cap"
+    assert item["origin"]["fetched"] == {"tool": "lark-cli", "document_id": "doxcnFAKE", "revision_id": 7}
+    assert M.read_file(bundle(gate), item["id"], "source.md") == b"# Retry cap\n\nWe cap retries at 3.\n"
+
+    # lark-cli that cannot read it, or none at all: the link alone, needs_access, and why.
+    fake.write_text("#!/bin/sh\nprintf '%s' '{\"ok\": false}'\nexit 1\n", encoding="utf-8")
+    code, out = run(capsys, "ingest", FEISHU + "?from=wiki")
+    assert code == 0 and out["submissions"][0]["state"] == "needs_access"
+    assert out["submissions"][0]["detail"].startswith("lark-cli could not read it; the writer never fetches URLs")
+    fake.unlink()
+    code, out = run(capsys, "ingest", "https://example.com/post")  # not Feishu: never handed to lark-cli
+    assert code == 0 and out["submissions"][0]["state"] == "needs_access"
+    assert out["submissions"][0]["detail"].startswith("the writer never fetches URLs")
+    code, out = run(capsys, "ingest", FEISHU + "?v=2")
+    assert out["submissions"][0]["detail"].startswith("lark-cli is not installed here;")
+
+    gate.app()  # AIWIKI_INTAKE=curate: the CLI says it needs the content, before sending anything
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as refused:
+        cli.main(["ingest", "https://example.com/other"])
+    assert refused.value.code == 2 and "takes content, not links" in capsys.readouterr().out
+
+
 def test_member_uploads_keep_binary_evidence_verbatim(gate) -> None:
     png = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
     receipt = ingest(gate, content_b64=base64.b64encode(png).decode(), filename="Funnel Chart.PNG").json()

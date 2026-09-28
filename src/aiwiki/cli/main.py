@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -324,6 +325,30 @@ def _count_lines(shown: int, total: int | None = None) -> list[str]:
     return object_lines("count", values)
 
 
+_LARK_HOST = re.compile(r"(?:^|\.)(?:feishu\.cn|larksuite\.com|larkoffice\.com)$")
+
+
+def _lark_fetch(url: str) -> tuple[dict | None, str | None]:
+    """A Feishu/Lark doc read here with lark-cli, as this member: ``(payload, None)``, else
+    ``(None, why)``. The writer never fetches URLs, so only the member's own access reads it."""
+    tool = shutil.which("lark-cli")
+    if tool is None:
+        return None, "lark-cli is not installed here"
+    try:
+        done = subprocess.run([tool, "docs", "+fetch", "--doc", url, "--doc-format", "markdown"],
+                              capture_output=True, text=True, timeout=120, check=False)
+        document = json.loads(done.stdout)["data"]["document"]
+        content = document["content"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None, "lark-cli could not read it"
+    if done.returncode or not isinstance(content, str) or not content.strip():
+        return None, f"lark-cli could not read it (exit {done.returncode})"
+    heading = next((line[2:].strip() for line in content.splitlines() if line.startswith("# ")), None)
+    fetched = {"tool": "lark-cli", **{key: document[key] for key in ("document_id", "revision_id")
+                                      if isinstance(document.get(key), str | int)}}
+    return {"text": content, "title": heading, "url": url, "fetched": fetched}, None
+
+
 def _home() -> int:
     identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION})
     print("\n".join(identity))
@@ -508,9 +533,11 @@ def main(argv=None) -> int:
             "ai-wiki ingest notes.md",
             "ai-wiki ingest report.pdf chart.png",
             "cat notes.md | ai-wiki ingest - --title \"Research notes\"",
+            "ai-wiki ingest https://example.feishu.cn/docx/<token>",
         ), **common,
     )
-    p_ing.add_argument("files", nargs="*", help="markdown file(s); omit or '-' to read stdin")
+    p_ing.add_argument("files", nargs="*", help="file(s) or http(s) link(s); omit or '-' to read stdin; lark-cli "
+                                                "reads a Feishu/Lark doc link here, as you")
     p_ing.add_argument("--title", help="title for the source (requires exactly one input)")
     p_ing.add_argument("--json", action="store_true", help="emit submission receipts as JSON")
     p_audit = sub.add_parser(
@@ -887,9 +914,18 @@ def main(argv=None) -> int:
                   help_command='ai-wiki ingest <file> --title "<title>"', code=2)
         submitted = []
         for f in files:
-            single = len(files) == 1
+            single, note = len(files) == 1, None
             if f == "-":  # pasted text from stdin → stored as raw Markdown evidence
                 payload = {"text": sys.stdin.read(), "title": a.title if single else None}
+            elif re.match(r"https?://", f):  # a link: its content if lark-cli reads it here, else the link alone
+                payload = {"url": f}
+                if _LARK_HOST.search(urllib.parse.urlsplit(f).hostname or ""):
+                    fetched, note = _lark_fetch(f)
+                    payload = fetched or payload
+                payload["title"] = a.title or payload.get("title")
+                if "text" not in payload and (_api("/whoami").get("modes") or {}).get("intake") != "inbox":
+                    _fail(f"{f}: {note + '; ' if note else ''}this writer takes content, not links: export it "
+                          "and ingest the file", help_command="ai-wiki ingest <file>", code=2)
             else:  # any file: ship raw bytes base64 so binaries (pdf/image/…) survive intact
                 p = Path(f).expanduser()
                 try:
@@ -904,13 +940,16 @@ def main(argv=None) -> int:
             state = f"no-op:{job.get('status')}" if job.get("deduplicated") else (
                 job.get("curation") or job.get("status")
             )
-            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state})
+            detail = "; ".join(str(part) for part in (note, job.get("reason")) if part)
+            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state,
+                              **({"detail": detail} if detail else {})})
         if a.json:
             print(json.dumps({"submissions": submitted}, ensure_ascii=False, indent=2))
             return 0
         emit(
             _count_lines(len(submitted), len(submitted)),
-            table_lines("submissions", submitted, ("input", "source", "job", "state")),
+            table_lines("submissions", submitted, ("input", "source", "job", "state")
+                        + (("detail",) if any("detail" in row for row in submitted) else ())),
             table_lines("help", ({"command": "ai-wiki jobs <job-id>", "purpose": "check curation status"},),
                         ("command", "purpose")),
         )
