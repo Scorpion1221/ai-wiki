@@ -954,7 +954,9 @@ _TOKEN = re.compile(
     r"|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[a-z]+[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*"
 )
 _LINK = re.compile(r"\]\(\s*<?([^)\s>]+)|\[\[([^\]|#]+)")
-MAX_GROWTH = 1.2  # a correction's body grows by at most 20%
+MAX_GROWTH = 1.2  # a correction's body, and each text value, grows by at most 20%
+_CONFIDENCE = ("low", "medium", "high")
+_CAVEATS = ("contested", "contradictions")  # a recorded conflict is its curators' to add or resolve
 
 
 def backlog_settings(environ: Mapping[str, str] = os.environ) -> tuple[datetime | None, int]:
@@ -1100,19 +1102,43 @@ def _known(token: str, known: str) -> bool:
     return re.search(rf"(?<![{_WORD}]){re.escape(token)}(?![{_WORD}])", known) is not None
 
 
+def _targets(document) -> set[str]:
+    """Outbound links: the body's and the concepts ``contradictions`` names (lint follows both)."""
+    listed = document.frontmatter.get("contradictions")
+    return {first or second for first, second in _LINK.findall(document.body)} | {
+        str(target) for target in (listed if isinstance(listed, list) else [])}
+
+
+def _widens(key: str, old: object, new: object) -> bool:
+    """Whether a content key says more than HEAD's (§2.4: content keys narrow like the body):
+    a new key or list item, a higher confidence, text grown past 20%, or a changed caveat."""
+    if old == new:
+        return False
+    if key == "confidence":
+        return not (old in _CONFIDENCE and new in _CONFIDENCE and _CONFIDENCE.index(new) < _CONFIDENCE.index(old))
+    if isinstance(old, list) and isinstance(new, list) and key not in _CAVEATS:
+        return any(item not in old for item in new)
+    if isinstance(old, str) and isinstance(new, str):
+        return len(new.strip()) > MAX_GROWTH * len(old.strip())
+    return True
+
+
 def _narrowing(before: str, after: str, known: str) -> str | None:
     """Why a correction does more than narrow the concept (§5.4 A6), or None when it only narrows."""
     head, edit = parse_document(before), parse_document(after)
-    content = {key: value for key, value in edit.frontmatter.items()
-               if key not in bookkeeping.SERVICE_KEYS["review"]}
+    frozen = bookkeeping.SERVICE_KEYS["review"]  # restored whatever the correction wrote
+    content = {key: value for key, value in edit.frontmatter.items() if key not in frozen}
     text = "\n".join([*_leaves(content), edit.body])
     if any(not _known(token, known) for token in
            {(match.group(1) or match.group(0)).rstrip(".,;:/-") for match in _TOKEN.finditer(text)} - {""}):
         return "D_NOVEL_TOKEN"
-    if len(edit.body.strip()) > MAX_GROWTH * len(head.body.strip()):
+    if _targets(edit) - _targets(head):
+        return "D_NEW_LINK"
+    if len(edit.body.strip()) > MAX_GROWTH * len(head.body.strip()) or any(
+            _widens(key, head.frontmatter.get(key), edit.frontmatter.get(key))
+            for key in (set(head.frontmatter) | set(edit.frontmatter)) - set(frozen)):
         return "D_GROWTH"
-    links = [{first or second for first, second in _LINK.findall(document.body)} for document in (head, edit)]
-    return "D_NEW_LINK" if links[1] - links[0] else None
+    return None
 
 
 def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: datetime,

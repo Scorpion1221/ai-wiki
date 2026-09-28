@@ -98,9 +98,10 @@ Hold each to the evidence boundary:
 - **corrected**: some claim is unsupported or overstated and you can fix it by *narrowing*:
   delete it, weaken it ("merged" for "released"), or state the uncertainty in words. Edit the
   concept in `$WS`, body and content keys only. Never add a number, date, URL, identifier or
-  link that the concept or its cited evidence does not already hold, and grow the body by at
-  most 20%: the writer downgrades any such correction to unverified (`D_NOVEL_TOKEN`,
-  `D_GROWTH`, `D_NEW_LINK`) and keeps the old text. `type`, `title`, `sources`,
+  link (`contradictions` included) that the concept or its cited evidence does not already
+  hold, grow the body or a text key by more than 20%, add a key or list item, raise
+  `confidence` or touch `contested`/`contradictions`: the writer downgrades any such
+  correction to unverified (`D_NOVEL_TOKEN`, `D_NEW_LINK`, `D_GROWTH`) and keeps the old text. `type`, `title`, `sources`,
   `stale_after`, `generated`, `verified` and `status` are restored whatever you write; a
   correction of only those ends unverified (`D_RESTORED`), so say in the note what is wrong.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is

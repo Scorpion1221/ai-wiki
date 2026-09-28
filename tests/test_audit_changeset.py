@@ -336,6 +336,12 @@ def test_a5_sources_identity_and_freshness_are_restored_not_refused(gate) -> Non
     (lambda text: text.replace("Redacted fixture body.", "Redacted fixture body, which the redacted "
                                                          "fixture body restates."), "D_GROWTH"),
     (lambda text: text.replace("Redacted fixture body.", "[R](x.md) fixture body."), "D_NEW_LINK"),
+    (lambda text: text.replace("status: draft\n", f"status: draft\ncontested: true\ncontradictions: [{AI_STUDY}]\n"),
+     "D_NEW_LINK"),
+    (lambda text: text.replace("description: Redacted description", "description: Redacted description. The "
+                                                                   "variant won and was released worldwide"),
+     "D_GROWTH"),
+    (lambda text: text.replace("confidence: medium", "confidence: high"), "D_GROWTH"),
 ])
 def test_a6_a_correction_that_adds_is_downgraded_not_failed(gate, edit, code) -> None:
     lease(gate)
@@ -385,6 +391,23 @@ def test_a6_whole_words_decide_what_a_correction_adds() -> None:
     assert audit._narrowing(before, before.replace("5k", "99"), known) == "D_NOVEL_TOKEN"  # 99 is only in a hash
     assert audit._narrowing(before, before.replace("v2", "v3"), known) is None  # not a number word
     assert audit._narrowing(before, before.replace("seats", "`seat_count`"), known) == "D_NOVEL_TOKEN"
+
+
+def test_a6_content_keys_narrow_like_the_body() -> None:
+    before = ("---\ntype: Metric\ntitle: T\ndescription: Released to all users and won\ntags: [a, b]\n"
+              "confidence: medium\ncontradictions: [x.md]\ncontested: true\n---\n# Summary\n\nBody.\n")
+
+    narrowed = before.replace("Released to all users and won", "Merged; release unconfirmed").replace(
+        "[a, b]", "[a]").replace("medium", "low")
+    assert audit._narrowing(before, narrowed, before) is None
+    for edit in ("tags: [a, b, c]", "confidence: high", "aliases: [a]", "contested: false",
+                 "description: Released to all users and won, lifting every market's paid conversion"):
+        key = edit.split(":")[0]
+        widened = re.sub(rf"(?m)^{key}:.*$", edit, before) if f"\n{key}:" in before else before.replace(
+            "---\n#", edit + "\n---\n#")
+        assert audit._narrowing(before, widened, before) == "D_GROWTH", edit
+    assert audit._narrowing(before, before.replace("[x.md]", "[]"), before) == "D_GROWTH"  # a caveat cleared
+    assert audit._narrowing(before, before.replace("[x.md]", "[x.md, y.md]"), before) == "D_NEW_LINK"
 
 
 def test_a7_a_deprecated_concept_is_never_reviewed(gate) -> None:
