@@ -31,6 +31,7 @@ from pathlib import Path
 
 from ..runtime import audit, changeset, curate, revert
 from ..runtime.failure import classify, failure
+from . import inbox
 from . import ingest as I
 from . import maint_state as M
 
@@ -42,6 +43,7 @@ PRIORITY = {"changeset": 0, "revert": 0, "audit": 1, "ingest": 2}  # lower runs 
 # own Codex audit (all but AIWIKI_CODEX_AUDIT_MANUAL).
 COMMIT_BUNDLES: frozenset[str] = frozenset()
 AUDIT_BUNDLES: frozenset[str] = frozenset()
+INTAKE = "curate"  # AIWIKI_INTAKE: "inbox" makes the sweep register drops as member work items
 
 
 def actor_of(principal: str, bundle: str) -> str | None:
@@ -533,15 +535,16 @@ def _known_shas(bundle: Path) -> set[str]:
 
 def sweep_once(bundles: list[Path]) -> int:
     """Pick up sources sitting in sources/inbox/ that no job has seen yet (e.g. dropped
-    out-of-band) and queue the curatable ones. Deduped by content sha. Returns #queued."""
+    out-of-band) and queue the curatable ones, or with INTAKE inbox register each as a member
+    work item. Deduped by content sha. Returns #queued (#registered)."""
     with serialized_lifecycle():
         queued = 0
         for b in bundles:
-            inbox = b / "sources" / "inbox"
-            if not inbox.is_dir():
+            drops = b / "sources" / "inbox"
+            if not drops.is_dir():
                 continue
             known = _known_shas(b)
-            for f in sorted(inbox.iterdir()):
+            for f in sorted(drops.iterdir()):
                 if not f.is_file() or f.is_symlink() or f.name.startswith("."):
                     continue
                 data = f.read_bytes()
@@ -549,6 +552,14 @@ def sweep_once(bundles: list[Path]) -> int:
                 if sha in known:
                     continue
                 source_rel = f.relative_to(b).as_posix()
+                if INTAKE == "inbox":
+                    try:
+                        inbox.register_drop(b, source_rel, data)
+                    except M.MaintError:  # e.g. too large for an item: never hold up the other drops
+                        continue
+                    known.add(sha)
+                    queued += 1
+                    continue
                 curatable = I.is_curatable(source_rel, data)
                 job = I.new_job(b, source_rel, sha, curatable, filename=f.name)
                 known.add(sha)

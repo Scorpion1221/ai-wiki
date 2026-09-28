@@ -29,7 +29,8 @@ _SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
 # flagged needs-conversion rather than guessed (the writer has no PDF converter contract).
 _READABLE_BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _NEEDS_CONVERSION_EXT = {".pdf"}
-_REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion"}
+# An "inbox" job (AIWIKI_INTAKE=inbox, service/inbox.py) answers from its work item, whatever its state.
+_REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion", "inbox"}
 _REUSABLE_AUDIT_STATUSES = {"queued", "running", "done"}
 # A rejected or failed changeset frees its idempotency key, so a fixed resubmission runs (§2.7).
 _REUSABLE_CHANGESET_STATUSES = {"queued", "running", "done"}

@@ -1,0 +1,116 @@
+"""Inbox intake (AIWIKI_INTAKE=inbox): a member submission becomes a maintainer work item.
+
+POST /ingest and the inbox sweep land a source in ``sources/inbox/`` verbatim, as the Codex
+path does, but instead of queuing Codex curation they queue a ``member`` work item that the
+curating maintainer claims through ``maint next`` like any collected item, ahead of them by
+priority. The item holds the frozen evidence (text redacted of secrets as collectors do,
+binaries verbatim) and names the submitter and the job; the job (``mode: inbox``) names the
+item and answers ``GET /jobs/<id>`` from it, so the member follows one id to the changeset
+and commit that curated it.
+
+The writer never fetches a URL: a link submitted without its content is recorded as a
+needs_access item, and a format nothing reads (a PDF) as needs_conversion.
+
+Deterministic and stdlib only: nothing here runs an LLM or opens a connection.
+"""
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import re
+import uuid
+from pathlib import Path
+
+from aiwiki.version import service_identity
+
+from ..maint import planner
+from ..runtime import secrets
+from . import ingest as I
+from . import maint_state as M
+
+NEEDS_ACCESS = ("the writer never fetches URLs, so nothing was read from this link: fetch it where you have "
+                "access (with lark-cli installed, `ai-wiki ingest <url>` reads a Feishu/Lark doc on your "
+                "machine) or export it and ingest the file")
+NEEDS_CONVERSION = "the writer reads no such format: convert it to text or Markdown and ingest that"
+
+
+def receive(bundle: Path, data: bytes | None, *, filename: str | None, title: str | None, url: str | None,
+            fetched: dict | None, submitter: str) -> tuple[dict, bool]:
+    """Store a member's submission and queue its work item; ``(job, deduplicated)``.
+
+    ``data`` None is a link alone. The same content (or link) again returns its first job.
+    """
+    with I._JOB_LOCK:
+        sha = hashlib.sha256(data if data is not None else str(url).encode()).hexdigest()
+        existing = I.find_job_by_sha(bundle, sha)
+        if existing is not None:
+            return view(bundle, existing), True
+        source = I.write_source(bundle, data, filename, title)[0] if data is not None else None
+        job = _register(bundle, sha, data, source=source, submitter=submitter, via="ingest", title=title,
+                        filename=filename, url=url, fetched=fetched)
+    return view(bundle, job), False
+
+
+def register_drop(bundle: Path, source: str, data: bytes) -> dict:
+    """A file dropped in ``sources/inbox/`` out of band (the sweep): its job and work item."""
+    with I._JOB_LOCK:
+        sha = hashlib.sha256(data).hexdigest()
+        return I.find_job_by_sha(bundle, sha) or _register(
+            bundle, sha, data, source=source, submitter=None, via="drop", title=None,
+            filename=Path(source).name.removesuffix(".source"), url=None, fetched=None)
+
+
+def _register(bundle: Path, sha: str, data: bytes | None, *, source: str | None, submitter: str | None, via: str,
+              title: str | None, filename: str | None, url: str | None, fetched: dict | None) -> dict:
+    """The item first, then the job naming it: a crash between them leaves an item the next
+    submission (or sweep) finds again by its item_key."""
+    job_id = uuid.uuid4().hex[:12]
+    declared = {"title": title, "filename": filename, "url": url, "fetched": fetched, "source": source}
+    origin = {"kind": M.MEMBER, "submitter": submitter, "via": via, "job": job_id, "sha256": sha,
+              **{key: value for key, value in declared.items() if value}}
+    outcome = reason = None
+    if data is None:
+        name, frozen, outcome, reason = "link.txt", f"{url}\n".encode(), "needs_access", NEEDS_ACCESS
+    else:
+        suffix = re.sub(r"[^A-Za-z0-9.]", "", Path(filename or "pasted.md").suffix)[:16]
+        name, frozen, count = f"source{suffix}", data, 0
+        if not I.is_curatable(source or name, data):
+            outcome, reason = "needs_conversion", NEEDS_CONVERSION
+        with contextlib.suppress(UnicodeDecodeError):  # binaries stay verbatim; the gate reads no secrets in text
+            text, count = secrets.redact(data.decode("utf-8"))
+            frozen = text.encode()
+        origin["redactions"] = count
+    [planned] = planner.plan([{
+        "collector": "inbox", "topic_key": f"{M.MEMBER}:{sha[:16]}", "origin": origin,
+        "brief": f"{submitter or 'inbox drop'}: {title or filename or url or 'pasted text'}",
+        "files": [{"name": name, "sha256": hashlib.sha256(frozen).hexdigest(), "bytes": len(frozen), "data": frozen,
+                   "origin": {**origin, "kind": "member-source"}}]}])
+    item = M.intake(bundle, planned, principal=submitter or "service", outcome=outcome, reason=reason)
+    job = {"id": job_id, "kind": "ingest", "mode": "inbox", "status": "inbox", "item": item["id"], "sha256": sha,
+           "submitter": submitter, "via": via, "created": I._now(), "service": service_identity(),
+           **{key: value for key, value in (("source", source), ("title", title), ("original_name", filename),
+                                            ("url", url)) if value}}
+    I._write_atomic(I.job_path(bundle, job_id), job)
+    return job
+
+
+def view(bundle: Path, job: dict) -> dict:
+    """An inbox job as its member sees it: the state of its work item, else the job as stored."""
+    return {**job, **_state(bundle, job.get("item"))} if job.get("mode") == "inbox" else job
+
+
+def _state(bundle: Path, item_id: object, depth: int = 0) -> dict:
+    try:
+        item = M.get_item(bundle, str(item_id))
+    except M.MaintError as exc:
+        return {"status": "unknown", "item_error": exc.detail()}
+    resolution = item.get("resolution") or {}
+    state = {"item": item["id"], "status": item["status"]}
+    if resolution.get("reason"):
+        state["reason"] = resolution["reason"]
+    if item["status"] == "curated":
+        state.update(changeset=resolution.get("job"), commit=resolution.get("commit"))
+    if item["status"] == "split" and depth < 3:
+        state["children"] = [_state(bundle, child, depth + 1) for child in resolution.get("children") or []]
+    return state
+

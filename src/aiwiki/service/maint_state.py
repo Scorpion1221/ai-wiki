@@ -11,7 +11,8 @@ record is written with fsync + atomic rename, so a crash leaves the old or the n
 Items move ready -> in_progress(run) -> curated | skipped | duplicate | split |
 needs_access | needs_conversion | needs_human, or -> parked, which returns to ready when the
 next maintainer run takes the lease. Attempt caps and non-retryable failures move an item to
-needs_human; that only raises an alert and never blocks any other item.
+needs_human; that only raises an alert and never blocks any other item. A member submission
+(``origin.kind`` member, see ``service.inbox``) is queued without a lease.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -58,6 +59,7 @@ ADMIN_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conve
 REOPENABLE = frozenset({"needs_human", "skipped", "duplicate", "needs_access", "needs_conversion", "parked"})
 MAX_FILES = 64
 MAX_CHILDREN = 20
+MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
 _ID = re.compile(r"it_[0-9a-f]{12}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -498,6 +500,29 @@ def enqueue(bundle: Path, items: object, *, principal: str, run: str | None = No
         results = [_enqueue(bundle, spec, files, principal, current, now) for spec, files in specs]
     return {"items": results, **{r: sum(x["result"] == r for x in results)
                                   for r in ("created", "merged", "duplicate")}}
+
+
+def intake(bundle: Path, planned: dict, *, principal: str, outcome: str | None = None,
+           reason: str | None = None) -> dict:
+    """Queue one planned member submission (``planner.plan`` output, files with their ``data``)
+    without a lease: the service admits it on the member's behalf. ``outcome`` (needs_access or
+    needs_conversion) records it closed at once, when no maintainer could curate it.
+
+    Idempotent by item_key like ``enqueue``: the same submission returns the item it made.
+    """
+    files = [({key: file[key] for key in ("name", "sha256", "bytes", "origin")}, file["data"])
+             for file in planned["files"]]
+    _check_size([meta for meta, _ in files])
+    spec = {key: planned[key] for key in ("origin", "topic_key", "priority", "brief")}
+    spec["item_key"] = item_key(spec["origin"]["kind"], spec["topic_key"], [meta["sha256"] for meta, _ in files])
+    with _LOCK:
+        now = _now()
+        result = _enqueue(bundle, spec, files, principal, _items(bundle), now)
+        item = _load(bundle, result["id"])
+        if outcome and result["result"] == "created":
+            _close(item, outcome, reason, by="service", run=None, now=now)
+            _save(bundle, item, now)
+        return item
 
 
 def _effective_priority(item: dict, now: datetime) -> int:
