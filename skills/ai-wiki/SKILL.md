@@ -145,14 +145,15 @@ ai-wiki jobs <job-id>
 ```
 
 Ingest submits sources; it never edits concepts. The server runs no LLM: a submission is
-committed to the wiki's Git at once (text redacted of secrets; images and PDFs as sent, so
-never submit a file that holds a secret) and becomes a work item that the maintainer agent
+committed to the wiki's Git at once (text redacted of secrets; an image as sent, so never
+submit one that shows a secret) and becomes a work item that the maintainer agent
 curates on its next run (once a day at 04:00 CST, so within about a day). The answer and
 `ai-wiki jobs <id>` show that intake commit, or say the writer is still retrying it; the job
 then follows the item until a changeset curates it (with the commit) or the maintainer skips
 it (with the reason); do not poll it in a loop. Re-submitting identical content is a
 successful no-op. A terminal `needs-conversion` result means the format was stored but cannot
-be curated: convert it to a directly readable file and submit that as a new source.
+be curated, and nothing of it is committed: convert it to a directly readable file (UTF-8
+text, or an image) and submit that as a new source.
 Read-only deployments may return `403`.
 
 Curation is not verification. A separate auditor agent verifies curated concepts on its own

@@ -157,15 +157,16 @@ the Multica registry).
 - Auditor: its own schedule, never the maintainer's credential, never the maintainer's
   hand-off text: it reads only the backlog and the evidence the server serves.
 - Member: `ai-wiki ingest <file|text|link>`. The writer commits the submission's copy (text
-  redacted of secrets, a binary as sent) to `sources/inbox/intake/` and pushes it before it
-  answers, in a commit `intake: <title> (<principal>)`; the answer and `ai-wiki jobs <id>`
-  show that commit under `intake`, or say it is not in Git yet, and then the writer retries
-  it. `ai-wiki jobs <id>` also follows the work item until a changeset curates it (with the
-  changeset's commit) or the maintainer skips it (with the reason). A Feishu link is read on
-  the member's machine with their own lark-cli; sent alone, it has nothing to commit, and the
-  maintainer reads it as the wiki's app if its host has one (runbook step 2c), otherwise the
-  item closes `needs_access`; sent again once the app can read it, the same link reopens it. A
-  lark-cli timeout parks it for the next run instead.
+  redacted of secrets, an image as sent; nothing of a `needs-conversion` file such as a PDF) to
+  `sources/inbox/intake/` and pushes it before it answers, in a commit
+  `intake: <title> (<principal>)`; the answer and `ai-wiki jobs <id>` show that commit under
+  `intake`, or say it is not in Git yet, and then the writer retries it. `ai-wiki jobs <id>`
+  also follows the work item until a changeset curates it (with the changeset's commit) or the
+  maintainer skips it (with the reason). A Feishu link is read on the member's machine with
+  their own lark-cli; sent alone, it has nothing to commit, and the maintainer reads it as the
+  wiki's app if its host has one (runbook step 2c), otherwise the item closes `needs_access`;
+  sent again once the app can read it, the same link reopens it. A lark-cli timeout parks it
+  for the next run instead.
 
 ## 6. Swap the model or the runtime
 
