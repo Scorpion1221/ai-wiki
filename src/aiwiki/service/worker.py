@@ -541,10 +541,7 @@ def _known_shas(bundle: Path) -> set[str]:
 
 def sweep_once(bundles: list[Path]) -> int:
     """Pick up sources sitting in sources/inbox/ that no job has seen yet (e.g. dropped
-    out-of-band) and queue the curatable ones. Deduped by content sha. Returns #queued.
-    It only feeds Codex curation, so under AIWIKI_LLM=off it registers nothing."""
-    if not curate.agents_enabled():
-        return 0
+    out-of-band) and queue the curatable ones. Deduped by content sha. Returns #queued."""
     with serialized_lifecycle():
         queued = 0
         for b in bundles:
@@ -561,6 +558,8 @@ def sweep_once(bundles: list[Path]) -> int:
                     continue
                 source_rel = f.relative_to(b).as_posix()
                 curatable = I.is_curatable(source_rel, data)
+                if not curate.agents_enabled():
+                    continue  # only Codex curates a drop from here: under AIWIKI_LLM=off none is queued
                 job = I.new_job(b, source_rel, sha, curatable, filename=f.name)
                 known.add(sha)
                 if curatable:

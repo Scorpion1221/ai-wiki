@@ -80,6 +80,24 @@ def test_no_legacy_path_starts_a_process(tmp_path, monkeypatch) -> None:
     assert gate.job(ingest_job["id"])["status"] == gate.job(audit_job["id"])["status"] == "queued"
 
 
+def test_the_sweeper_still_scans_drops_but_queues_no_codex_curation(tmp_path, monkeypatch) -> None:
+    """Only the sweep's Codex branch is off: it still reads each drop, so an intake that registers
+    drops without an agent (AIWIKI_INTAKE=inbox, ahead of that branch) keeps working."""
+    gate = _gate(tmp_path, monkeypatch)
+    inbox = gate.writer / "sources" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "dropped.md").write_bytes(b"# dropped out of band\n")
+    real, scanned, attempts = I.is_curatable, [], []
+    monkeypatch.setattr(I, "is_curatable", lambda rel, data: scanned.append(rel) or real(rel, data))
+    monkeypatch.setattr(subprocess, "Popen", _refuse(attempts))
+    before = set(gate.jobs())
+
+    assert worker.sweep_once([gate.writer]) == 0
+
+    assert scanned == ["sources/inbox/dropped.md"] and attempts == []
+    assert set(gate.jobs()) == before  # no job, so nothing sits queued for an agent that never comes
+
+
 def test_a_changeset_runs_only_git_and_queues_no_codex_audit(tmp_path, monkeypatch) -> None:
     gate = _gate(tmp_path, monkeypatch)
     real, started = subprocess.Popen, []
