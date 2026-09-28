@@ -728,9 +728,11 @@ Every concept generated before the epoch and not verified in its current version
 the unverified ones, including the concepts of H8's pending-audit ingests and R2's
 `audit_pending`, the newest legacy curations. The backlog releases seed oldest first, so at the
 default 10 a day the newest would wait about a week, and the 72 h alert does not measure seed.
-The Auditor reviews up to 40 concepts a day (20 a run, twice), so 30 seed a day leaves room for
-new work and releases a seed of about 70 to 80 concepts (the unverified count `ai-wiki health`
-shows, plus verifications older than their version) within three days.
+The Auditor runs once a day (07:00 CST, after the maintainer's 04:00 run) and reviews up to
+20 concepts a run. New work comes first in its backlog, so 30 seed a day releases a seed of
+about 70 to 80 concepts (the unverified count `ai-wiki health` shows, plus verifications
+older than their version) within three days, and the Auditor reviews it over about four days,
+longer on a day of heavy new work.
 
 Verify:
 
@@ -864,12 +866,12 @@ grep -A3 '^verified:' $ws/clone/<the concept_file>                              
 
 **8c. The schedules** (laptop). The maintainer's daily 04:00 trigger resumes; the Auditor
 takes the cron the header table of `docs/prompts/auditor-agent-instructions.md` names (today
-`0 7,15 * * *`):
+`0 7 * * *`: once a day, after the maintainer's run):
 
 ```bash
 multica autopilot update $PROD_AP --status active --output json | jq -r '.status // .autopilot.status'   # active
-multica autopilot trigger-add $AUDITOR_AP --kind schedule --cron "0 7,15 * * *" \
-  --timezone Asia/Shanghai --label "07:00/15:00 Asia/Shanghai"
+multica autopilot trigger-add $AUDITOR_AP --kind schedule --cron "0 7 * * *" \
+  --timezone Asia/Shanghai --label "07:00 Asia/Shanghai"
 multica autopilot get $PROD_AP --output json | jq -c '[.triggers[] | {cron_expression, next_run_at}]'
 ```
 
@@ -1084,8 +1086,8 @@ The deploy script lives outside this repository. Apply before step 0's deploy:
    ```
 
 2. **Run windows**: besides the existing 03:30–06:30 CST rule (the maintainer's 04:00 run),
-   refuse from 30 minutes before to 30 minutes after each Auditor start (its cron, today
-   07:00 and 15:00 CST).
+   refuse from 30 minutes before to 30 minutes after the Auditor's start (its cron, today
+   07:00 CST once a day): together, no deploy from 03:30 to 07:30 CST.
 3. **After the deploy**, compare the writer's `/whoami` `.modes` with the ones before it,
    read with the token the script already uses for its health checks: the flags live in
    drop-ins, not the app directory, so a deploy must not change them. Compare only the keys
@@ -1280,7 +1282,7 @@ exported item as a frozen source. The next legacy run's `find` reports that chec
 
 The owner can review a concept by hand; a person's verdict makes it `human-reviewed`
 (design §5.5). On the laptop with the owner token (it holds read, audit and human_verify) and
-a throwaway CLI config as in 8a, outside the Auditor's runs (07:00 and 15:00 CST: the review
+a throwaway CLI config as in 8a, outside the Auditor's run (07:00 CST: the review
 takes the same auditor lease):
 
 ```bash

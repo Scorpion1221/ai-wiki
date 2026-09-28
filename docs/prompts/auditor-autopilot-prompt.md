@@ -13,7 +13,7 @@ max=20                                     # 每次最多审 20 个概念，每�
 cfg="$HOME/.ai-wiki/maint.json"            # 只读其中的 repos.root，用来在本机重读 Git 证据
 ```
 
-- 日程：每天 07:00、15:00 CST（design §5.2）。没审完的概念留在 backlog 里，下一次运行接着审，不要补跑。
+- 日程：每天 07:00 CST 一次，在 04:00 的 Maintainer 运行之后。没审完的概念留在 backlog 里，第二天的运行接着审，不要补跑。
 - 凭据只用注入的 `AIWIKI_TOKEN`（principal `process:ai-wiki-auditor`，scope 恰好是 read 和 audit）。不要打印、复制或替换它，不要改 `~/.ai-wiki/config.json`。
 
 ## 审查要点（Skill §3 的本地补充）

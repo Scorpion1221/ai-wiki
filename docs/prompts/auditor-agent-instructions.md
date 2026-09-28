@@ -12,7 +12,7 @@ the writer reports but cannot see, so set them up here.
 | Skills | `ai-wiki-auditor` only (not `ai-wiki-curating-maintainer`, `okf-knowledge-curator` or `ai-wiki`) |
 | Concurrency | `max_concurrent_tasks=1`, `max_attempts=2`, task timeout 3 h; the auditor lease also serializes runs |
 | Custom env | `AIWIKI_TOKEN=<aiw_a_ token of process:ai-wiki-auditor>`: scopes exactly `read` and `audit`, bound to the bundles it audits |
-| Autopilot | `create_issue`, title `[AUTO] AI Wiki audit {{date}}`, cron `0 7,15 * * *` Asia/Shanghai, prompt `docs/prompts/auditor-autopilot-prompt.md` |
+| Autopilot | `create_issue`, title `[AUTO] AI Wiki audit {{date}}`, cron `0 7 * * *` Asia/Shanghai (once a day, after the maintainer's 04:00 run), prompt `docs/prompts/auditor-autopilot-prompt.md` |
 
 Prerequisites: the writer runs with `AIWIKI_AUDIT=external` and `AIWIKI_BACKLOG_EPOCH` set (it
 refuses to start otherwise), the tunnel routes `audit/backlog` to the writer, and the host has
