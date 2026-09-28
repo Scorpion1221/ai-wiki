@@ -49,11 +49,21 @@ def receive(bundle: Path, data: bytes | None, *, filename: str | None, title: st
 
     ``data`` None is a link alone. The same content (or link) again returns its first job;
     anything new counts against ``quota``, the submitter's submissions to this bundle a day.
+    A Feishu/Lark link the maintainer could not read (needs_access, nothing frozen but the link)
+    reopens when sent again, as its reason tells the member to do once the wiki's app can read it.
     """
     with I._JOB_LOCK:
         sha = hashlib.sha256(data if data is not None else str(url).encode()).hexdigest()
         existing = I.find_job_by_sha(bundle, sha)
         if existing is not None:
+            item = M._read_item(bundle, existing["item"]) if (
+                data is None and planner.lark_link(str(url)) and existing.get("mode") == "inbox"
+                and isinstance(existing.get("item"), str)) else None
+            if item is not None and item["status"] == "needs_access" and [
+                    file.get("name") for file in item["files"]] == ["link.txt"]:
+                with contextlib.suppress(M.MaintError):  # an admin reopened it meanwhile
+                    M.admin_retry(bundle, item["id"], principal=submitter, reason="resubmitted")
+                return view(bundle, existing), False
             return view(bundle, existing), True
         file, outcome, reason = _freeze(data, filename, url)
         if outcome == "too_large":

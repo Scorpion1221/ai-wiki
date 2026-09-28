@@ -494,7 +494,7 @@ def next_item(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
                        if held else f"the workspace holds changes but run {state['run']} has no item in progress; "
                                     f"run ai-wiki maint begin --run {state['run']} to reset it",
                        "item": held, "changes": sorted(changed), "conflicts": pending}
-    closed = []  # member links this host could not read, closed on the way
+    closed = []  # member links this host could not read, closed (or parked) on the way
     while True:
         stop = ("budget" if len(state["taken"]) >= state["max_items"]
                 else "deadline" if _iso(_now()) >= state["deadline"] else None)
@@ -542,7 +542,8 @@ def next_item(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
 def _read_link(state: dict, item: dict) -> dict | None:
     """A member's Feishu/Lark link sent without its content (design §6): read here as the wiki's
     read-only Feishu app and frozen into the item beside the link. None when the item needs no
-    reading or its content is now frozen; else the resolution that closes it with the reason."""
+    reading or its content is now frozen; else the resolution that closes it with the reason, or
+    parks it for the next run when lark-cli timed out (a slow network says nothing about access)."""
     from aiwiki.runtime import changeset, secrets
 
     url = item["origin"].get("url")
@@ -550,9 +551,13 @@ def _read_link(state: dict, item: dict) -> dict | None:
             or [file.get("name") for file in item["files"]] != [LINK]):
         return None
     fetched, why = cli._lark_fetch(url, "bot")
+    if why == cli.LARK_TIMEOUT:
+        return {"outcome": "parked", "class": "transient", "reason": f"the wiki's Feishu app could not read it ({why})"}
     if fetched is None:
         return {"outcome": "needs_access", "reason": f"the wiki's Feishu app cannot read it ({why}): ingest the link "
-                                                     "where lark-cli reads it as you, or export it and ingest the file"}
+                                                     "where lark-cli reads it as you, or export it and ingest the "
+                                                     "file; once the app can read it, the same link sent again "
+                                                     "reopens this"}
     text, redactions = secrets.redact(fetched["text"])
     data = text.encode()
     if len(data) > changeset.limits()["packet_text_bytes"] - PACKET_HEADROOM:

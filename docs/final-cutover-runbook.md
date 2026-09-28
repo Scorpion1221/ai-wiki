@@ -520,8 +520,8 @@ this issue to done with --no-start.
 command -v lark-cli; lark-cli docs +fetch --doc <DOC_URL> --doc-format markdown --as bot >/dev/null 2>&1; echo "lark exit $?"
 ```
 
-`lark exit 0` passes. Member items closed `needs_access` before it was fixed reopen one by one
-(host):
+`lark exit 0` passes. A member link closed `needs_access` before it was fixed reopens when
+its member sends the same link again, or one by one here (host):
 
 ```bash
 curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/maint/items?bundle=solvely-wiki&status=needs_access&origin=member' \

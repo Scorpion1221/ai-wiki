@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import socket
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -423,6 +424,45 @@ def test_the_maintainer_reads_a_member_link_as_the_wiki_app(gate, tmp_path, monk
                                             parts)
     assert errors == [] and b"doxcnOK" in packet.data  # both parts, text: one packet the gate takes
     run(capsys, "maint", "end", "--run", "WAIO-7", "--state-dir", st)
+
+
+def test_an_unread_member_link_is_retried_not_lost(gate, tmp_path, monkeypatch, capsys) -> None:
+    """A lark-cli timeout parks the link for the next run (transient, a slow network says nothing
+    about access); a link closed needs_access reopens when its member sends it again, as the
+    reason tells them to once the wiki's app can read it."""
+    config, st, _log = maintainer_host(tmp_path, monkeypatch)
+    slow = ingest(gate, url=FEISHU + "?slow").json()
+    private = ingest(gate, url=FEISHU + "?private").json()
+    gate.connect("curator")
+    real_run = subprocess.run
+
+    def slow_run(args, *rest, **kwargs):
+        if Path(str(args[0])).name == "lark-cli" and "slow" in " ".join(map(str, args)):
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout"))
+        return real_run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", slow_run)
+    code, _begun = run(capsys, "maint", "begin", "--run", "WAIO-8", "--only", "inbox", "--config", config,
+                        "--state-dir", st)
+    assert code == 0
+    code, empty = run(capsys, "maint", "next", "--state-dir", st)
+    assert code == 10 and sorted(empty["closed"], key=lambda row: row["status"]) == [
+        {"item": private["item"], "status": "needs_access"}, {"item": slow["item"], "status": "parked"}], empty
+    parked = M.get_item(bundle(gate), slow["item"])
+    assert parked["attempts"]["counted"] == 0 and parked["attempts"]["history"][-1]["class"] == "transient"
+    assert job(gate, slow["id"])["status"] == "parked"
+
+    # The member shared the doc with the app and sends the link again: the same job, reopened.
+    again = ingest(gate, url=FEISHU + "?private").json()
+    assert (again["deduplicated"], again["id"], again["item"], again["status"]) == (
+        False, private["id"], private["item"], "ready")
+    assert M.get_item(bundle(gate), private["item"])["reopened"][-1]["reason"] == "resubmitted"
+    assert ingest(gate, url=FEISHU + "?slow").json()["deduplicated"] is True  # parked: it comes back by itself
+    run(capsys, "maint", "end", "--run", "WAIO-8", "--state-dir", st)
+    assert run(capsys, "maint", "begin", "--run", "WAIO-9", "--only", "inbox", "--config", config,
+               "--state-dir", st)[0] == 0
+    assert M.get_item(bundle(gate), slow["item"])["status"] == "ready"
+    run(capsys, "maint", "end", "--run", "WAIO-9", "--state-dir", st)
 
 
 def test_a_resubmission_relinks_an_item_whose_job_was_lost(gate, monkeypatch) -> None:

@@ -325,8 +325,12 @@ def _count_lines(shown: int, total: int | None = None) -> list[str]:
     return object_lines("count", values)
 
 
+LARK_TIMEOUT = "lark-cli timed out"
+
+
 def _lark_fetch(url: str, identity: str | None = None) -> tuple[dict | None, str | None]:
-    """A Feishu/Lark doc read here with lark-cli: ``(payload, None)``, else ``(None, why)``.
+    """A Feishu/Lark doc read here with lark-cli: ``(payload, None)``, else ``(None, why)``;
+    ``why`` is LARK_TIMEOUT when it took too long, which is no answer about access.
 
     The writer never fetches URLs: a member reads a doc as themself, the maintainer's host as
     the wiki's read-only app (``identity`` bot)."""
@@ -339,6 +343,8 @@ def _lark_fetch(url: str, identity: str | None = None) -> tuple[dict | None, str
                               capture_output=True, text=True, timeout=120, check=False)
         document = json.loads(done.stdout)["data"]["document"]
         content = document["content"]
+    except subprocess.TimeoutExpired:
+        return None, LARK_TIMEOUT
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return None, "lark-cli could not read it"
     if done.returncode or not isinstance(content, str) or not content.strip():

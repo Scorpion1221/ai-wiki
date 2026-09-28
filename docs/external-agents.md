@@ -154,7 +154,8 @@ writer's API is newer than the CLI, the bundle is not served, or a tool (`git`, 
   changeset curates it (with the commit) or the maintainer skips it (with the reason). A
   Feishu link is read on the member's machine with their own lark-cli; sent alone, the
   maintainer reads it as the wiki's app if its host has one (runbook step 2c), otherwise the
-  item closes `needs_access`.
+  item closes `needs_access`; sent again once the app can read it, the same link reopens it. A
+  lark-cli timeout parks it for the next run instead.
 
 ## 6. Swap the model or the runtime
 
