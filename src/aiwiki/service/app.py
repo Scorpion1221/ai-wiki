@@ -1210,6 +1210,9 @@ def admin_inbox_requeue(body: dict | None = None, bundle: str | None = None,
     take says why.
     """
     with _maint(bundle, authorization, "admin", area="admin", write=True) as (path, admin):
+        if not curate_runtime.agents_enabled():
+            raise HTTPException(status_code=409, detail="the Codex path is gone from this writer (AIWIKI_LLM=off): "
+                                                        "member items stay with the maintainer")
         if shutil.which(curate_runtime.AGENT_BIN) is None:
             raise HTTPException(status_code=409, detail="the Codex path is gone from this writer "
                                                         f"({curate_runtime.AGENT_BIN} not found): member items "

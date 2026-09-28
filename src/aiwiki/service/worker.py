@@ -701,7 +701,9 @@ def recover(bundles: list[Path]) -> bool:
         _save_job(job_path, job)
     for kind, bundle, subject, job_path in queued:
         if kind in CODEX_KINDS and not curate.agents_enabled():
-            continue  # stays queued on disk: a rollback to AIWIKI_LLM=codex runs it
+            if kind == "audit" and _audit_mode() != "codex":
+                _cancel_codex_audit(job_path)  # external auditors took over: it would never run
+            continue  # otherwise it stays queued on disk: a rollback to AIWIKI_LLM=codex runs it
         if kind == "audit":
             submit_audit(bundle, subject, job_path)
         elif kind == "changeset":

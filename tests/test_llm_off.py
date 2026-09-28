@@ -7,6 +7,7 @@ test. The real curate and audit runtimes stay in place.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ from gate_fixture import EVIDENCE, METRIC, Gate, git
 from aiwiki.cli import maint
 from aiwiki.runtime import audit, curate
 from aiwiki.service import ingest as I
+from aiwiki.service import maint_state as M
 from aiwiki.service import worker
 
 
@@ -78,6 +80,56 @@ def test_no_legacy_path_starts_a_process(tmp_path, monkeypatch) -> None:
     assert sorted(path.name for path in inbox.iterdir()) == ["dropped.md", "left.md"]
     # What the Codex writer left stays queued for a rollback to AIWIKI_LLM=codex.
     assert gate.job(ingest_job["id"])["status"] == gate.job(audit_job["id"])["status"] == "queued"
+
+
+def test_the_final_state_takes_members_and_reviews_without_an_agent(tmp_path, monkeypatch) -> None:
+    """The cut-over's flags together (runbook step 6): inbox intake and external audit keep
+    working under AIWIKI_LLM=off, and none of their paths reaches Codex. Only Git runs."""
+    gate = _gate(tmp_path, monkeypatch, AIWIKI_INTAKE="inbox", AIWIKI_AUDIT="external",
+                 AIWIKI_BACKLOG_EPOCH="2026-09-27T00:00:00Z")
+    owner = gate.headers("owner")
+    inbox = gate.writer / "sources" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "left.md").write_bytes(EVIDENCE)  # a Codex job holds it: the sweep leaves it alone
+    ingest_job = I.new_job(gate.writer, "sources/inbox/left.md", hashlib.sha256(EVIDENCE).hexdigest(), True,
+                           filename="left.md")
+    audit_job = I.new_audit_job(gate.writer, ingest_job["id"], [METRIC])
+    (inbox / "dropped.md").write_bytes(b"# dropped out of band\n")
+    real, others, swept = subprocess.Popen, [], []
+
+    def only_git(args, *rest, **kwargs):
+        if Path(args[0]).name != "git":
+            others.append(args)
+            raise AssertionError(f"a non-Git process was started under AIWIKI_LLM=off: {args!r}")
+        return real(args, *rest, **kwargs)
+
+    monkeypatch.setattr(worker, "start_sweeper", lambda bundles: swept.append(worker.sweep_once(bundles())))
+    monkeypatch.setattr(subprocess, "Popen", only_git)
+
+    with TestClient(gate.appmod.app) as client:  # startup: recovery, the worker, the sweeper
+        modes = client.get("/whoami", headers=owner).json()["modes"]
+        assert (modes["intake"], modes["audit"], modes["llm"]) == ("inbox", "external", "off")
+        member = client.post("/ingest", params={"bundle": "kb-a"}, headers=gate.headers("member"),
+                             json={"text": "# a member's notes\n", "title": "notes"})
+        assert member.status_code == 200 and member.json()["status"] == "ready", member.text
+        # kb-b does not commit, so inbox intake does not apply there and only Codex could curate it.
+        elsewhere = client.post("/ingest", params={"bundle": "kb-b"}, headers=gate.headers("member"),
+                                json={"text": "# a member's notes\n"})
+        assert elsewhere.status_code == 409 and "AIWIKI_LLM=off" in elsewhere.json()["detail"]
+        requeue = client.post("/admin/inbox/requeue", params={"bundle": "kb-a"}, headers=owner, json={})
+        assert requeue.status_code == 409 and "AIWIKI_LLM=off" in requeue.json()["detail"]
+        audit_route = client.post(f"/jobs/{ingest_job['id']}/audit", params={"bundle": "kb-a"}, headers=owner)
+        assert audit_route.status_code == 409 and "GET /audit/backlog" in audit_route.json()["detail"]
+        backlog = client.get("/audit/backlog", params={"bundle": "kb-a"}, headers=gate.headers("auditor"))
+        assert backlog.status_code == 200 and backlog.json()["mode"] == "external", backlog.text
+
+    worker._q.join()
+    assert others == [] and swept == [1]
+    origins = sorted(item["origin"]["via"] for item in M.list_items(gate.writer)["items"])
+    assert origins == ["drop", "ingest"]
+    # A Codex audit left queued never runs under external audit; a Codex ingest waits for a rollback.
+    assert gate.job(audit_job["id"])["status"] == "cancelled"
+    assert gate.job(ingest_job["id"])["status"] == "queued"
 
 
 def test_the_sweeper_still_scans_drops_but_queues_no_codex_curation(tmp_path, monkeypatch) -> None:
