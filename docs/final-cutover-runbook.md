@@ -23,7 +23,9 @@ gateway credential and admin's lark-cli login off the writer host, with backups.
 
 Every step below has its verification and its rollback; §13 rolls back to the legacy path
 from any point. Until step 11, rolling back is removing the step 6 drop-in and restoring
-Multica settings from the archive step 1 makes; after it, restore step 11's backup first.
+Multica settings from the archive step 1 makes; after it, restore step 11's backup first and,
+once the credentials it holds are revoked, install and prove new ones before anything goes back
+to Codex (step 11's rollback).
 
 Requires the merged build of the three final-state units, which step 0's checks look for:
 
@@ -60,6 +62,12 @@ Requires the merged build of the three final-state units, which step 0's checks 
   legacy issue delta and the new issues collector both skip issues with `ai_wiki_*`
   metadata, so cut-over commands and their output never become wiki sources. Read the
   agent's comment with `multica issue comment list <issue-id> --output json`.
+
+  A **smoke issue** proves an agent's runtime still reaches its model after a credential
+  changes: title `[OPS] AI Wiki smoke`, assigned to that agent, marked `ai_wiki_ops`, text
+  `One-time operations task from the owner. Run exactly id -un and nothing else; post one
+  comment with its output, then set this issue to done with --no-start.` It passes when the
+  issue is done with that comment.
 - **auditor host**: the host of the Auditor agent's runtime, `AUDITOR_RUNTIME`. The owner's
   default is Codex (GPT) on the Codex Gateway runtime; it qualifies only if step 2's
   isolation gate passes, which a runtime under the maintainer's OS user on the maintainer's
@@ -68,9 +76,11 @@ Requires the merged build of the three final-state units, which step 0's checks 
   another OS user.
 
 Day −1 (owner online): the gateway rotation and steps 0 to 2d, none of which changes
-production's behaviour. Day 0: step 3 right after the 04:00 CST legacy run finishes, then 4
-to 11 in one sitting (about four hours, step 6 not before 06:30 CST). There is no waiting
-period: the canary (step 8) is the gate, and step 11's backups stay 30 days for a rollback.
+production's behaviour, provided the rotation's inventory (operator step 1) handed every other
+consumer of that token the new one. Day 0: step 3 right after the 04:00 CST legacy run
+finishes, then 4 to 11 in one sitting (about four hours, step 6 not before 06:30 CST). There
+is no waiting period: the canary (step 8) is the gate. Step 11's backups keep the removed
+files 30 days, not working credentials: a rollback after its revocations installs new ones.
 Never restart the writer between 03:30 and 06:30 CST, nor while a job or lease is live
 (`restart_idle` refuses those).
 
@@ -84,12 +94,17 @@ point is §13 (issue RB1).
 1. **Rotate the model gateway token, now.** Where: the gateway console (gateway.ddit.ai). The
    commented `ANTHROPIC_AUTH_TOKEN` line of aliyun-jp's world-readable `/etc/environment`
    holds it, and a review transcript printed it; nothing on the host uses the line, and step
-   11 deletes it. Verify: the old value gets 401 at the gateway. Rollback: none. Owner: yes.
+   11 deletes it. First list every consumer of that exact token: the console's usage of it
+   (clients, source addresses, last use) and the model settings of each Multica runtime host
+   (`df0fb673`, the auditor host), and hand each consumer that must keep working the new
+   token in the same sitting. Verify: the old value gets 401 at the gateway, and a smoke
+   issue on `$PROD_AGENT` (and on `$AUDITOR_AGENT`, once it exists) passes. Rollback: none; a
+   consumer the inventory missed gets the new token. Owner: yes.
 2. **Step 0: merge, deploy procedure (§10.3), deploy.** Where: laptop; the deploy script
    reaches the host. Verify: step 0's checks print every marker and `inbox external off`, CI
    is green on `$MERGE_SHA`, the host serves `$MERGE_SHA`, and `/whoami` shows today's modes
-   plus `"llm":"codex"`. Rollback: `deploy_aliyun.sh <checkout> 9d62536`, and
-   `deploy_aliyun.sh.pre-final`. Owner: yes (approves the merge).
+   plus `"llm":"codex"`. Rollback, only before step 6 (§0): `deploy_aliyun.sh <checkout>
+   9d62536`, and `deploy_aliyun.sh.pre-final`. Owner: yes (approves the merge).
 3. **Step 1: pre-flight, backups, archive, member notice.** Where: host (H1–H10, backups, the
    Phase 2 owner token shredded), laptop (the `$FL` archive), the members' channel. Verify:
    every H check prints what its comment says; `$FL` holds the agent, autopilot and skill
@@ -130,7 +145,7 @@ point is §13 (issue RB1).
     `writer_agent {"runtime":"off"}`, 409 on the Codex audit route, `/audit/backlog`
     answers, no codex process, and a member submission to the shadow bundle answers `ready`.
     Rollback: remove the drop-in and restart, then `ai-wiki admin inbox requeue` per bundle
-    (§6); after step 11, its rollback first. Owner: no.
+    (§6); after step 11, its rollback first, with new credentials once revoked. Owner: no.
 12. **Step 7: the legacy token to read and submit.** Where: host. Verify: the legacy token's
     `/whoami` shows `["read","submit"]`. Rollback: §7. Owner: no.
 13. **Step 8: canary, one item and one audit run, then the schedules.** Where: laptop, host.
@@ -144,8 +159,10 @@ point is §13 (issue RB1).
     `audit:solvely-wiki` check; R3's comment; two crontab lines. Rollback: §10.1 and §10.2.
     Owner: yes (the Feishu webhook for R3).
 16. **Step 11: remove the Codex config, the gateway credential and the lark-cli login.**
-    Where: host; the gateway and Feishu consoles. Verify: §11's checks. Rollback: §11's block,
-    then §6's. Owner: yes (the revocations).
+    Where: host; the gateway and Feishu consoles. Verify: §11's checks, and after the
+    revocations the smoke issues on both agents (and R4 if step 2c is enabled). Rollback:
+    §11's block, with new credentials once revoked, then §6's. Owner: yes (the inventory and
+    the revocations).
 17. **Afterwards, when wanted: the owner's own review** (§14). Where: laptop. Verify:
     `review end` counts; the concept's trust is `human-reviewed`. Rollback: `ai-wiki admin
     revert --changeset <id>` of that audit changeset. Owner: yes.
@@ -183,7 +200,12 @@ deploy_aliyun.sh <checkout> "$MERGE_SHA"          # refuses while a writer job o
 Verify (host): `cat /home/admin/app/.ai-wiki-deployed-revision` prints `$MERGE_SHA`, the
 mirror image is `ai-wiki:…-<MERGE_SHA short>`, and §1 H3 shows today's modes plus `"llm":"codex"`.
 Rollback: `deploy_aliyun.sh <checkout> 9d62536`. The new routes and flags are unused until
-step 6, so the old build serves exactly as before.
+step 6, so the old build serves exactly as before. That holds only before step 6: from then
+on 9d62536 refuses to start on `phase3-final.conf` (it knows neither `AIWIKI_INTAKE=inbox` nor
+`AIWIKI_AUDIT=external`), has no `admin inbox requeue` for the member items, and its recovery
+would rewrite the `audit` summary of every committed audit changeset. After step 6, roll back
+with §13, which keeps this build (its default `AIWIKI_LLM=codex` is the legacy path), and fix
+a defect of this build by deploying forward, never 9d62536.
 
 ## 1. Pre-flight
 
@@ -281,14 +303,14 @@ stat -c '%U:%G %a %n' /home/admin/.local/bin/codex-9router /home/admin/.config/s
 # H8. Idle, and no Codex job waiting.
 idle && echo idle; codex_jobs                                               # idle; 0
 curl -s -H @$FS/legacy.h 'http://127.0.0.1:8788/jobs/pending-audit?bundle=solvely-wiki&older_than_hours=0' \
-  | jq -c '{total, unscoped}'                                              # record it; step 6 hands these to the backlog
+  | jq -c '{total, unscoped}'                                              # record it: from step 6 these are seed (below)
 df -BG --output=avail /var/lib | tail -1                                    # >= 2G
 # H9. The watchdog has somewhere to page (step 10).
 grep -c '^AIWIKI_WATCHDOG_FEISHU_WEBHOOK=.' /etc/ai-wiki-watchdog.env        # 1, else add the webhook first
 # H10. The rest of what step 11 removes (names only).
 grep -oE '^[# ]*[A-Za-z_]+=' /etc/environment         # PATH= and the commented #ANTHROPIC_BASE_URL= #ANTHROPIC_AUTH_TOKEN=
 systemctl cat ai-wiki-worker.service | grep -E '^(# /|EnvironmentFile=)'   # record where each EnvironmentFile= comes from
-ls -d /home/admin/.lark*                             # admin's lark-cli login directory: record it as LARK for step 11
+ls -d /home/admin/.lark* /home/admin/.local/share/lark-cli 2>/dev/null   # admin's lark-cli config and credential store: record every path as LARK for step 11
 ```
 
 If any check fails, stop. Then back up what later steps change:
@@ -602,9 +624,9 @@ Stop without running the rest if the first line prints STOP, or if find exits wi
 Verify from the comment: `find exit 0` and its `completed_at` is the 04:00 run's; import-v4
 rows `repos` and `issues` `created`; import-ledger `imported` (items `created`), with
 `in_flight` empty (else a legacy ingest was still landing: roll back and rerun later) and
-`audit_pending` listed (their concepts reach the Auditor's backlog in step 6); `maint status`
-shows both cursors with `run` `final-cutover-R2` and the ready items. On the host,
-`status_w solvely-wiki | jq -c '{cursors, items}'` shows the same.
+`audit_pending` listed (from step 6 their concepts are seed of the Auditor's backlog, step
+6); `maint status` shows both cursors with `run` `final-cutover-R2` and the ready items. On
+the host, `status_w solvely-wiki | jq -c '{cursors, items}'` shows the same.
 
 Rollback (host, when `status_w solvely-wiki | jq '.leases'` shows no live lease):
 `as_admin mv $PROD/.okf/maint $PROD/.okf/maint.unimported-$(date +%F)`. The ledger was only
@@ -684,6 +706,7 @@ Environment=AIWIKI_INTAKE=inbox
 Environment=AIWIKI_AUDIT=external
 Environment=AIWIKI_LLM=off
 Environment=AIWIKI_BACKLOG_EPOCH=$EPOCH
+Environment=AIWIKI_AUDIT_SEED_PER_DAY=30
 Environment=AIWIKI_CODEX_AUDIT_MANUAL=
 EOF
 systemctl daemon-reload
@@ -692,6 +715,14 @@ systemctl daemon-reload
 
 On `STOP`, rerun the last line once idle: the drop-in takes effect only at that restart.
 
+Every concept generated before the epoch and not verified in its current version is **seed**:
+the unverified ones, including the concepts of H8's pending-audit ingests and R2's
+`audit_pending`, the newest legacy curations. The backlog releases seed oldest first, so at the
+default 10 a day the newest would wait about a week, and the 72 h alert does not measure seed.
+The Auditor reviews up to 40 concepts a day (20 a run, twice), so 30 seed a day leaves room for
+new work and releases a seed of about 70 to 80 concepts (the unverified count `ai-wiki health`
+shows, plus verifications older than their version) within three days.
+
 Verify:
 
 ```bash
@@ -699,6 +730,7 @@ systemctl is-active ai-wiki-worker                                              
 whoami_w | jq -c '.modes | {intake, audit, changesets_commit, codex_audit_manual, llm}'
 #   {"intake":"inbox","audit":"external","changesets_commit":["solvely-wiki","solvely-wiki-shadow"],
 #    "codex_audit_manual":[],"llm":"off"}
+status_w solvely-wiki | jq -c '.audit.seed'                                         # per_day 30, waiting …
 curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/health?bundle=solvely-wiki' | jq -c '{bundle, concepts, build, writer_agent}'
 #   writer_agent {"runtime":"off"}
 curl -s -o /dev/null -w '%{http_code}\n' -X POST -H @$FS/owner.h \
@@ -723,11 +755,15 @@ curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' \
 ```
 
 Rollback, when idle, and only while the Codex configuration is on the host (after step 11,
-first its rollback): `rm $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`;
-`/whoami` shows today's modes again (compare with `$FS/modes.before.json`). Then hand the
-member items that arrived meanwhile back to Codex, per bundle, from the laptop with the owner
-token and a throwaway CLI config as in 8a. The requeue answers 409 while `AIWIKI_LLM=off` or
-without the Codex binary, so only after that restart:
+first its rollback, which installs and proves new credentials once the old ones are revoked):
+`rm $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`; `/whoami` shows
+today's modes again (compare with `$FS/modes.before.json`), and
+`curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/health?bundle=solvely-wiki' | jq -c .writer_agent`
+shows `"runtime":"codex"` with the wrapper as `bin`. Then hand the member items that arrived
+meanwhile back to Codex, per bundle, from the laptop with the owner token and a throwaway CLI
+config as in 8a. The requeue answers 409 while `AIWIKI_LLM=off` or without the Codex binary,
+but it cannot tell a revoked key: every item it hands to a dead credential ends as a failed
+Codex job. So only after that restart and that check:
 
 ```bash
 uv run ai-wiki -b solvely-wiki admin inbox requeue --reason 'intake rolled back' --json
@@ -754,8 +790,8 @@ would reach it.
 jq '(.principals[] | select(.id == "member:legacy-token")) .scopes = ["read", "submit"]' \
    /etc/ai-wiki/principals.json > /etc/ai-wiki/.principals.json.new
 chown root:admin /etc/ai-wiki/.principals.json.new && chmod 0640 /etc/ai-wiki/.principals.json.new
-mv /etc/ai-wiki/.principals.json.new /etc/ai-wiki/principals.json
-AIWIKI_TOKEN="$(legacy_token)" pp check && hup
+AIWIKI_TOKEN="$(legacy_token)" pp --file /etc/ai-wiki/.principals.json.new check \
+  && mv /etc/ai-wiki/.principals.json.new /etc/ai-wiki/principals.json && hup
 curl -s -H @$FS/legacy.h http://127.0.0.1:8788/whoami | jq -c '{principal, scopes, role}'
 #   member:legacy-token, ["read","submit"], member
 ```
@@ -918,11 +954,16 @@ case "$live" in
 esac
 systemctl show ai-wiki-watchdog -p ExecStart --value | grep -c -- '--writer-url http://127.0.0.1:8788'   # 1
 systemd-run --quiet --wait --pipe -p User=admin -p EnvironmentFile=/etc/ai-wiki-watchdog.env \
+  /usr/bin/env -u AIWIKI_WATCHDOG_FEISHU_WEBHOOK -u AIWIKI_WATCHDOG_FEISHU_SECRET \
   /home/admin/app/.venv/bin/python /usr/local/bin/ai-wiki-watchdog --bundle $PROD \
   --writer-url http://127.0.0.1:8788 --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   | jq -c '{status, audit: .checks["audit:solvely-wiki"], errors: [.errors[].check]}'
 #   audit {"mode":"external","pending":…}, no audit:solvely-wiki error (a replay never notifies)
 ```
+
+The replay keeps only the token of that file: with the webhook set, the watchdog wants a
+dedup `--state-file` and refuses a `--now` replay (exit 2), and `EnvironmentFile=` overrides
+anything `-E` would blank.
 
 What the writer side pages on: a member's submission waiting in ready over 24 h (it missed a
 daily run), any item over 72 h or needing a human, a cursor that has not advanced for 30 h, a
@@ -995,21 +1036,37 @@ The deploy script lives outside this repository. Apply before step 0's deploy:
    maintainer or auditor lease is live. Leases are files the writer removes on release:
 
    ```bash
-   ssh aliyun-jp sudo -u admin /home/admin/app/.venv/bin/python - <<'PY' || { echo 'writer busy'; exit 1; }
+   ssh aliyun-jp sudo -u admin /home/admin/app/.venv/bin/python - <<'PY'
    import glob, json, sys
    from datetime import datetime, timezone
-   now, busy = datetime.now(timezone.utc), []
+   now, busy, unreadable = datetime.now(timezone.utc), [], []
+   def load(path):
+       try:
+           value = json.load(open(path))
+       except (OSError, ValueError):
+           value = None
+       if not isinstance(value, dict):
+           unreadable.append(path)
+       return value if isinstance(value, dict) else {}
    for bundle in ("/home/admin/solvely-wiki", "/var/lib/ai-wiki/bundles/solvely-wiki-shadow"):
        for path in glob.glob(f"{bundle}/.okf/jobs/*.json"):
-           if json.load(open(path)).get("status") in ("queued", "running"):
+           if load(path).get("status") in ("queued", "running"):
                busy.append(path)
        for path in glob.glob(f"{bundle}/.okf/maint/lease-*.json"):
-           expires = json.load(open(path)).get("expires_at") or ""
-           if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) > now:
-               busy.append(path)
-   print("\n".join(busy))
-   sys.exit(1 if busy else 0)
+           expires = str(load(path).get("expires_at") or "")
+           try:
+               if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) > now:
+                   busy.append(path)
+           except ValueError:
+               unreadable.append(path)
+   print("\n".join(["busy: " + path for path in busy] + ["unreadable: " + path for path in unreadable]))
+   sys.exit(1 if busy else 2 if unreadable else 0)
    PY
+   case $? in
+     0) ;;
+     1) echo 'writer busy'; exit 1 ;;
+     *) echo 'unreadable job or lease files (listed above): inspect them by hand before deploying'; exit 1 ;;
+   esac
    ```
 
 2. **Run windows**: besides the existing 03:30–06:30 CST rule (the maintainer's 04:00 run),
@@ -1018,12 +1075,13 @@ The deploy script lives outside this repository. Apply before step 0's deploy:
 3. **After the deploy**, compare the writer's `/whoami` `.modes` with the ones before it,
    read with the token the script already uses for its health checks: the flags live in
    drop-ins, not the app directory, so a deploy must not change them. Compare only the keys
-   the old build reported: a key the new build adds is new, not changed (step 0's deploy adds
-   `llm`, whose value step 0's own check reads):
+   both builds report: a key one build adds is new, not changed (step 0's deploy adds `llm`,
+   whose value step 0's own check reads, and step 0's rollback removes it again):
 
    ```bash
    jq -n --argjson a "$BEFORE" --argjson b "$AFTER" \
-     '($a | keys) as $k | ($b | with_entries(select(.key as $x | $k | index($x)))) == $a' | grep -qx true \
+     '(($a | keys) - (($a | keys) - ($b | keys))) as $k
+      | [$a, $b] | map(with_entries(select(.key | IN($k[])))) | .[0] == .[1]' | grep -qx true \
      || { echo 'modes changed by the deploy'; exit 1; }
    ```
 
@@ -1034,9 +1092,11 @@ Rollback: `deploy_aliyun.sh.pre-final`.
 ## 11. Remove the Codex config, the gateway credential and the lark-cli login (host)
 
 Right after steps 8 to 10, in the same sitting: with `AIWIKI_LLM=off` the writer reads none of
-this, and the backups below keep a rollback possible for 30 days (design §8.4 and §9 phase 5).
-`/home/admin/.codex` stays: it is admin's own interactive Codex login (a `codex` session and
-the `codex-auth` daemon use it), not the writer's. `LARK` is the directory H10 listed.
+this, and the backups below keep the files 30 days for a rollback (design §8.4 and §9 phase 5),
+which needs new credentials once the old ones are revoked. `/home/admin/.codex` stays: it is
+admin's own interactive Codex login (a `codex` session and the `codex-auth` daemon use it), not
+the writer's. `LARK` is every path H10 listed: the lark-cli configuration and its credential
+store (`~/.local/share/lark-cli` on this host).
 
 ```bash
 whoami_w | jq -r .modes.llm                                                   # off, else stop: step 6 first
@@ -1044,7 +1104,7 @@ grep -rlsE 'codex-gateway|codex-9router' /home/admin/.bashrc /home/admin/.profil
   && echo 'STOP: something else uses the 9Router wrapper or its secret; keep them' || echo unused-elsewhere
 grep -rlsE 'lark-cli' /etc/cron* /var/spool/cron /etc/systemd/system /home/admin/.bashrc /home/admin/.profile \
   && echo 'STOP: a job runs lark-cli; keep its login' || echo lark-unused
-LARK=<the directory H10 listed>; test -d "$LARK" && echo "$LARK"
+LARK="<every path H10 listed, space-separated>"; for d in $LARK; do test -e "$d" && echo "$d"; done
 ```
 
 Only after `off`, `unused-elsewhere` and `lark-unused`:
@@ -1053,8 +1113,8 @@ Only after `off`, `unused-elsewhere` and `lark-unused`:
 TS=$(date -u +%Y%m%dT%H%M%SZ); BK=$FS/codex-host-$TS; install -d -m 0700 $BK
 cp -a $DROPIN $BK/worker.service.d && cp -a /etc/environment $BK/environment
 tar -C /home/admin -czpf $BK/admin-codex.tgz .ai-wiki/config.json .local/bin/codex-9router \
-    .config/secrets/codex-gateway.env "${LARK#/home/admin/}"
-chmod 600 $BK/admin-codex.tgz $BK/environment && tar -tzf $BK/admin-codex.tgz | head   # the three files and the lark-cli directory
+    .config/secrets/codex-gateway.env $(for d in $LARK; do echo "${d#/home/admin/}"; done)
+chmod 600 $BK/admin-codex.tgz $BK/environment && tar -tzf $BK/admin-codex.tgz | head   # the three files and the lark-cli paths
 mv $DROPIN/codex-runtime.conf $DROPIN/zz-agent-config.conf $BK/ && systemctl daemon-reload
 systemctl cat ai-wiki-worker.service | grep -E '^EnvironmentFile='          # EnvironmentFile=/etc/environment only, else STOP
 cat > $DROPIN/zz-no-etc-environment.conf <<'EOF'
@@ -1067,7 +1127,8 @@ sed -i '/^[[:space:]]*#\?[[:space:]]*ANTHROPIC_/d' /etc/environment
 systemctl daemon-reload
 as_admin shred -u /home/admin/.config/secrets/codex-gateway.env
 as_admin rm /home/admin/.local/bin/codex-9router /home/admin/.ai-wiki/config.json
-as_admin rm -r "$LARK"
+as_admin bash -lc 'lark-cli auth logout --json' | head -c 200; echo       # the local user login; loggedOut true
+for d in $LARK; do as_admin rm -r "$d"; done
 as_admin env -i HOME=/home/admin PATH=/usr/local/bin:/usr/bin:/bin git -C $PROD fetch --dry-run origin && echo git-ok
 restart_idle
 ```
@@ -1082,15 +1143,27 @@ systemctl show ai-wiki-worker -p Environment --value | tr ' ' '\n' | grep -cE '^
 grep -c ANTHROPIC /etc/environment                                                     # 0
 whoami_w | jq -r .modes.llm                                                            # off
 curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/health?bundle=solvely-wiki' | jq -c .writer_agent   # {"runtime":"off"}
-for f in /home/admin/.config/secrets/codex-gateway.env /home/admin/.local/bin/codex-9router "$LARK"; do
+for f in /home/admin/.config/secrets/codex-gateway.env /home/admin/.local/bin/codex-9router $LARK; do
   test ! -e "$f" || echo "still there: $f"; done; echo checked
 ```
 
-The gateway token in `/etc/environment` was world-readable (and a review's transcript saw it),
-and the backup holds a live 9Router key: the owner revokes both at their gateways now, and
-the lark-cli app login in the Feishu console. Keep `$BK` root-only for 30 days, then `shred -u
-$BK/admin-codex.tgz $BK/environment`. A rollback after the revocations needs new credentials.
-Rollback:
+The gateway token in `/etc/environment` was world-readable (and a review's transcript saw it;
+operator step 1 rotated it), and the backup holds a live 9Router key and admin's Feishu login.
+The owner revokes them now, each after the inventory of operator step 1 for that exact
+credential, since the files above were only this host's copies:
+
+- **The 9Router key** of `codex-gateway.env`: its usage in the 9Router console, and the model
+  settings of the maintainer's runtime and of the auditor host (the Auditor's Codex Gateway
+  runtime may use the same key). Revoke it once no consumer that must keep working holds it;
+  hand such a consumer a new key first, in this sitting.
+- **Admin's Feishu login**: `auth logout` above cleared it on this host only; cancel admin's
+  authorization of that app in Feishu's authorization management. Rotate the app's secret only
+  if it is not the wiki's read-only app of step 2c (compare the app ids in the Feishu developer
+  console): the maintainer's host reads members' links with that secret.
+
+Then a smoke issue on `$PROD_AGENT` and one on `$AUDITOR_AGENT` must pass, and R4 again if step
+2c is enabled. Keep `$BK` root-only for 30 days, then `shred -u $BK/admin-codex.tgz
+$BK/environment`. Rollback:
 
 ```bash
 tar -C /home/admin -xzpf $BK/admin-codex.tgz && cp -a $BK/environment /etc/environment
@@ -1098,7 +1171,20 @@ rm $DROPIN/zz-no-etc-environment.conf
 mv $BK/codex-runtime.conf $BK/zz-agent-config.conf $DROPIN/ && systemctl daemon-reload
 ```
 
-and then step 6's rollback (a writer with `AIWIKI_LLM=off` reads none of it).
+Once the 9Router key is revoked, the restored `codex-gateway.env` holds a dead key: write a newly
+issued one into it (read from the terminal, never an argument) and prove the wrapper with one
+inference, as docs/codex-integration.md's acceptance does, before anything goes back to Codex:
+
+```bash
+as_admin bash -c 'umask 077; read -rs K; printf "CODEX_GATEWAY_API_KEY=%s\n" "$K" > /home/admin/.config/secrets/codex-gateway.env'
+as_admin env -i HOME=/home/admin PATH=/usr/local/bin:/usr/bin:/bin CODEX_HOME="$(as_admin mktemp -d)" \
+  /home/admin/.local/bin/codex-9router exec --skip-git-repo-check --cd /tmp -s read-only \
+  'Reply with exactly AIWIKI_AGENT_OK' | tail -1                                   # AIWIKI_AGENT_OK
+```
+
+The legacy writer never reads Feishu (its Codex has no network), so the Feishu login need not
+come back. Then step 6's rollback (a writer with `AIWIKI_LLM=off` reads none of this), whose
+`writer_agent` check comes before any requeue.
 
 Finally, `shred -u $FS/owner.h $FS/legacy.h` on the host, and `unset AIWIKI_TOKEN` on the laptop.
 
@@ -1124,12 +1210,15 @@ after step 5, in this order (skip what never ran):
 
 1. **Stop the new runs** (laptop): `multica autopilot update $PROD_AP --status paused` and
    `multica autopilot update $AUDITOR_AP --status paused`. Wait until the host's `idle` passes.
-2. **The writer back to Codex** (host): step 11's rollback if it ran, then
+2. **The writer back to Codex** (host): step 11's rollback if it ran, with a new 9Router key
+   proven by its wrapper inference once the old one is revoked, then
    `rm -f $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`.
-   `whoami_w | jq -c .modes` equals `$FS/modes.before.json`. Hand member items back to Codex
-   with `ai-wiki -b <bundle> admin inbox requeue --reason 'intake rolled back'` for both
-   bundles (step 6's rollback: after the restart, since it answers 409 under
-   `AIWIKI_LLM=off`), and widen the legacy token again (step 7's rollback).
+   `whoami_w | jq -c .modes` equals `$FS/modes.before.json`, and `/health` shows
+   `writer_agent` `"runtime":"codex"` (step 6's rollback). Only then hand member items back to
+   Codex with `ai-wiki -b <bundle> admin inbox requeue --reason 'intake rolled back'` for both
+   bundles (it answers 409 under `AIWIKI_LLM=off`, but not on a revoked key: each item it
+   hands to a dead credential ends as a failed Codex job), and widen the legacy token again
+   (step 7's rollback). Keep this build: 9d62536 no longer fits the state step 6 left (§0).
 3. **The agent back to the legacy flow** (laptop): step 5's rollback block.
 4. **The cursors and unfinished items back to the ledger** (issue RB1 below): the writer's
    cursors as a v4 checkpoint on the newest run issue, so the legacy `find` picks them up, and
