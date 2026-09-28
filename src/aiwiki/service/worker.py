@@ -64,6 +64,11 @@ def actor_of(principal: str, bundle: str, kind: str = "curate") -> str | None:
     return None  # until the app installs its principals
 
 
+def may_submit(principal: str, bundle: str) -> bool:
+    """Whether a principal now in force may still submit to ``bundle``: its intake commit runs."""
+    return False  # until the app installs its principals
+
+
 def auditors() -> frozenset[str]:
     """Auditor-class actors (design §5.3); the app adds its principals holding the audit scope."""
     return audit.AUDITOR_ACTORS
@@ -417,7 +422,7 @@ def _run() -> None:
                     elif kind == "revert":
                         revert.run(bundle, job_path)
                     elif kind == "intake":
-                        inbox.commit(bundle, job_path)
+                        _run_intake(bundle, job_path)
                     else:
                         curate.run(bundle, subject, job_path)
                 finally:
@@ -429,6 +434,15 @@ def _run() -> None:
             if event is not None:
                 event.set()
             _q.task_done()
+
+
+def _run_intake(bundle: Path, job_path: Path) -> None:
+    """Admit an intake commit again as it runs, as a changeset is (design §2.11, §8.5). While
+    inbox intake does not apply to its bundle (rolled back to curate, or AIWIKI_DISABLE=changesets)
+    the job stays queued, and the sweep hands it over once it applies again; a submitter no
+    longer in force fails it with nothing committed."""
+    if inbox_intake(bundle):
+        inbox.commit(bundle, job_path, lambda principal: may_submit(principal, bundle.name))
 
 
 def _skip_reverted(job_path: Path) -> None:
@@ -591,14 +605,14 @@ def sweep_once(bundles: list[Path]) -> int:
     work item and commit it. Deduped by content sha. Returns #queued (#registered).
 
     An upload's stored name carries its sha (``ingest.write_source``): once a job knows it, the
-    file is not read again, so the uploads inbox intake keeps never slow the sweep down. The
-    sweep also hands the worker every intake commit still to make, even after inbox intake is
-    rolled back: one queued and not already waiting, or failed and due for its retry
-    (``inbox.pending_intakes``)."""
+    file is not read again, so the uploads inbox intake keeps never slow the sweep down. While
+    inbox intake applies, the sweep also hands the worker every intake commit still to make: one
+    queued and not already waiting, or failed and due for its retry (``inbox.pending_intakes``).
+    After a rollback they wait, uncommitted, until it applies again."""
     with serialized_lifecycle():
         queued = 0
         for b in bundles:
-            for pending in inbox.pending_intakes(b):
+            for pending in inbox.pending_intakes(b) if inbox_intake(b) else ():
                 if pending not in _finished:
                     submit_intake(b, pending)
             drops = b / "sources" / "inbox"

@@ -16,6 +16,7 @@ reads as the service's own. The item records the path and commit (``intake``), a
 answers with them. The copy sits apart from the Git-ignored drop zone the sweep scans, so the
 sweep never takes it for a drop. A failed commit leaves the item ready; the sweep queues the job
 again once its failure's retry time has passed. A link sent alone has no content to commit.
+Only while inbox intake applies to the bundle does the worker commit one (``worker._run_intake``).
 
 The writer never fetches a URL. A Feishu/Lark link sent without its content waits for the
 maintainer, whose ``maint next`` reads it as the wiki's read-only Feishu app; any other link is
@@ -33,6 +34,7 @@ import json
 import re
 import subprocess
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -219,14 +221,15 @@ def _intake_state(bundle: Path, intake_id: object) -> dict:
     return state
 
 
-def commit(bundle: Path, job_path: Path) -> None:
+def commit(bundle: Path, job_path: Path, may_submit: Callable[[str], bool]) -> None:
     """Run one queued intake job: commit and push the redacted copy of a member submission.
 
     The serial worker holds the writer lock. It is the writer transaction of a revert without
     a gate: a clean tree, a strict pre-sync, the commit and its push (a rejected push rebases
     and retries, a lost acknowledgement counts as pushed), and a rollback on any failure. The
     bytes are the item's frozen file, re-hashed; a text copy still matching a secret rule is
-    never committed. A copy Git already holds (another submission's, or a lost answer's) is
+    never committed, nor is the submission of a principal ``may_submit`` no longer admits (a
+    revoked token). A copy Git already holds (another submission's, or a lost answer's) is
     done with the commit that holds it. Never raises.
     """
     try:
@@ -238,7 +241,7 @@ def commit(bundle: Path, job_path: Path) -> None:
     root = None
     try:
         root = curate._repo_root(bundle)
-        _commit(root, bundle, job, job_path)
+        _commit(root, bundle, job, job_path, may_submit)
     except Exception as exc:  # noqa: BLE001 — record any failure on the job, never crash the worker
         git_timeout = isinstance(exc, subprocess.TimeoutExpired)
         job.update(status="failed", error=repr(exc), failure=failure(
@@ -250,7 +253,11 @@ def commit(bundle: Path, job_path: Path) -> None:
     curate._save(job_path, job)
 
 
-def _commit(root: Path | None, bundle: Path, job: dict, job_path: Path) -> None:
+def _commit(root: Path | None, bundle: Path, job: dict, job_path: Path,
+            may_submit: Callable[[str], bool]) -> None:
+    if job.get("submitter") is not None and not may_submit(job["submitter"]):
+        return _failed(job, "auth", "intake", f"{job['submitter']} may no longer submit to this bundle; "
+                                              "nothing is committed")
     if root is None or root.resolve() != bundle.resolve():
         return _failed(job, "internal", "intake", "an intake commit needs a bundle that is its own Git repository",
                        retryable=False)

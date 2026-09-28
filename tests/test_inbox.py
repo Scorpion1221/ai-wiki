@@ -332,7 +332,7 @@ def test_an_intake_commit_killed_after_its_push_is_recorded_by_recover(gate, mon
 
     monkeypatch.setattr(curate, "_git", killed_after_push)
     with pytest.raises(_Killed):
-        inbox.commit(bundle(gate), path)
+        worker._run_intake(bundle(gate), path)
     monkeypatch.setattr(curate, "_git", real)
     assert I.read_job(bundle(gate), path.stem)["status"] == "running"
 
@@ -354,7 +354,7 @@ def test_an_intake_job_commits_one_plain_file_in_the_intake_folder(gate, monkeyp
     for forged in ("sources/inbox/intake/../../../metrics/x.md.source", "metrics/x.md.source",
                    "sources/inbox/intake/x.md"):
         I._write_atomic(path, {**I.read_job(bundle(gate), path.stem), "status": "queued", "path": forged})
-        inbox.commit(bundle(gate), path)
+        worker._run_intake(bundle(gate), path)
         stored = I.read_job(bundle(gate), path.stem)
         assert stored["status"] == "failed" and "not a plain file path" in stored["error"], forged
     assert gate.remote_head() == gate.head() == head and git(bundle(gate), "status", "--porcelain") == ""
@@ -387,6 +387,49 @@ def test_secrets_never_reach_git(gate, monkeypatch) -> None:
     worker._q.join()
     assert job(gate, receipt["id"])["intake"]["status"] == "failed" and gate.remote_head() == head
     assert [path.name for path in (bundle(gate) / inbox.INTAKE_DIR).iterdir()] == [Path(named["path"]).name]
+
+
+def test_intake_commits_only_while_inbox_intake_applies_and_the_submitter_may_submit(gate, monkeypatch) -> None:
+    """A rollback to curate or AIWIKI_DISABLE=changesets stops intake commits as it stops
+    changesets: a queued one waits, uncommitted, until intake applies again. The submission of a
+    principal revoked meanwhile is never committed (design §8.5)."""
+    submit = worker.submit_intake
+    monkeypatch.setattr(worker, "submit_intake", lambda *_args: None)  # queued, and left there
+    first = ingest(gate, text="# Retry cap\n\nWe cap retries at 3.\n", title="Retry cap").json()
+    path = I.job_path(bundle(gate), first["intake"]["job"])
+    head, handed = gate.remote_head(), []
+
+    for switch in ({"COMMIT_BUNDLES": frozenset()}, {"INTAKE": "curate"}):
+        with monkeypatch.context() as patch:
+            for name, value in switch.items():
+                patch.setattr(worker, name, value)
+            patch.setattr(worker, "submit_intake", lambda _bundle, pending: handed.append(pending))
+            worker.sweep_once([bundle(gate)])
+            worker._run_intake(bundle(gate), path)  # one already in the queue at the switch
+            assert handed == [] and I.read_job(bundle(gate), path.stem)["status"] == "queued", switch
+            assert gate.remote_head() == head
+    monkeypatch.setattr(worker, "submit_intake", submit)
+    worker.sweep_once([bundle(gate)])
+    worker._q.join()
+    assert job(gate, first["id"])["intake"]["status"] == "committed" and gate.remote_head() != head
+
+    monkeypatch.setattr(worker, "submit_intake", lambda *_args: None)
+    second = ingest(gate, text="# Funnel\n\nThe funnel moved.\n", title="Funnel").json()
+    principals = gate.tmp / "principals.json"
+    kept = [entry for entry in json.loads(principals.read_text(encoding="utf-8"))["principals"]
+            if entry["id"] != MEMBER]
+    principals.write_text(json.dumps({"principals": kept}), encoding="utf-8")
+    assert gate.appmod.AUTH.reload() is True
+    head = gate.remote_head()
+    monkeypatch.setattr(worker, "submit_intake", submit)
+    worker.sweep_once([bundle(gate)])
+    worker._q.join()
+
+    intake = job(gate, second["id"], token="owner")["intake"]
+    assert intake["status"] == "failed" and intake["detail"] == (
+        f"not in the wiki's Git yet: {MEMBER} may no longer submit to this bundle; nothing is committed; "
+        "the writer does not retry it, tell the owner")
+    assert gate.remote_head() == head
 
 
 def test_requeue_hands_waiting_member_items_back_to_codex(gate, tmp_path, monkeypatch, capsys) -> None:

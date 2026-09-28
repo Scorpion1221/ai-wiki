@@ -105,7 +105,7 @@ class Gate:
         monkeypatch.setattr(worker.audit, "run", lambda _bundle, parent, _job_path: self.audits.append(parent))
         monkeypatch.setattr(worker, "DEFER_POLL_S", 0.05)
         # The app installs its own; undo that.
-        for name in ("COMMIT_BUNDLES", "AUDIT_BUNDLES", "INTAKE", "actor_of", "auditors"):
+        for name in ("COMMIT_BUNDLES", "AUDIT_BUNDLES", "INTAKE", "actor_of", "may_submit", "auditors"):
             monkeypatch.setattr(worker, name, getattr(worker, name))
         monkeypatch.delenv("AIWIKI_GIT", raising=False)
         self.app(AIWIKI_PRINCIPALS=str(principals), **env)

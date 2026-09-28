@@ -658,6 +658,13 @@ def _actor_of(principal_id: str, bundle: str, kind: str = "curate") -> str | Non
                  and (p.expires is None or today <= p.expires)), None)
 
 
+def _may_submit(principal_id: str, bundle: str) -> bool:
+    """Whether a principal now in force may still submit to ``bundle`` (its queued intake commit)."""
+    today = datetime.now(UTC).date()
+    return any(p.id == principal_id and p.allows(bundle) and "submit" in p.scopes
+               and (p.expires is None or today <= p.expires) for p in AUTH.principals)
+
+
 def _auditors() -> frozenset[str]:
     """Auditor-class actors (design §5.3): the known ids and every process now holding audit."""
     return audit_runtime.AUDITOR_ACTORS | {p.id for p in AUTH.principals
@@ -671,6 +678,7 @@ worker.INTAKE = MODES["intake"]
 # they neither queue by themselves nor jump ahead of production's Codex work.
 worker.AUDIT_BUNDLES = worker.COMMIT_BUNDLES - set(MODES["codex_audit_manual"])
 worker.actor_of = _actor_of
+worker.may_submit = _may_submit
 worker.auditors = _auditors
 
 
