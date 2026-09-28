@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -145,6 +146,34 @@ def test_a_push_past_the_service_puts_its_concepts_under_review(gate) -> None:
     assert (METRIC, "external") not in due(gate)
     push(gate, METRIC, gate.read(METRIC).replace("A hand note.", "A second hand note."))
     assert (METRIC, "external") in due(gate)  # another push is another version to review
+
+
+def test_external_attention_follows_ancestry_not_commit_dates(gate) -> None:
+    """A commit dated before the epoch (a slow clock, a rebase) or merged in from an old branch
+    is still after the epoch in history: nothing below or inside it escapes review."""
+    old = "2026-09-19T12:00:00Z"  # before EPOCH
+
+    def commit(repo, message: str, date: str | None = None) -> None:
+        git(repo, "add", "-A")
+        dated = {"GIT_COMMITTER_DATE": date, "GIT_AUTHOR_DATE": date} if date else {}
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", message], check=True, capture_output=True,
+                       env={**os.environ, **dated})
+
+    other = clone(gate.remote, gate.tmp / "other-dates")
+    (other / METRIC).write_text(gate.read(METRIC).replace("# Summary", "# Summary\n\nA hand note.", 1),
+                                encoding="utf-8")
+    commit(other, "hand edit")
+    (other / "notes.md").write_text("notes\n", encoding="utf-8")
+    commit(other, "notes from a laptop whose clock is behind", old)
+    git(other, "checkout", "-q", "-b", "topic", "HEAD~2")
+    (other / AI_STUDY).write_text(gate.read(AI_STUDY) + "\nA branch note.\n", encoding="utf-8")
+    commit(other, "branch edit", old)
+    git(other, "checkout", "-q", "main")
+    git(other, "merge", "-q", "--no-ff", "topic", "-m", "Merge topic")
+    git(other, "push", "-q", "origin", "main")
+    git(gate.writer, "fetch", "-q")
+
+    assert {(METRIC, "external"), (AI_STUDY, "external")} <= set(due(gate))
 
 
 def test_the_same_verdict_on_a_new_version_is_a_new_review(gate) -> None:

@@ -1031,12 +1031,25 @@ def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str]]:
 
 def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> set[str]:
     """Paths that a commit since ``since`` changed and the service did not write (§5.3): such a
-    push may change content without a new generation, so its concepts are reviewed again."""
+    push may change content without a new generation, so its concepts are reviewed again.
+
+    "Since" follows ancestry, not dates: the walk covers every first-parent commit above the
+    oldest one dated at or after ``since``, so a later commit with a skewed older date cannot
+    hide the commits below it, and a merge counts what it brings in against its first parent.
+    """
     root = curate._repo_root(bundle)
     if root is None or root.resolve() != bundle.resolve():
         return set()
-    log = curate._git(root, "-c", "core.quotepath=false", "log", "--no-renames", "--name-only",
-                      "--format=%x1e%B%x1f", f"--since={since.isoformat()}", revision, "--")
+    chain = curate._git(root, "log", "--first-parent", "--format=%H %ct", revision, "--")
+    if chain.returncode != 0:
+        raise RuntimeError(f"cannot read the history of {revision}: {chain.stderr.strip()[-200:]}")
+    commits = [line.split() for line in chain.stdout.splitlines()]  # newest first
+    after = [index for index, (_sha, stamp) in enumerate(commits) if int(stamp) >= since.timestamp()]
+    if not after:
+        return set()
+    span = revision if after[-1] == len(commits) - 1 else f"{commits[after[-1] + 1][0]}..{revision}"
+    log = curate._git(root, "-c", "core.quotepath=false", "log", "--first-parent", "-m", "--no-renames",
+                      "--name-only", "--format=%x1e%B%x1f", span, "--")
     if log.returncode != 0:
         raise RuntimeError(f"cannot read the history since {since.isoformat()}: {log.stderr.strip()[-200:]}")
     touched = set()
