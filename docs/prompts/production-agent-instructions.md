@@ -13,7 +13,7 @@ a model or a runtime: any agent that meets the requirements below can run it
 | Skills | `ai-wiki-curating-maintainer`, `okf-knowledge-curator`. Not `ai-wiki-maintainer`: that is the legacy ingest and Codex audit flow, kept for rollback only |
 | Concurrency | `max_concurrent_tasks=1`, `max_attempts=2`, task timeout 3 h |
 | Custom env | `AIWIKI_TOKEN=<aiw_c_ token of process:ai-wiki-maintainer>`, the curator role (read, submit, curate) |
-| Autopilot | `5c80732b`, `create_issue`, title template `[AUTO] AI Wiki sync {{date}}`, cron `0 4,12,20 * * *` Asia/Shanghai, prompt `docs/prompts/production-autopilot-prompt.md` with its `<Auditor agent id>` filled in |
+| Autopilot | `5c80732b`, `create_issue`, title template `[AUTO] AI Wiki sync {{date}}`, cron `0 4 * * *` Asia/Shanghai (once a day), prompt `docs/prompts/production-autopilot-prompt.md` with its `<Auditor agent id>` filled in |
 
 The instructions below are pasted verbatim into the agent.
 

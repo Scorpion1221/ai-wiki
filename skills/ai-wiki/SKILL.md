@@ -146,7 +146,7 @@ ai-wiki jobs <job-id>
 
 Ingest submits sources; it never edits concepts. The server runs no LLM: a submission is
 stored verbatim and becomes a work item that the maintainer agent curates on its next run
-(04:00, 12:00 or 20:00 CST, so within about 8 hours). `ai-wiki jobs <id>` follows it until a
+(once a day at 04:00 CST, so within about a day). `ai-wiki jobs <id>` follows it until a
 changeset curates it (with the commit) or the maintainer skips it (with the reason); do not
 poll it in a loop. Re-submitting identical content is a successful no-op. A terminal
 `needs-conversion` result means the format was stored but cannot be curated: convert it to a

@@ -13,7 +13,7 @@ max_items=6                                         # 每次最多 6 个条目�
 cfg="$HOME/.ai-wiki/maint-solvely-wiki.json"        # 采集参数，内容见下
 ```
 
-- 日程：每天 04:00、12:00、20:00（Asia/Shanghai）各一次，成员投递的条目最多等约 8 小时。没做完的条目由下一次 `maint begin` 接上，不要补跑。
+- 日程：每天 04:00（Asia/Shanghai）一次，成员投递的条目最多等到下一次运行（约一天）。没做完的条目由下一次 `maint begin` 接上，不要补跑。
 - 任何操作（包括 doctor 预检）之前，把下面的 JSON 原样写入 `$cfg`（覆盖旧文件，不改其他配置文件）：
 
 ```json

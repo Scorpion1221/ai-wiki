@@ -104,8 +104,8 @@ ai-wiki jobs <job-id>
 ```
 
 Files are stored verbatim and become work items in the maintainer's queue
-(`AIWIKI_INTAKE=inbox`), ahead of repository and conversation items. The maintainer runs at
-04:00, 12:00 and 20:00 CST, so a submission waits at most about 8 hours. `ai-wiki jobs <id>`
+(`AIWIKI_INTAKE=inbox`), ahead of repository and conversation items. The maintainer runs once
+a day at 04:00 CST, so a submission waits at most about a day. `ai-wiki jobs <id>`
 follows the item until a changeset curates it (with its commit) or the maintainer skips it
 (with the reason). PDF and other opaque formats stay `needs-conversion` rather than being
 guessed. Identical submissions are idempotent.
