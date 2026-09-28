@@ -18,8 +18,10 @@ from aiwiki.maint import issue_delta
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "ai-wiki-curating-maintainer" / "SKILL.md"
+AUDITOR = ROOT / "skills" / "ai-wiki-auditor" / "SKILL.md"
 PROMPT = ROOT / "docs" / "prompts" / "shadow-autopilot-prompt.md"
-TEXTS = (SKILL, ROOT / "skills" / "okf-knowledge-curator" / "SKILL.md", *sorted(PROMPT.parent.glob("*.md")))
+TEXTS = (SKILL, AUDITOR, ROOT / "skills" / "okf-knowledge-curator" / "SKILL.md",
+         *sorted(PROMPT.parent.glob("*.md")))
 SPAN = re.compile(r"`(ai-wiki [^`]+)`")
 END = re.compile(r"\s(?:[|;>]|&&|2>)\s|\s#\s")  # a pipe, chain, redirect or shell comment ends a command
 
@@ -76,6 +78,17 @@ def test_the_skill_covers_the_whole_loop(root) -> None:
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert {"doctor", "maint begin", "maint next", "maint skip", "maint split", "maint add-evidence",
             "concept new", "validate", "propose", "workspace pull", "maint park", "maint end"} <= verbs
+
+
+def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
+    text = AUDITOR.read_text(encoding="utf-8")
+    assert text.startswith("---\nname: ai-wiki-auditor\n")
+    assert len(text.splitlines()) <= 200
+    verbs = {resolve(root, command)[0] for command in commands(text)}
+    assert verbs == {"doctor", "review begin", "review next", "review evidence", "review verdict", "review submit",
+                     "review end"}
+    prompt = (PROMPT.parent / "auditor-autopilot-prompt.md").read_text(encoding="utf-8")
+    assert "ai-wiki-auditor" in prompt and not {resolve(root, command)[0] for command in commands(prompt)} - verbs
 
 
 def test_the_shadow_prompt_config_is_what_the_collectors_read() -> None:
