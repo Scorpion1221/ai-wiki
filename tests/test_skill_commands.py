@@ -93,3 +93,18 @@ def test_the_shadow_prompt_config_is_what_the_collectors_read() -> None:
     assert set(repos["branch_overrides"].values()) == {"master"}
     assert set(repos["required_remotes"]) <= set(repos["branch_overrides"])
     assert issues["autopilot"] and len(issues["exclude_agents"]) == 2
+
+
+def test_the_production_prompt_keeps_the_legacy_parameters_and_leaves_audits_to_the_auditor() -> None:
+    production = (PROMPT.parent / "production-autopilot-prompt.md").read_text(encoding="utf-8")
+    config = json.loads(re.search(r"```json\n(.*?)```", production, re.S)[1])
+    shadow = json.loads(re.search(r"```json\n(.*?)```", PROMPT.read_text(encoding="utf-8"), re.S)[1])
+
+    assert config["repos"] == shadow["repos"]  # the workspace parameters the legacy production prompt passed
+    assert config["audits"] == {"resubmit": False}  # the external auditor owns audits
+    assert config["issues"]["autopilot"] == shadow["issues"]["autopilot"]  # updated in place, same id
+    # Neither maintainer, the auditor nor the retired shadow is ever a source.
+    assert {"1dcccd34-e9e4-48c7-a0a3-32c061d4c284", "c10a1e06-8255-42ce-9b52-266aef42f2a6",
+            "<Auditor agent id>"} == set(config["issues"]["exclude_agents"])
+    assert re.search(r"^bundle=solvely-wiki\b", production, re.M) and re.search(r"^max_items=\d+", production, re.M)
+    assert "--format md" in SKILL.read_text(encoding="utf-8")  # the verbatim report opens the comment
