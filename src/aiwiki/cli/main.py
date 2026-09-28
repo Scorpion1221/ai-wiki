@@ -569,7 +569,7 @@ def main(argv=None) -> int:
         command_path="ai-wiki doctor",
         epilog=_examples("ai-wiki doctor --role curator", "ai-wiki doctor --role auditor --json"), **common,
     )
-    p_doctor.add_argument("--role", required=True, choices=("curator", "auditor", "member"))
+    p_doctor.add_argument("--role", required=True, choices=("curator", "auditor", "reviewer", "member"))
     p_doctor.add_argument("--state-dir", type=Path, default=_STATE_DIR, help=f"default: {_STATE_DIR}")
     p_doctor.add_argument("--skills-dir", type=Path, help="report the role's installed skills by digest")
     p_doctor.add_argument("--json", action="store_true", help="emit JSON instead of TOON")

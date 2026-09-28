@@ -1,11 +1,11 @@
 """``ai-wiki doctor --role``: fail closed before a run whose runtime cannot do its job (design §3).
 
 Checks that an endpoint and token are configured, the writer's API contract (``/whoami``),
-that the token's scopes are exactly the role's and, for a curator or auditor, that it has an
-actor to stamp and that the writer rather than a read mirror answered, the bundle's OKF
-version, a writable state directory with 2 GB free, the tools the role shells out to, and,
-with ``--skills-dir``, that the role's skills are installed (each reported by its digest, so
-a run records which skill version it ran).
+that the token's scopes are exactly the role's (a human ``reviewer`` may hold more) and, for a
+curator, auditor or reviewer, that it has an actor to stamp and that the writer rather than a
+read mirror answered, the bundle's OKF version, a writable state directory with 2 GB free, the
+tools the role shells out to, and, with ``--skills-dir``, that the role's skills are installed
+(each reported by its digest, so a run records which skill version it ran).
 """
 from __future__ import annotations
 
@@ -21,9 +21,12 @@ from aiwiki.service.auth import ROLES
 from aiwiki.version import VERSION
 
 MIN_FREE_BYTES = 2 * 1024 ** 3
-TOOLS = {"curator": ("git", "uv", "multica"), "auditor": ("git", "uv"), "member": ()}
+TOOLS = {"curator": ("git", "uv", "multica"), "auditor": ("git", "uv"), "reviewer": ("git", "uv"), "member": ()}
 SKILLS = {"curator": ("ai-wiki-curating-maintainer", "okf-knowledge-curator"),
-          "auditor": ("ai-wiki-auditor",), "member": ("ai-wiki",)}
+          "auditor": ("ai-wiki-auditor",), "reviewer": ("ai-wiki-auditor",), "member": ("ai-wiki",)}
+# A human reviewer (design §5.5): a human: principal holding human_verify besides the audit
+# role; unlike an agent's token, the owner's may hold more.
+REVIEWER = ROLES["auditor"] | {"human_verify"}
 _IGNORED = {"multica-metadata.json", ".DS_Store"}  # as scripts/sync_skills.py
 
 
@@ -62,12 +65,16 @@ def _server(role: str, bundle: str | None, check) -> None:
         api, minimum = (who.get("api") or {}).get("changesets"), (who.get("client") or {}).get("min")
         check("api", api == 1 and _version(VERSION) >= _version(minimum),
               f"api.changesets={api}; client {VERSION}, writer needs >= {minimum}")
-        scopes, wanted = set(who.get("scopes") or []), ROLES[role]
+        scopes, wanted = set(who.get("scopes") or []), REVIEWER if role == "reviewer" else ROLES[role]
         missing, extra = sorted(wanted - scopes), sorted(scopes - wanted)
         detail = f"{who.get('principal')} holds {', '.join(sorted(scopes)) or 'nothing'}"
         for label, names in (("missing", missing), ("extra", extra)):
             detail += f"; {label} {', '.join(names)}" if names else ""
-        check("scopes", not missing and not extra, detail)
+        if role == "reviewer":
+            human = str(who.get("principal")).startswith("human:")
+            check("scopes", not missing and human, detail + ("" if human else "; not a human: principal"))
+        else:
+            check("scopes", not missing and not extra, detail)
         if role != "member":  # the writer refuses a changeset it cannot stamp generated.by / verified.by for
             check("actor", bool(who.get("actor")), f"{who.get('principal')} stamps as {who.get('actor')}"
                   if who.get("actor") else f"{who.get('principal')} has no actor; it cannot propose")

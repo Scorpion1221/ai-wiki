@@ -724,3 +724,37 @@ def test_review_evidence_never_writes_where_a_packet_header_points(tmp_path) -> 
         f"{rel}: {hashlib.sha256(text.encode()).hexdigest()}\n" for rel, text in packets.items()), encoding="utf-8")
     assert [row["status"] for row in verbs.evidence(state, "kb", "metrics/m.md", config)[1]["evidence"]][1:3] == [
         "differs", "differs"]  # the header's sha256 alone proves nothing about the frozen text
+
+
+def test_a_human_reviews_any_concept_through_the_cli(gate, capsys, monkeypatch) -> None:
+    """The owner's token holds more than the auditor role: ``begin --as-human`` preflights a
+    human reviewer, ``next --path`` takes a concept outside the backlog, and the verdict is
+    human-reviewed (design §5.5). An agent's run may not pick its concepts."""
+    tools = gate.tmp / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    gate.connect("owner")
+    state = gate.tmp / "owner-state"
+    code, refused = wiki(capsys, "review", "begin", "--run", RUN, "--state-dir", state)
+    assert code == 4 and refused["failed"] == "doctor" and refused["checks"][0]["check"] == "scopes"
+    code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--as-human", "--state-dir", state)
+    assert code == 0, begun
+    assert METRIC not in [entry["path"] for entry in backlog(gate)["concepts"]]
+
+    code, taken = wiki(capsys, "review", "next", "--path", METRIC, "--state-dir", state)
+    assert code == 0 and (taken["path"], taken["reason"]) == (METRIC, "human") and taken["evidence"], taken
+    assert wiki(capsys, "review", "verdict", METRIC, "verified", "--note", "S1 holds every claim",
+                "--state-dir", state)[0] == 0
+    code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
+
+    assert code == 0 and sent["reviews"][0]["outcome"] == "verified", sent
+    metadata = gate.client.get("/cat", params={"bundle": "kb-a", "path": METRIC},
+                               headers=gate.headers("owner")).json()["metadata"]
+    assert (metadata["trust"], metadata["verification_current"]) == ("human-reviewed", True)
+    assert wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)[0] == 0
+    gate.connect("auditor")
+    agent = gate.tmp / "auditor-state"
+    assert wiki(capsys, "review", "begin", "--run", "AUD-2", "--state-dir", agent)[0] == 0
+    assert wiki(capsys, "review", "next", "--path", METRIC, "--state-dir", agent)[0] == 2

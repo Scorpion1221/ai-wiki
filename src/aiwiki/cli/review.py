@@ -1,7 +1,9 @@
 """The auditor's loop (design §3, §5): ``ai-wiki review …``.
 
     begin     doctor --role auditor, the auditor lease, a workspace of the published bundle
+              (--as-human: doctor --role reviewer, for the owner's human-reviewed verdicts)
     next      the next concept the writer's backlog lists, with its content hash and evidence
+              (--path: a human run takes any concept, backlog or not)
     evidence  re-check the concept's frozen evidence, and re-read its Git parts from this host
     verdict   record verified, corrected (the workspace edit) or unverified, with a note
     submit    send the recorded verdicts as audit changesets of at most 5 reviews
@@ -69,8 +71,10 @@ def _backlog(bundle: str) -> dict:
     return maint._call("GET", "/audit/backlog", bundle=bundle, params={"limit": 1000})[1]
 
 
-def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace_dir: Path | None) -> tuple[int, dict]:
-    """doctor → auditor lease → workspace pull → the backlog's size."""
+def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace_dir: Path | None,
+          as_human: bool = False) -> tuple[int, dict]:
+    """doctor → auditor lease → workspace pull → the backlog's size. ``as_human`` preflights a
+    human reviewer (design §5.5), whom the writer does not hold to the backlog."""
     from aiwiki.cli import doctor, workspace
 
     folder = _folder(state_dir, run)
@@ -78,7 +82,8 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
         "run": run, "bundle": bundle, "max": max_reviews, "taken": [], "pending": {}, "submitted": [], "dropped": []}
     if state["bundle"] != bundle:
         raise MaintError(f"run {run} reviews bundle {state['bundle']!r}, not {bundle!r}", USAGE)
-    checked = doctor.run("auditor", bundle=bundle, state_dir=state_dir, skills_dir=None)
+    state["human"] = as_human
+    checked = doctor.run("reviewer" if as_human else "auditor", bundle=bundle, state_dir=state_dir, skills_dir=None)
     if not checked["ok"]:
         failed = [row for row in checked["checks"] if not row["ok"]]
         return PREFLIGHT, {"run": run, "failed": "doctor", "checks": failed}
@@ -103,25 +108,50 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
                 "next": f"ai-wiki -b {bundle} review next --json"}
 
 
-def next_concept(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
-    """The first backlog concept this run has not taken, as the published workspace holds it."""
+def _chosen(root: Path, path: str) -> dict:
+    """A concept a human names, as a backlog entry: its published content hash and cited sources."""
+    from aiwiki.engine.document import parse_document
+    from aiwiki.engine.scan_sources import _source_resource_rel
+
+    concept = root / path
+    if Path(path).is_absolute() or ".." in Path(path).parts or not concept.is_file() or concept.is_symlink():
+        raise MaintError(f"{path} is not a concept of the published bundle", USAGE)
+    text = concept.read_text(encoding="utf-8")
+    sources = parse_document(text).frontmatter.get("sources")
+    cited = {_source_resource_rel(source["resource"].strip(), path) for source in
+             (sources if isinstance(sources, list) else []) if isinstance(source, dict)
+             and isinstance(source.get("resource"), str)}
+    return {"path": path, "base": changeset.content_hash(text), "reason": "human",
+            "sources": sorted(rel for rel in cited if rel and rel.startswith("sources/") and (root / rel).is_file())}
+
+
+def next_concept(state_dir: Path, bundle: str | None, path: str | None = None) -> tuple[int, dict]:
+    """The first backlog concept this run has not taken, as the published workspace holds it;
+    with ``path``, that concept (a human run only)."""
     from aiwiki.cli import workspace
 
     state = _load(state_dir, bundle)
+    if path is not None and not state.get("human"):
+        raise MaintError("--path takes a concept outside the backlog: only a run begun --as-human may", USAGE)
     if len(state["taken"]) >= state["max"]:
         return BUDGET, {"stopped": "budget", "taken": len(state["taken"]), "pending": len(state["pending"]),
                         "next": f"ai-wiki -b {state['bundle']} review submit" if state["pending"] else
                         f"ai-wiki -b {state['bundle']} review end --run {state['run']}"}
-    found = _backlog(state["bundle"])
-    entry = next((row for row in found.get("concepts") or [] if row["path"] not in state["taken"]), None)
-    if entry is None:
-        return EMPTY, {"stopped": "backlog_empty", "pending": len(state["pending"]),
-                       "next": f"ai-wiki -b {state['bundle']} review submit" if state["pending"] else
-                       f"ai-wiki -b {state['bundle']} review end --run {state['run']}"}
     root = Path(state["workspace"])
-    if workspace.load(root)["base_revision"] != found.get("revision"):
-        workspace.pull(root, state["bundle"])  # verdicts keep their own copy: the workspace stays clean
-    state["taken"].append(entry["path"])
+    if path is not None:
+        workspace.pull(root, state["bundle"])  # the version the writer judges
+        entry = _chosen(root, path)
+    else:
+        found = _backlog(state["bundle"])
+        entry = next((row for row in found.get("concepts") or [] if row["path"] not in state["taken"]), None)
+        if entry is None:
+            return EMPTY, {"stopped": "backlog_empty", "pending": len(state["pending"]),
+                           "next": f"ai-wiki -b {state['bundle']} review submit" if state["pending"] else
+                           f"ai-wiki -b {state['bundle']} review end --run {state['run']}"}
+        if workspace.load(root)["base_revision"] != found.get("revision"):
+            workspace.pull(root, state["bundle"])  # verdicts keep their own copy: the workspace stays clean
+    if entry["path"] not in state["taken"]:
+        state["taken"].append(entry["path"])
     state.setdefault("entries", {})[entry["path"]] = {"base": entry["base"], "reason": entry["reason"]}
     _save(state_dir, state)
     path = entry["path"]
@@ -356,7 +386,11 @@ def add_parser(sub, common: dict) -> None:
     begin_.add_argument("--run", required=True, type=cli._run, help="the run id (X-AIWiki-Run)")
     begin_.add_argument("--max", type=cli._positive, default=20, help="concepts this run may take (default: 20)")
     begin_.add_argument("--dir", type=Path, help="the workspace (default: <state-dir>/reviews/<run>/ws)")
-    verb("next", "take the next backlog concept (exit 10 backlog empty, 11 budget spent)", "ai-wiki review next --json")
+    begin_.add_argument("--as-human", action="store_true",
+                        help="a human reviewer (human: principal with human_verify): verdicts are human-reviewed")
+    take = verb("next", "take the next backlog concept (exit 10 backlog empty, 11 budget spent)",
+                "ai-wiki review next --json", "ai-wiki review next --path metrics/x.md  # a human run")
+    take.add_argument("--path", help="a human run: take this concept, in the backlog or not")
     check = verb("evidence", "re-check the concept's frozen evidence; re-read its Git parts on this host",
                  "ai-wiki review evidence metrics/x.md --config ~/.ai-wiki/maint.json")
     check.add_argument("path")
@@ -382,9 +416,9 @@ def command(a: argparse.Namespace, selected: str | None) -> int:
     try:
         if a.action == "begin":
             code, result = begin(maint._bundle(selected), run=a.run, state_dir=state_dir, max_reviews=a.max,
-                                 workspace_dir=a.dir)
+                                 workspace_dir=a.dir, as_human=a.as_human)
         elif a.action == "next":
-            code, result = next_concept(state_dir, selected)
+            code, result = next_concept(state_dir, selected, a.path)
         elif a.action == "evidence":
             code, result = evidence(state_dir, selected, a.path, a.config.expanduser())
         elif a.action == "verdict":
