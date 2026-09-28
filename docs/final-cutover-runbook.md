@@ -25,12 +25,19 @@ Every step below has its verification and its rollback; §13 rolls back to the l
 from any point. Until step 11, rolling back is removing the step 6 drop-in and restoring
 Multica settings from the archive step 1 makes; after it, restore step 11's backup first.
 
-Requires the merged build of the three final-state units: W14 (inbox intake,
-`/admin/inbox/requeue`), W16/W17 (audit changesets, `/audit/backlog`,
-`AIWIKI_BACKLOG_EPOCH`, the `review` verbs, `skills/ai-wiki-auditor`,
-`docs/prompts/auditor-*.md`) and this package (`AIWIKI_LLM`, the production prompts,
-the watchdog's `--no-checkpoint` and member check, this runbook). Step 0's checks refuse a
-build without them.
+Requires the merged build of the three final-state units, which step 0's checks look for:
+
+- W14, inbox intake: `AIWIKI_INTAKE=inbox` (only for bundles in `AIWIKI_CHANGESETS_COMMIT`),
+  the member quota `AIWIKI_SUBMISSIONS_PER_DAY` (30 by default), `ai-wiki ingest <link>`,
+  `maint next` reading a bare Feishu link as the wiki's app, and the rollback verb
+  `ai-wiki admin inbox requeue`.
+- W16/W17, external audit: `AIWIKI_AUDIT=external` with `AIWIKI_BACKLOG_EPOCH`,
+  `GET /audit/backlog`, the verbs `review begin|next|evidence|verdict|submit|end`,
+  `doctor --role auditor|reviewer`, `skills/ai-wiki-auditor`, `docs/prompts/auditor-*.md`,
+  and the watchdog's `--writer-url` backlog check (72 h).
+- This package: `AIWIKI_LLM=off` (which also refuses the inbox requeue and cancels a Codex
+  audit left queued), the production prompts, the watchdog's `--no-checkpoint` and
+  `--member-ready-max-age-hours`, this runbook.
 
 ## Where and when
 
@@ -60,28 +67,88 @@ build without them.
   (`1ae1dfab`, owner-managed; confirm it is always on) or run the gateway's daemon under
   another OS user.
 
-Day −1 (owner online): steps 0 to 2, none of which changes production's behaviour. Day 0:
-step 3 right after the 04:00 CST legacy run finishes, then 4 to 11 in one sitting (about four
-hours, step 6 not before 06:30 CST). There is no waiting period: the canary (step 8) is the
-gate, and step 11's backups stay 30 days for a rollback. Never restart the writer between
-03:30 and 06:30 CST, nor while a job or lease is live (`restart_idle` refuses those).
+Day −1 (owner online): the gateway rotation and steps 0 to 2d, none of which changes
+production's behaviour. Day 0: step 3 right after the 04:00 CST legacy run finishes, then 4
+to 11 in one sitting (about four hours, step 6 not before 06:30 CST). There is no waiting
+period: the canary (step 8) is the gate, and step 11's backups stay 30 days for a rollback.
+Never restart the writer between 03:30 and 06:30 CST, nor while a job or lease is live
+(`restart_idle` refuses those).
 
-## Plan
+## Operator steps, in order
 
-| # | Step | Where | Changes production | Rollback |
-|---|---|---|---|---|
-| 0 | Merge, deploy procedure, deploy the build | laptop, host | no: every new flag defaults to today | redeploy `9d62536` |
-| 1 | Pre-flight, archive, member notice | host, laptop | no | none |
-| 2 | Auditor (principal, skill, agent, autopilot without schedule); runtime CLI and isolation gate (issues R1, A1) | host, laptop, both runtimes | no | §2 |
-| 3 | Pause the legacy and shadow runs, stop the shadow's Codex audit timer | laptop, host | schedules paused | §3 |
-| 4 | Import the cursors and the ledger (issue R2) | runtime | writer queue seeded | §4 |
-| 5 | Switch the production agent: skills, instructions, prompt (still paused) | laptop | agent config | §5 |
-| 6 | Writer drop-in: every final flag, `AIWIKI_LLM=off` included | host | yes | §6 |
-| 7 | Members: the legacy token to read and submit | host | yes | §7 |
-| 8 | Canary: 1 item, one auditor run, then the schedules | laptop, host | yes | §13 |
-| 9 | Retire the shadow agent | laptop, host | no | §9 |
-| 10 | Watchdog once a day at 07:00: writer side, Multica side (issue R3); deploy procedure | host, runtime, laptop | alerts | §10 |
-| 11 | Remove the Codex config, the gateway credential and the lark-cli login, with backups | host | host cleanup | §11 |
+Every operator step of the three units, in the order to run them. The sections below hold the
+commands. **Owner: yes** means the owner must act or decide (a credential, an approval, a
+risk acceptance); every other step needs only the laptop and host access. A rollback from any
+point is §13 (issue RB1).
+
+1. **Rotate the model gateway token, now.** Where: the gateway console (gateway.ddit.ai). The
+   commented `ANTHROPIC_AUTH_TOKEN` line of aliyun-jp's world-readable `/etc/environment`
+   holds it, and a review transcript printed it; nothing on the host uses the line, and step
+   11 deletes it. Verify: the old value gets 401 at the gateway. Rollback: none. Owner: yes.
+2. **Step 0: merge, deploy procedure (§10.3), deploy.** Where: laptop; the deploy script
+   reaches the host. Verify: step 0's checks print every marker and `inbox external off`, CI
+   is green on `$MERGE_SHA`, the host serves `$MERGE_SHA`, and `/whoami` shows today's modes
+   plus `"llm":"codex"`. Rollback: `deploy_aliyun.sh <checkout> 9d62536`, and
+   `deploy_aliyun.sh.pre-final`. Owner: yes (approves the merge).
+3. **Step 1: pre-flight, backups, archive, member notice.** Where: host (H1–H10, backups, the
+   Phase 2 owner token shredded), laptop (the `$FL` archive), the members' channel. Verify:
+   every H check prints what its comment says; `$FL` holds the agent, autopilot and skill
+   JSON and the legacy texts. Rollback: none (it only reads and copies). Owner: yes (the
+   owner token from the password manager; the notice).
+4. **Step 2: the Auditor and the isolation gate.** Where: host (`pp add auditor`), laptop
+   (skill, agent, autopilot without a trigger), the auditor host (CLI install), the runtime
+   and auditor hosts (issues R1 and A1). Verify: `/whoami` lists `process:ai-wiki-auditor`;
+   A1's `doctor --role auditor` is ok; R1 and A1 pass the three-point isolation gate.
+   Rollback: §2's block. Owner: yes (the token into the password manager, the CLI on the
+   auditor host, and a written risk acceptance if the gate fails).
+5. **Step 2b, optional: Git evidence on the auditor host.** Where: auditor host. Verify: the
+   `review evidence` rows of step 2d's run show `match`, not `unavailable`, for Git parts.
+   Rollback: delete `~/.ai-wiki/maint.json` and the clones there. Owner: yes (read access to
+   the reference repositories from that host). Without it the auditor still judges the frozen
+   copies the writer serves.
+6. **Step 2c, optional: the maintainer reads bare Feishu links as the wiki's app.** Where:
+   runtime host (configuration by the owner; the check through issue R4). Verify: R4 prints
+   `lark exit 0`. Rollback: remove that user's lark-cli configuration and revoke the app
+   secret. Owner: yes (the read-only app's credentials). Without it, `maint next` closes a
+   link a member sent alone as `needs_access`, with a reason; a member whose own lark-cli
+   reads the doc sends its content instead, which always works.
+7. **Step 2d: one shadow audit run.** Where: laptop (`multica autopilot trigger`). Verify:
+   the issue is done and its comment shows the `review end` counts, `shadow: true` and the
+   `dry_run` rows; `admin changesets` lists no audit changeset. Rollback: none (every submit
+   only dry-runs while the writer audits with Codex). Owner: no.
+8. **Step 3: pause the legacy and shadow runs**, day 0 after the 04:00 run. Where: laptop,
+   host. Verify: both autopilots `paused`, the shadow audit timer inactive, `codex_jobs` 0
+   and `idle`. Rollback: §3. Owner: no.
+9. **Step 4: import the cursors and the ledger (issue R2).** Where: runtime host. Verify: the
+   comment as §4 lists it, and `status_w solvely-wiki` shows the cursors and the ready items.
+   Rollback: move `.okf/maint` aside (§4). Owner: no.
+10. **Step 5: switch the production agent** (still paused). Where: laptop. Verify: skills,
+    instructions and prompt as §5 prints them; the autopilot paused on `0 4 * * *`. Rollback:
+    §5's block. Owner: no. It must come before step 6: the legacy `maintain` flow marks every
+    inbox job it sees `needs_repair` at once (`jobs <id>` answers `ready`).
+11. **Step 6: the final flags** (not before 06:30 CST). Where: host. Verify: the modes,
+    `writer_agent {"runtime":"off"}`, 409 on the Codex audit route, `/audit/backlog`
+    answers, no codex process, and a member submission to the shadow bundle answers `ready`.
+    Rollback: remove the drop-in and restart, then `ai-wiki admin inbox requeue` per bundle
+    (§6); after step 11, its rollback first. Owner: no.
+12. **Step 7: the legacy token to read and submit.** Where: host. Verify: the legacy token's
+    `/whoami` shows `["read","submit"]`. Rollback: §7. Owner: no.
+13. **Step 8: canary, one item and one audit run, then the schedules.** Where: laptop, host.
+    Verify: §8a–8c. Rollback: §13. Owner: yes (the owner token; judges the canary).
+14. **Step 9: retire the shadow agent.** Where: laptop, host. Verify: the agent archived, no
+    shadow audit timer, the watchdog no longer names the shadow. Rollback: §9. Owner: no
+    (keeping the shadow bundle is the recommendation; removing it is the owner's call).
+15. **Step 10: the watchdog once a day, on both sides.** Where: host (10.1: the script, the
+    daily timer, a `process:ai-wiki-watchdog` reader token and `--writer-url` for the audit
+    backlog), laptop and runtime host (10.2: issue R3). Verify: the replays show `ok` with an
+    `audit:solvely-wiki` check; R3's comment; two crontab lines. Rollback: §10.1 and §10.2.
+    Owner: yes (the Feishu webhook for R3).
+16. **Step 11: remove the Codex config, the gateway credential and the lark-cli login.**
+    Where: host; the gateway and Feishu consoles. Verify: §11's checks. Rollback: §11's block,
+    then §6's. Owner: yes (the revocations).
+17. **Afterwards, when wanted: the owner's own review** (§14). Where: laptop. Verify:
+    `review end` counts; the concept's trust is `human-reviewed`. Rollback: `ai-wiki admin
+    revert --changeset <id>` of that audit changeset. Owner: yes.
 
 ## 0. Merge, deploy procedure, deploy
 
@@ -91,6 +158,9 @@ On the laptop, in the merged checkout (`git -C <checkout> pull`):
 MERGE_SHA=$(git rev-parse origin/main); echo "$MERGE_SHA"
 grep -q '"llm": _mode("AIWIKI_LLM"' src/aiwiki/service/app.py && echo llm-switch
 grep -q -- '--no-checkpoint' scripts/maintenance_watchdog.py && echo watchdog-final
+grep -q -- '--writer-url' scripts/maintenance_watchdog.py && echo audit-watchdog
+uv run ai-wiki review end --help >/dev/null && uv run ai-wiki admin inbox requeue --help >/dev/null \
+  && echo review-and-requeue-verbs
 test -f skills/ai-wiki-auditor/SKILL.md && test -f docs/prompts/auditor-autopilot-prompt.md \
   && test -f docs/prompts/auditor-agent-instructions.md && echo auditor-package
 AIWIKI_BUNDLES=$(mktemp -d) AIWIKI_TOKEN=probe AIWIKI_CURATE=off AIWIKI_INTAKE=inbox AIWIKI_AUDIT=external \
@@ -100,7 +170,8 @@ AIWIKI_BUNDLES=$(mktemp -d) AIWIKI_TOKEN=probe AIWIKI_CURATE=off AIWIKI_INTAKE=i
 gh run list --branch main --limit 1 --json conclusion,headSha | jq -c '.[0]'   # success, headSha $MERGE_SHA
 ```
 
-The checks print `llm-switch`, `watchdog-final`, `auditor-package` and `inbox external off`;
+The checks print `llm-switch`, `watchdog-final`, `audit-watchdog`, `review-and-requeue-verbs`,
+`auditor-package` and `inbox external off`;
 CI is green on `$MERGE_SHA`. Then apply §10.3 (the deploy procedure's lease guard, run
 windows and modes check) to `deploy_aliyun.sh`, and deploy:
 
@@ -271,9 +342,19 @@ W19, §12).
 
 ### Members
 
-Send the members the change for day 0: `ai-wiki ingest` works as before, but a submission is
-curated by the maintainer's next daily run (04:00 CST), so within about a day, instead of
-within minutes; `ai-wiki jobs <id>` follows it. Nothing to reinstall.
+Send the members the change for day 0:
+
+- `ai-wiki ingest` works as before, but a submission is curated by the maintainer's next daily
+  run (04:00 CST), so within about a day, instead of within minutes; `ai-wiki jobs <id>`
+  follows it. Update the CLI (`uv tool install --force …@$MERGE_SHA`) to send links.
+- `ai-wiki ingest https://<tenant>.feishu.cn/docx/<token>` reads the doc on the member's
+  machine with their own lark-cli and sends its content, which is the reliable way. Without a
+  logged-in lark-cli the link goes alone, and the maintainer reads it as the wiki's app only if
+  step 2c is done and the doc is shared with that app; otherwise the item closes
+  `needs_access` with the reason. Any other link sent alone is `needs_access`.
+- Each member may queue 30 new submissions per bundle a day (429 with `Retry-After` past it;
+  identical resends are free). The shared legacy token shares one quota among everyone who
+  holds it. Text larger than one evidence packet (1 MiB) is refused with 413: split it.
 
 ## 2. The Auditor and the isolation gate (day −1, no schedule)
 
@@ -371,7 +452,8 @@ true`; `maint end --help` lists `--format`. Every agent on `df0fb673` shares thi
 legacy flow keeps working with it (its `maintain`, `audit` and `jobs` verbs are unchanged), so
 the 04:00 run before step 3 is the check. From A1: `doctor --role auditor` `"ok": true`
 (scopes exactly read and audit; `git`, `uv` present), `health` `compatible: true`. Until step
-6 audit changesets are refused (`AIWIKI_AUDIT=codex`), so the agent can do nothing else yet.
+6 the writer audits with Codex, so an auditor run is a shadow run: `review begin` records
+`mode: codex` and every `review submit` only dry-runs (step 2d).
 
 **The isolation gate** (docs/external-agents.md §1 and §3), from both comments:
 
@@ -396,6 +478,75 @@ Rollback: `multica autopilot delete $AUDITOR_AP`, `multica agent archive $AUDITO
 `multica skill delete $AUDITOR_SKILL`, and on the host `pp remove process:ai-wiki-auditor;
 pp check; hup`. R1's CLI: the same issue with
 `uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<PREV_CLI>" && hash -r`.
+
+### 2b. Git evidence on the auditor host (optional, owner)
+
+`review evidence` re-reads each Git part of a cited packet from a checkout on the auditor's
+host, named by `repos.root` in `$HOME/.ai-wiki/maint.json` (the auditor prompt's `cfg`).
+Without that file every Git part is `unavailable` and the auditor judges the frozen copies the
+writer serves, which is still a complete review; with it, a frozen copy that differs from Git
+shows. To set it up, the owner gives the auditor's OS user read access to the repositories the
+maintainer's config tracks, clones them under one directory, keeps them fetched (a daily
+`git fetch` before 07:00: a part whose commit a checkout lacks stays `unavailable`), and
+writes `{"repos": {"root": "<that directory>"}}` to `$HOME/.ai-wiki/maint.json` there.
+
+Verify: step 2d's comment shows `match` (or `differs (truncated or redacted)`) rows for Git
+parts. Rollback: remove the file and the clones.
+
+### 2c. The maintainer reads bare Feishu links as the wiki's app (optional, owner)
+
+A member whose CLI cannot read a Feishu link locally sends the link alone. `maint next` then
+reads it on the maintainer's runtime host with `lark-cli docs +fetch --doc <url> --doc-format
+markdown --as bot`, freezes the redacted text and serves the item; if that fails it closes the
+item `needs_access` with the reason and takes the next one (the brief lists it under
+`closed`). The writer never fetches a link, and step 11 removes the writer host's lark-cli
+login; this is a different host and identity.
+
+To enable it, the owner configures lark-cli for the runtime's OS user on ip-10-2-192-225 with
+the wiki's read-only Feishu app (the lark-cli `config init` flow), without the app secret
+passing through an issue, a prompt or a comment, and shares the docs members link with that
+app. The runtime host is reachable only through Multica issues, so if there is no safe way
+to do this today, skip it: bare links close `needs_access`, and members send content instead.
+
+Verify with issue R4 (`$PROD_AGENT`, marked `ai_wiki_ops`), title `[OPS] AI Wiki final
+cut-over R4: lark-cli as the wiki app`, with `<DOC_URL>` a doc shared with the app (the
+output is discarded, so nothing of it is printed):
+
+```text
+One-time operations task from the owner, not a maintenance run. Run exactly the command below
+and nothing else; post one comment with the command and its complete output verbatim, then set
+this issue to done with --no-start.
+
+command -v lark-cli; lark-cli docs +fetch --doc <DOC_URL> --doc-format markdown --as bot >/dev/null 2>&1; echo "lark exit $?"
+```
+
+`lark exit 0` passes. Member items closed `needs_access` before it was fixed reopen one by one
+(host):
+
+```bash
+curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/maint/items?bundle=solvely-wiki&status=needs_access&origin=member' \
+  | jq -r '.items[] | "\(.id) \(.resolution.reason // "")"'
+curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' -d '{"reason": "lark-cli fixed"}' \
+  'http://127.0.0.1:8788/admin/items/<item>/retry?bundle=solvely-wiki' | jq -r .status   # ready
+```
+
+Rollback: remove that user's lark-cli configuration (an ops issue) and rotate the app secret.
+
+### 2d. One shadow audit run
+
+Laptop, once A1 passed: `multica autopilot trigger $AUDITOR_AP`. The writer still audits with
+Codex, so the run takes and releases the auditor lease and dry-runs every verdict; it commits
+nothing. When its issue is done:
+
+```bash
+AUDIT_ISSUE=$(multica autopilot runs $AUDITOR_AP --limit 1 --output json | jq -r '.runs[0].issue_id')
+multica issue comment list $AUDIT_ISSUE --output json | jq -r '(.comments // .)[-1].content' | head -20
+#   the review end counts with shadow true, then the dry_run rows (path, base, verdict, outcome)
+```
+
+It checks the whole auditor path before the flip: the token and tunnel route for
+`/audit/backlog`, the workspace, `review evidence`, the verdicts and a writer dry-run. A
+blocked issue names the failed check; fix it before step 3. Rollback: none.
 
 ## 3. Pause the legacy and shadow runs (day 0, after the 04:00 run)
 
@@ -516,8 +667,11 @@ The skill contents roll back from `skill-<id>.before.json` as in the Phase 2 run
 ## 6. Writer drop-in: the final flags (host)
 
 One drop-in holds every final flag, `AIWIKI_LLM=off` included, so the canary runs the final
-state and a rollback removes one file. Under `off` a queued Codex job would stay queued, hence
-the `codex_jobs` guard. The drop-in sorts after `phase2-shadow.conf`, which it overrides:
+state and a rollback removes one file. Under `off` a queued Codex ingest would stay queued
+(a queued Codex audit is cancelled), hence the `codex_jobs` guard. Step 5 must have run: with
+`solvely-wiki` committing and `AIWIKI_INTAKE=inbox`, the legacy `maintain` flow would mark
+each new ingest `needs_repair`. The drop-in sorts after `phase2-shadow.conf`, which it
+overrides:
 
 ```bash
 [ "$(codex_jobs)" = 0 ] || echo 'STOP: a Codex job is queued or running; wait (step 3)'
@@ -554,11 +708,40 @@ systemd-cgls --no-pager -u ai-wiki-worker.service | grep -c codex               
 journalctl -u ai-wiki-worker --since -10min --no-pager | grep -iE 'traceback|error' || echo clean
 ```
 
+Then one member submission, to the shadow bundle (inbox intake applies to every committing
+bundle; nothing curates the shadow any more, and the item is closed at once):
+
+```bash
+curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' \
+  -d '{"text": "# Cut-over intake check\n\nNot knowledge: a check of member intake.\n", "title": "cut-over intake check"}' \
+  'http://127.0.0.1:8788/ingest?bundle=solvely-wiki-shadow' | tee $FS/intake-check.json | jq -c '{mode, status, item}'
+#   {"mode":"inbox","status":"ready","item":"it_…"}: a submission becomes a work item, not a Codex job
+curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' \
+  -d '{"outcome": "skipped", "reason": "out_of_scope", "note": "cut-over intake check"}' \
+  "http://127.0.0.1:8788/admin/items/$(jq -r .item $FS/intake-check.json)/resolve?bundle=solvely-wiki-shadow" | jq -r .status
+#   skipped
+```
+
 Rollback, when idle, and only while the Codex configuration is on the host (after step 11,
 first its rollback): `rm $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`;
-`/whoami` shows today's modes again (compare with `$FS/modes.before.json`). Member items that
-arrived meanwhile go back to Codex with W14's `POST /admin/inbox/requeue` (owner token, see
-its route docstring for the body); changesets already committed are valid OKF content and stay.
+`/whoami` shows today's modes again (compare with `$FS/modes.before.json`). Then hand the
+member items that arrived meanwhile back to Codex, per bundle, from the laptop with the owner
+token and a throwaway CLI config as in 8a. The requeue answers 409 while `AIWIKI_LLM=off` or
+without the Codex binary, so only after that restart:
+
+```bash
+uv run ai-wiki -b solvely-wiki admin inbox requeue --reason 'intake rolled back' --json
+uv run ai-wiki -b solvely-wiki-shadow admin inbox requeue --reason 'intake rolled back' --json
+```
+
+Exit 0: every unfinished member item is `requeued` and its job a queued Codex ingest. Exit 1
+lists the rest: `held` items belong to a live maintainer run (rerun after its `maint end`; an
+item a dead run left is taken back by itself), and each `unavailable` item (a link with no
+stored source, or a lost source or job record) is closed by hand on the host with
+`curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' -d '{"outcome":
+"needs_access", "reason": "intake rolled back"}' "http://127.0.0.1:8788/admin/items/<item>/resolve?bundle=<bundle>"`.
+Changesets already committed, and verifications the Auditor stamped, are valid OKF content and
+stay.
 
 ## 7. Members: the legacy token to read and submit (host)
 
@@ -713,15 +896,47 @@ as_admin /home/admin/app/.venv/bin/python /usr/local/bin/ai-wiki-watchdog --bund
 #   ok; repos and issues with their ages; no alert
 ```
 
+Then the audit backlog check (design §5.2): the backlog is derived by the writer, never
+stored, so the watchdog asks `GET /maint/status` with a read-only token of its own. The
+drop-in repeats the unit's live command line with `--writer-url`, as the Phase 2 runbook §8
+did for the shadow, so every other flag stays as installed:
+
+```bash
+( umask 077; set -o noclobber; pp add watchdog --bundle solvely-wiki > $FS/watchdog.token )   # process:ai-wiki-watchdog, aiw_r_, read
+AIWIKI_TOKEN="$(legacy_token)" pp check && hup
+stat -c '%U:%G %a' /etc/ai-wiki-watchdog.env                                      # root:root 600
+cp -a /etc/ai-wiki-watchdog.env $FS/ai-wiki-watchdog.env.before
+printf 'AIWIKI_WATCHDOG_TOKEN=%s\n' "$(cat $FS/watchdog.token)" >> /etc/ai-wiki-watchdog.env && shred -u $FS/watchdog.token
+live=$(systemctl show ai-wiki-watchdog -p ExecStart --value | sed -n 's/.*argv\[\]=\([^;]*[^; ]\) *;.*/\1/p')
+echo "$live"    # …/ai-wiki-watchdog --bundle /home/admin/solvely-wiki …
+case "$live" in
+  *--writer-url*) echo 'STOP: the watchdog already checks the audit backlog' ;;
+  *'--bundle /home/admin/solvely-wiki'*)
+    printf '[Service]\nExecStart=\nExecStart=%s --writer-url http://127.0.0.1:8788\n' "$live" \
+      > /etc/systemd/system/ai-wiki-watchdog.service.d/zz-final-audit.conf && systemctl daemon-reload ;;
+  *) echo 'STOP: the live ExecStart does not watch /home/admin/solvely-wiki; nothing was written' ;;
+esac
+systemctl show ai-wiki-watchdog -p ExecStart --value | grep -c -- '--writer-url http://127.0.0.1:8788'   # 1
+systemd-run --quiet --wait --pipe -p User=admin -p EnvironmentFile=/etc/ai-wiki-watchdog.env \
+  /home/admin/app/.venv/bin/python /usr/local/bin/ai-wiki-watchdog --bundle $PROD \
+  --writer-url http://127.0.0.1:8788 --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  | jq -c '{status, audit: .checks["audit:solvely-wiki"], errors: [.errors[].check]}'
+#   audit {"mode":"external","pending":…}, no audit:solvely-wiki error (a replay never notifies)
+```
+
 What the writer side pages on: a member's submission waiting in ready over 24 h (it missed a
 daily run), any item over 72 h or needing a human, a cursor that has not advanced for 30 h, a
-run lease stuck over 3 h, no commit for 48 h, and writer job failures. A missed or failed
-daily run pages the same morning from the Multica side (10.2). The Auditor's backlog age has
-no check yet; its failed or missing runs page from 10.2.
+run lease stuck over 3 h, no commit for 48 h, writer job failures, and the oldest audit
+backlog entry waiting over 72 h or a backlog the writer cannot derive
+(`audit_backlog_stale`, `audit_backlog_error`). A missed or failed daily run of the
+maintainer or the Auditor pages the same morning from the Multica side (10.2).
 
-Rollback: `rm -r /etc/systemd/system/ai-wiki-watchdog.timer.d && systemctl daemon-reload &&
-systemctl restart ai-wiki-watchdog.timer`, and `install -m 0755 $FS/ai-wiki-watchdog.before
-/usr/local/bin/ai-wiki-watchdog`.
+Rollback: `rm -r /etc/systemd/system/ai-wiki-watchdog.timer.d
+/etc/systemd/system/ai-wiki-watchdog.service.d/zz-final-audit.conf && systemctl daemon-reload
+&& systemctl restart ai-wiki-watchdog.timer`, `install -m 0755 $FS/ai-wiki-watchdog.before
+/usr/local/bin/ai-wiki-watchdog`, `cp -a $FS/ai-wiki-watchdog.env.before
+/etc/ai-wiki-watchdog.env`, and `pp remove process:ai-wiki-watchdog; AIWIKI_TOKEN="$(legacy_token)"
+pp check && hup`.
 
 ### 10.2 Multica side (runtime host, issue R3)
 
@@ -892,10 +1107,13 @@ Finally, `shred -u $FS/owner.h $FS/legacy.h` on the host, and `unset AIWIKI_TOKE
 - Stays: the gate (`runtime/changeset.py`, `policy.py`, the `_transaction` pipeline),
   recovery, receipts, the collectors, the shadow bundle as the canary target.
 - Rollback-only until the Codex code is deleted (design W19): the legacy Codex runner, `POST
-  /jobs/{id}/audit`, `/jobs/pending-audit`, `ai-wiki maintain` and `audit`, the
-  `ai-wiki-maintainer` skill, the archive in `$FL` (the only copy of the legacy texts), the
-  legacy ledger on the runtime host (`~/.local/state/ai-wiki-maintainer/solvely-wiki`,
-  read-only from step 4 on).
+  /jobs/{id}/audit`, `/jobs/pending-audit`, `ai-wiki maintain` and `audit`, `ai-wiki admin
+  inbox requeue`, the `ai-wiki-maintainer` skill, the archive in `$FL` (the only copy of the
+  legacy texts), the legacy ledger on the runtime host
+  (`~/.local/state/ai-wiki-maintainer/solvely-wiki`, read-only from step 4 on).
+- Member uploads stay verbatim in the git-ignored `sources/inbox/` after their item closes
+  (the requeue needs them); only the evidence a changeset cites is committed. Their cleanup
+  belongs with W19.
 - Docs: `docs/prompts/shadow-*.md` record the Phase 2 shadow agent; a canary on the shadow runs
   the production texts instead (docs/external-agents.md §6).
 
@@ -909,8 +1127,9 @@ after step 5, in this order (skip what never ran):
 2. **The writer back to Codex** (host): step 11's rollback if it ran, then
    `rm -f $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`.
    `whoami_w | jq -c .modes` equals `$FS/modes.before.json`. Hand member items back to Codex
-   with `POST /admin/inbox/requeue` (step 6's rollback), and widen the legacy token again
-   (step 7's rollback).
+   with `ai-wiki -b <bundle> admin inbox requeue --reason 'intake rolled back'` for both
+   bundles (step 6's rollback: after the restart, since it answers 409 under
+   `AIWIKI_LLM=off`), and widen the legacy token again (step 7's rollback).
 3. **The agent back to the legacy flow** (laptop): step 5's rollback block.
 4. **The cursors and unfinished items back to the ledger** (issue RB1 below): the writer's
    cursors as a v4 checkpoint on the newest run issue, so the legacy `find` picks them up, and
@@ -952,11 +1171,29 @@ Verify: `write` reads the checkpoint back identical; `maintain --import-only` li
 exported item as a frozen source. The next legacy run's `find` reports that checkpoint's
 `completed_at`.
 
+## 14. The owner's own review (afterwards, when wanted)
+
+The owner can review a concept by hand; a person's verdict makes it `human-reviewed`
+(design §5.5). On the laptop with the owner token (it holds read, audit and human_verify) and
+a throwaway CLI config as in 8a, outside the Auditor's runs (07:00 and 15:00 CST: the review
+takes the same auditor lease):
+
+```bash
+uv run ai-wiki -b solvely-wiki doctor --role reviewer                           # exit 0
+uv run ai-wiki -b solvely-wiki review begin --run "human-$(date +%F)" --as-human --json
+uv run ai-wiki -b solvely-wiki review next --path <concept> --json              # a human run picks its concept
+uv run ai-wiki -b solvely-wiki review evidence <concept> --json
+uv run ai-wiki -b solvely-wiki review verdict <concept> verified --note '<what you checked>'   # or corrected (edit it in the workspace first), or unverified
+uv run ai-wiki -b solvely-wiki review submit --json
+uv run ai-wiki -b solvely-wiki review end --run "human-$(date +%F)" --json
+```
+
+Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` shows trust
+`human-reviewed` with `verification_current: true` for `verified` or `corrected`. Rollback:
+`ai-wiki admin revert --changeset <the audit changeset id> --reason '<why>'`.
+
 ## Open risks
 
-- The runbook names W14's and W16/W17's routes, flags, verbs and files (`/admin/inbox/requeue`,
-  `/audit/backlog`, `AIWIKI_BACKLOG_EPOCH`, `ai-wiki-auditor`, `docs/prompts/auditor-*.md`) as
-  the design specifies them; check them against the merged build before day −1.
 - Step 2's isolation gate may fail on the Multica check: a runtime whose daemon is logged in
   as a workspace owner or admin can read every agent's custom env. The fix changes who the
   daemon runs as, which the owner decides.
@@ -965,7 +1202,14 @@ exported item as a frozen source. The next legacy run's `find` reports that chec
   say when to raise `max_items`.
 - The first days of `AIWIKI_AUDIT=external` release the old unverified concepts into the
   backlog a few a day (the seed), so the Auditor's backlog stays long for a while; the
-  maintainer is not affected. The backlog's age has no watchdog check yet.
+  maintainer is not affected. The 72 h backlog alert (step 10.1) ages seed entries out of its
+  measure, so it pages only on new work waiting.
+- There is no shadow comparison of the Auditor's verdicts with Codex's (the design's ≥ 85 %
+  agreement): the owner chose no waiting periods. Step 2d proves the path, not the judgment;
+  the canary's 8b and the first week's comments are the check.
+- `AIWIKI_LLM=off` with `AIWIKI_AUDIT=codex` audits nothing (no Codex audit is queued, and
+  audit changesets only dry-run); step 6's drop-in sets both together, so only a partial
+  hand edit of it reaches that state.
 - The writer still runs as `admin`, the user of an interactive Codex login on the same host.
   `AIWIKI_LLM=off` guarantees the service never starts an agent; moving the writer to its own
   user (design §8.4) is the host hardening that remains.
