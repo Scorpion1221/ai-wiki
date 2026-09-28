@@ -1,9 +1,10 @@
 # Using ai-wiki (agent guide)
 
 `ai-wiki` is a deterministic read window onto a curated **OKF v0.2 knowledge bundle**
-served over HTTP. Reads run no LLM; curation and adversarial audit are separate write-side
-jobs. This guide is how an agent installs the CLI, connects, reads safely, and submits
-source evidence.
+served over HTTP. The server runs no LLM at all: reads are deterministic, and writes pass a
+deterministic gate. Curation and adversarial audit are done by external agents that hold a
+credential of that role (docs/external-agents.md). This guide is how an agent installs the
+CLI, connects, reads safely, and submits source evidence.
 
 ## 1. Install the CLI
 
@@ -86,91 +87,69 @@ fresh, `verification_current: true`, and backed by a source that proves that exa
 - This client targets OKF v0.2 only. Do not produce `timestamp`, string `sources`,
   `last_verified_at`, `# Citations`, or legacy statuses.
 
-## 4. Submit, then audit (when writes are enabled)
+## 4. Write (when writes are enabled)
 
-Agents never edit concepts or the bundle Git repository directly. The one exception is the
-curating maintainer (`skills/ai-wiki-curating-maintainer`, run first as the Phase 2 shadow): it
-edits concepts only in a workspace pulled with `ai-wiki workspace pull` and submits them through
-the writer's gate with `ai-wiki propose`. Everyone else submits sources:
+Agents never edit concepts or the bundle Git repository directly. The writer is a
+deterministic gate (validation, service-owned bookkeeping, commit, push) that runs no LLM
+(`AIWIKI_LLM=off`). Every write is a submission or a changeset from a principal of the right
+role, onboarded as docs/external-agents.md describes.
+
+**Members submit sources:**
 
 ```bash
 ai-wiki ingest notes.md
 ai-wiki ingest a.md config.json chart.png
 cat notes.md | ai-wiki ingest - --title "<stable source identity>"
-ai-wiki jobs <ingest-job-id>
-ai-wiki jobs --pending-audit --json  # ingests older than 24h missing an audit
-ai-wiki audit <ingest-job-id>            # only after ingest status is done
-ai-wiki jobs <audit-job-id>
-ai-wiki -b my-kb maintain --manifest sources.json --state-dir ~/.ai-wiki/maintenance/my-kb --audit-pending
+ai-wiki jobs <job-id>
 ```
 
-`maintain` owns durable source/job state, polling and safe retries. Reuse the same state
-directory, never edit its `state.json`, and preserve all attempt receipts. Every entry ends a
-run as `done`, `pending` (a later run resumes it after its cooldown), `needs_repair` (attempt
-cap reached, or a non-retryable failure; it never blocks other sources), or `superseded` (a
-newer version of the same identity replaced an unfinished one). Exit codes: `0` everything is
-done or superseded; `1` work is pending, the runner lock is held, or a read failed (see
-`warnings`), which is normal; `3` at least one ledger entry needs repair, including entries
-left from earlier runs (this outranks `1`); `2` usage or state error. Retries follow the failed
-job's `failure.class`: capacity cools down for an hour, and its first three consecutive
-failures of a stage also stop the batch; the failed non-capacity attempts of a stage, whatever
-their class, are capped at 3 when the latest is transient, timeout, interrupted, conflict or
-model_output and at 2 when it is internal; auth, disk and input need repair. Omit
-`--manifest` to resume only; `--retry-now` skips cooldowns once, never caps or rollback gates;
-`--status` reads the saved state offline. The CLI adds no scheduler.
+Files are stored verbatim and become work items in the maintainer's queue
+(`AIWIKI_INTAKE=inbox`), ahead of repository and conversation items. The maintainer runs at
+04:00, 12:00 and 20:00 CST, so a submission waits at most about 8 hours. `ai-wiki jobs <id>`
+follows the item until a changeset curates it (with its commit) or the maintainer skips it
+(with the reason). PDF and other opaque formats stay `needs-conversion` rather than being
+guessed. Identical submissions are idempotent.
 
-Files are stored verbatim. Supported text/code/image sources are curated; PDF and other
-opaque formats remain `needs-conversion` rather than being guessed. Identical submissions and
-repeated audits are successful idempotent no-ops, except the one re-review after a verdict slip
-(below) and a new attempt after a failed job.
+**The maintainer curates.** One maintainer run per bundle at a time (the server's lease)
+follows `skills/ai-wiki-curating-maintainer`: `maint begin` collects repositories and Multica
+conversations deterministically and freezes their evidence on the writer, `maint next` claims
+an item, the agent edits concepts only in a workspace pulled with `ai-wiki workspace pull`,
+`ai-wiki validate` runs the gate's own code locally, and `ai-wiki propose` submits the
+changeset, which the writer judges synchronously: committed and pushed, or refused with codes
+to fix. The gate stamps `generated`, `verified` and `status`: curation never verifies. The
+run's comment opens with the verbatim `maint end` report.
 
-Ingest completion is not verification. Interpret the audit terminal result:
+**The auditor verifies.** A separate agent, with its own `audit` principal, another OS user
+and preferably another model family, reviews the audit backlog the server derives and
+submits audit changesets; only those confirm a generation (machine-confirmed). No principal
+may both curate and audit, and an auditor never reviews its own output.
 
-- `passed`: all concepts affected by that ingest were verified;
-- `needs_attention`: review completed, but some concepts remain unverified; do not retry
-  without new evidence. Completed concepts are stable but unverified, never long-lived draft.
-  Exception: `audit.reason: verdict_missing` or `verdict_invalid` means the reviewer gave no
-  usable verdict (a format slip, not an evidence judgment). One more `ai-wiki audit
-  <ingest-job-id>` is allowed and `maintain` does it automatically; after a second slip the
-  writer returns the latest attempt as a deduplicated result;
-- `passed` + `reason: no_concepts_to_audit`: ingest changed no concept files, so audit
-  completed immediately without a reviewer or audit commit;
-- job `failed`: technical, validation, or Git failure. `failure {class, retryable,
-  retry_after_s, stage, detail}` says why.
+Progress lives on the writer: work items, collector cursors and changeset receipts. A cursor
+advances once its evidence is frozen, never waiting for an audit; audits trail on their own
+schedule. A changeset's job is its receipt; do not re-check it against live `cat` results,
+because a public read mirror may lag the writer by a few minutes (record visibility as a
+warning). The read-side gates of §3 still apply to answers: a curated but unaudited concept
+is `draft` or `verification_current: false`.
 
-A collection cursor is decoupled from completion: advance it once every selected source is
-frozen into the `maintain` ledger (exit `0`, `1` or `3` with each manifest source in the
-summary; `maintain --import-only` freezes without submitting, so the cursor need not wait for
-a long run), not when its audit ends. Exit `2` or an `{"error"}` result never counts, even if
-some sources were frozen before the error. Pending sources are retried after their cooldown;
-needs-repair sources are re-checked every run but get no cooldown retry (they recover through a
-newer version, a new writer build, or an imported receipt). Neither holds the cursor back. A
-source is complete only when its audit job is `done` (`passed` or `needs_attention`), never
-after failure, timeout, or API error. The worker owns validation,
-commit and push. A real Git conflict aborts and retries from fresh remote state rather
-than running an LLM conflict resolver. A public read-only mirror may lag the writer, so
-record mirror visibility separately rather than assuming a push is already visible.
-Curator verification-history edits are deterministically discarded/restored by the worker; only
-an audit can confirm a new generation. Repairs are recorded in the Job receipt.
-The durable audit Job (done + passed validation + passed/needs_attention + successful Git
-result when applicable) is the per-source completion receipt. Do not re-check that receipt
-against live `cat` results: mirror lag, a missing new page, or a subsequent ingest must not
-turn a completed audit into a failed maintenance run. Mirror visibility is a warning, not a
-checkpoint gate; query-side evidence gates still apply to answers from returned content.
+A deterministic watchdog ([docs/maintenance-watchdog.md](docs/maintenance-watchdog.md)) pages
+humans on stale cursors, stuck or needs_human items and failed writer jobs. Agents add no
+monitoring, polling or retries of their own.
 
-A deterministic watchdog ([docs/maintenance-watchdog.md](docs/maintenance-watchdog.md))
-pages on a stale checkpoint, stuck runs, `needs_repair` or long-pending ledger entries
-(`ledger_needs_repair`, `ledger_pending_stale`), and writer job failures with no later
-attempt (`job_failed`, for up to 7 days, so retry a failed out-of-band job within the week or
-record why it is abandoned). `ledger_needs_repair` lasts until the entry recovers or an
-operator abandons it with `ai-wiki maintain --state-dir DIR --drop SHA256_PREFIX --reason TEXT`
-(status `dropped`, receipts kept). Agents must not add their own monitoring or drop entries.
+### Legacy flow: rollback only
+
+`ai-wiki maintain`, `ai-wiki audit`, `ai-wiki jobs --pending-audit` and
+`skills/ai-wiki-maintainer` drive the old path: ingest, server-side Codex curation, server-side
+Codex audit, and a ledger checkpoint. They work only while the writer still runs Codex
+(`AIWIKI_LLM=codex` with `AIWIKI_INTAKE=curate` and `AIWIKI_AUDIT=codex`) and exist solely to
+roll back (docs/final-cutover-runbook.md). A final-state writer answers their audit request
+with 409. The ledger's semantics (exit codes, cooldowns, `needs_repair`, `--drop`) are in the
+README's "Maintenance recovery".
 
 ## 5. Skill source of truth
 
-Repository directories `skills/ai-wiki`, `skills/ai-wiki-maintainer`,
-`skills/ai-wiki-curating-maintainer`, and `skills/okf-knowledge-curator` are canonical. Detect
-runtime drift with:
+Repository directories `skills/ai-wiki`, `skills/ai-wiki-curating-maintainer`,
+`skills/ai-wiki-auditor`, `skills/okf-knowledge-curator` and the rollback-only
+`skills/ai-wiki-maintainer` are canonical. Detect runtime drift with:
 
 ```bash
 python3 scripts/sync_skills.py --check

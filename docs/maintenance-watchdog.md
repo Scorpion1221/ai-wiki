@@ -156,6 +156,17 @@ them as the worker's user (`admin`). Git then owns the repository it reads, so t
 
    The watchdog only reads, so writer deploys and restarts do not need to wait for it.
 
+### Final state
+
+The curating maintainer's progress lives on the writer, so the writer-host unit with
+`--bundle <production bundle>` is the whole final-state watchdog: its maint checks page on
+cursors that stopped advancing (the maintainer did not run), items waiting too long or
+needing a human, and stuck run leases. `--multica` stays off: its checkpoint checks read the
+legacy v4 checkpoint, which the curating maintainer no longer writes, so it would alert
+`checkpoint_missing` forever. `--ledger` reads the legacy `maintain` ledger. Both return with
+a rollback. docs/final-cutover-runbook.md removes the shadow's `--bundle` when the shadow
+agent retires.
+
 ### Maintainer queue across the migration
 
 - The production bundle gets its cursors only at Phase 3a Day 0 (`maint import-v4`, design

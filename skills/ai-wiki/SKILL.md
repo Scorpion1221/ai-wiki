@@ -137,26 +137,31 @@ expired and, if useful, report only the narrower source-backed statement.
 
 ## Submit sources only when asked
 
-For maintenance, use the durable audit Job as the completion receipt, not a second read of
-the concept from a potentially lagging mirror. Follow `ai-wiki-maintainer` for checkpoint
-gates. `ai-wiki maintain` resumes a saved source manifest through ingest/audit with durable,
-cooldown-bounded retries; it does not create a scheduler. Mirror visibility warnings do not invalidate completed audits; the evidence gates
-above still apply whenever answering from the content actually returned.
-
 ```sh
 ai-wiki ingest notes.md
 ai-wiki ingest report.pdf chart.png
 cat notes.md | ai-wiki ingest - --title "<title>"
-ai-wiki jobs <ingest-job-id>
+ai-wiki jobs <job-id>
 ```
 
-Ingest submits sources; it never edits concepts directly. Read-only deployments may return
-`403`. Re-submitting identical content is a successful no-op and returns the existing job.
-A completed ingest reports validation, commit, and changed files. Maintainers must then run
-the separate audit workflow from the `ai-wiki-maintainer` skill; ordinary readers should
-not claim an ingest is verified merely because curation completed. A terminal
-`needs-conversion` result means the format was stored but not curated; convert it to a
-directly readable artifact and ingest that as a new source rather than polling forever.
+Ingest submits sources; it never edits concepts. The server runs no LLM: a submission is
+stored verbatim and becomes a work item that the maintainer agent curates on its next run
+(04:00, 12:00 or 20:00 CST, so within about 8 hours). `ai-wiki jobs <id>` follows it until a
+changeset curates it (with the commit) or the maintainer skips it (with the reason); do not
+poll it in a loop. Re-submitting identical content is a successful no-op. A terminal
+`needs-conversion` result means the format was stored but cannot be curated: convert it to a
+directly readable file and submit that as a new source. Read-only deployments may return
+`403`.
+
+Curation is not verification. A separate auditor agent verifies curated concepts on its own
+schedule; until it has, a new concept is `draft` and a changed one has
+`verification_current: false`, and the evidence gate above treats both accordingly. Never
+claim a submission is verified because it was curated.
+
+Maintaining the bundle is a role with its own credential and skill
+(`ai-wiki-curating-maintainer`; `ai-wiki-auditor` for audits), not something this skill
+does. `ai-wiki maintain` and `ai-wiki audit` belong to the legacy Codex flow and are kept
+only to roll back to it.
 
 Use `ai-wiki <command> --help` for complete flags and examples. `-v`, `-V`, and `--version`
 return the bare CLI version.

@@ -10,6 +10,11 @@ description: >-
 
 # AI Wiki Maintainer
 
+> **Rollback only.** Production runs `ai-wiki-curating-maintainer` against a writer that runs
+> no LLM (docs/final-cutover-runbook.md). This ingest and Codex-audit flow needs a writer that
+> still runs Codex (`AIWIKI_LLM=codex`, `AIWIKI_INTAKE=curate`, `AIWIKI_AUDIT=codex`); use it
+> only when the owner rolls back to it.
+
 Operate the service; never curate files yourself. The writer owns concept edits, bookkeeping,
 validation, commits and pushes. You run a deterministic pipeline, make one judgment (which
 knowledge is durable), and report. Scripts need Python ≥ 3.11 with `git` and `multica` on PATH.
