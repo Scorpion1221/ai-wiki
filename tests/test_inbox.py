@@ -8,12 +8,14 @@ Feishu link as the wiki's app), a quota bounds what one principal queues, and PO
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -459,6 +461,37 @@ def test_intake_commits_only_while_inbox_intake_applies_and_the_submitter_may_su
         f"not in the wiki's Git yet: {MEMBER} may no longer submit to this bundle; nothing is committed; "
         "the writer does not retry it, tell the owner")
     assert gate.remote_head() == head
+
+
+def test_raw_uploads_and_job_state_are_never_served_nor_in_a_workspace(gate) -> None:
+    """A reader sees the committed, redacted intake copy; the verbatim upload beside it and the
+    writer's .okf state are private, and no workspace carries the intake copies."""
+    receipt = ingest(gate, text=f"# Deploy\n\nkey {FAKE_KEY}\n", title="Deploy").json()
+    committed = receipt["intake"]
+    assert committed["status"] == "committed"
+    reader = gate.headers("auditor")
+
+    def get(route: str, **params):
+        return gate.client.get(route, params={"bundle": "kb-a", **params}, headers=reader)
+
+    raw = Path(receipt["source"]).name
+    for private in (receipt["source"], f"sources/intake/../inbox/{raw}", f".okf/jobs/{receipt['id']}.json"):
+        response = get("/cat", path=private)
+        assert response.status_code == 400 and FAKE_KEY not in response.text, private
+    assert get("/ls", dir=".okf/jobs").status_code == 400
+    assert [entry["path"] for entry in get("/ls", dir="sources/inbox").json()["items"]] == [
+        "sources/inbox/intake/"]
+    listed = [entry["path"] for entry in get("/ls", recursive=True, show_all=True).json()["items"]]
+    assert committed["path"] in listed and not [path for path in listed if path.startswith(".okf")]
+    assert receipt["source"] not in listed
+    served = get("/cat", path=committed["path"]).json()["content"]
+    assert served.startswith("# Deploy") and FAKE_KEY not in served and "<redacted:" in served
+
+    workspace = gate.client.get("/workspace", params={"bundle": "kb-a"}, headers=gate.headers("curator"))
+    assert workspace.status_code == 200 and workspace.headers["X-AIWiki-Revision"] == committed["commit"]
+    with tarfile.open(fileobj=io.BytesIO(workspace.content)) as tree:
+        names = tree.getnames()
+    assert "index.md" in names and not [name for name in names if name.startswith("sources/inbox")]
 
 
 def test_requeue_hands_waiting_member_items_back_to_codex(gate, tmp_path, monkeypatch, capsys) -> None:

@@ -730,13 +730,17 @@ def _tree(archive: bytes) -> tarfile.TarFile:
 
 
 def _unpublished(member: tarfile.TarInfo) -> bool:
-    return member.name == "viz.html"  # generated on the writer; never part of a workspace
+    """viz.html, generated on the writer, and the intake copies of member submissions, which no
+    curation reads (a maintainer reads an item's files from its work item), are never part of a
+    workspace."""
+    return member.name == "viz.html" or member.name.split("/")[:2] == ["sources", "inbox"]
 
 
 @app.get("/workspace")
 def workspace(bundle: str | None = None, revision: str | None = None, if_none_match: str | None = Header(default=None),
               authorization: str | None = Header(default=None)):
-    """The published bundle, sources/ included and viz.html left out, as a gzipped tar.
+    """The published bundle, sources/ included but for sources/inbox/ (the intake copies), and
+    viz.html left out, as a gzipped tar.
 
     ``X-AIWiki-Revision`` (also the ETag) names the commit; ``If-None-Match`` on it is a 304.
     ``revision`` asks for an earlier published commit instead; that needs the admin scope of a
