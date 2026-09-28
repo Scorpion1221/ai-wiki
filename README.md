@@ -42,7 +42,7 @@ deterministic gate. The final state is these writer flags
 | Variable | Final value | Effect |
 |---|---|---|
 | `AIWIKI_LLM` | `off` | the writer never starts an agent process and never reads `config.agent`; the legacy Codex routes (`POST /ingest` under `curate`, `POST /jobs/{id}/audit`) answer 409 |
-| `AIWIKI_INTAKE` | `inbox` | `POST /ingest` turns a member's or a person's submission into a work item for the maintainer agent; a `process:` token is refused |
+| `AIWIKI_INTAKE` | `inbox` | `POST /ingest` turns a member's or a person's submission into a work item for the maintainer agent and commits its copy (text redacted of secrets) to `sources/inbox/intake/` at once, answering with the commit; a `process:` token is refused |
 | `AIWIKI_AUDIT` | `external` | an auditor agent submits audit changesets over the backlog the server derives |
 | `AIWIKI_CHANGESETS_COMMIT` | `solvely-wiki,solvely-wiki-shadow` | the bundles whose changesets commit (the shadow stays as the canary bundle) |
 
@@ -112,8 +112,8 @@ ai-wiki cat <path>         # raw Markdown preview; add --full only if truncated
 ai-wiki cat <path> --json  # path + content + derived OKF metadata
 ai-wiki search "<query>"
 ai-wiki log --tail 30      # newest change-ledger lines first
-ai-wiki ingest notes.md    # submit a source: a work item the maintainer agent curates
-ai-wiki jobs <job-id>      # follow it until a changeset curates it or it is skipped
+ai-wiki ingest notes.md    # submit a source: committed at once, then curated by the maintainer agent
+ai-wiki jobs <job-id>      # its intake commit, then its item until a changeset curates it or it is skipped
 okf-render-viz <bundle> [out.html]  # generate a local HTML knowledge-graph snapshot
 ```
 

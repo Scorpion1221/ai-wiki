@@ -103,12 +103,19 @@ cat notes.md | ai-wiki ingest - --title "<stable source identity>"
 ai-wiki jobs <job-id>
 ```
 
-Files are stored verbatim and become work items in the maintainer's queue
-(`AIWIKI_INTAKE=inbox`), ahead of repository and conversation items. The maintainer runs once
-a day at 04:00 CST, so a submission waits at most about a day. `ai-wiki jobs <id>`
-follows the item until a changeset curates it (with its commit) or the maintainer skips it
-(with the reason). PDF and other opaque formats stay `needs-conversion` rather than being
-guessed. Identical submissions are idempotent.
+Each submission becomes a work item in the maintainer's queue (`AIWIKI_INTAKE=inbox`), ahead
+of repository and conversation items, and is committed to the wiki's Git at once: before it
+answers, the writer commits the submission's copy to `sources/inbox/intake/` in a commit
+`intake: <title> (<principal>)` and pushes it. Text is redacted of secrets first, as all
+evidence is; images and PDFs are committed as sent, so never submit a file that holds a
+secret. The answer and `ai-wiki jobs <id>` show that commit under `intake`; when the push
+failed, `intake` says so, the item still waits for the maintainer, and the writer retries the
+commit on its own. A link sent alone has nothing to commit until the maintainer reads it. The
+maintainer runs once a day at 04:00 CST, so a submission waits at most about a day to be
+curated; `ai-wiki jobs <id>` follows the item until a changeset curates it (with its commit)
+or the maintainer skips it (with the reason). PDF and other opaque formats stay
+`needs-conversion` rather than being guessed. Identical submissions are idempotent: a resend
+makes no second commit.
 
 **The maintainer curates.** One maintainer run per bundle at a time (the server's lease)
 follows `skills/ai-wiki-curating-maintainer`: `maint begin` collects repositories and Multica

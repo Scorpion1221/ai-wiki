@@ -10,7 +10,7 @@ swappable because the prompts name none and the server enforces every rule below
 |---|---|---|---|---|---|---|
 | Maintainer (curator) | `maintainer` | `process:ai-wiki-maintainer`, `aiw_c_` | read, submit, curate | the `maint` loop: collect, curate locally, `validate`, `propose` | `ai-wiki-curating-maintainer`, `okf-knowledge-curator` | `docs/prompts/production-autopilot-prompt.md`, `production-agent-instructions.md` |
 | Auditor | `auditor` | `process:ai-wiki-auditor`, `aiw_a_` | read, audit | the `review` loop over the server's audit backlog | `ai-wiki-auditor` | `docs/prompts/auditor-autopilot-prompt.md`, `auditor-agent-instructions.md` |
-| Member | `member --id member:<name>` | `member:<name>`, `aiw_m_` | read, submit | `ai-wiki ingest`: the source becomes a work item the maintainer curates | `ai-wiki` | none |
+| Member | `member --id member:<name>` | `member:<name>`, `aiw_m_` | read, submit | `ai-wiki ingest`: the source is committed at once and becomes a work item the maintainer curates | `ai-wiki` | none |
 | Reader | `watchdog` (or a custom reader) | `process:ai-wiki-watchdog`, `aiw_r_` | read | reads and status checks | `ai-wiki` | none |
 
 `human:*` principals (the owner) hold every scope and are the only ones that may upload
@@ -156,9 +156,13 @@ the Multica registry).
   cursors, receipts), so a run can move to another host or model between any two runs.
 - Auditor: its own schedule, never the maintainer's credential, never the maintainer's
   hand-off text: it reads only the backlog and the evidence the server serves.
-- Member: `ai-wiki ingest <file|text|link>`; `ai-wiki jobs <id>` follows the work item until a
-  changeset curates it (with the commit) or the maintainer skips it (with the reason). A
-  Feishu link is read on the member's machine with their own lark-cli; sent alone, the
+- Member: `ai-wiki ingest <file|text|link>`. The writer commits the submission's copy (text
+  redacted of secrets, a binary as sent) to `sources/inbox/intake/` and pushes it before it
+  answers, in a commit `intake: <title> (<principal>)`; the answer and `ai-wiki jobs <id>`
+  show that commit under `intake`, or say it is not in Git yet, and then the writer retries
+  it. `ai-wiki jobs <id>` also follows the work item until a changeset curates it (with the
+  changeset's commit) or the maintainer skips it (with the reason). A Feishu link is read on
+  the member's machine with their own lark-cli; sent alone, it has nothing to commit, and the
   maintainer reads it as the wiki's app if its host has one (runbook step 2c), otherwise the
   item closes `needs_access`; sent again once the app can read it, the same link reopens it. A
   lark-cli timeout parks it for the next run instead.

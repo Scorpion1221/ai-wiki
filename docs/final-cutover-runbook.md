@@ -30,7 +30,8 @@ to Codex (step 11's rollback).
 Requires the merged build of the three final-state units, which step 0's checks look for:
 
 - W14, inbox intake: `AIWIKI_INTAKE=inbox` (only for bundles in `AIWIKI_CHANGESETS_COMMIT`),
-  the member quota `AIWIKI_SUBMISSIONS_PER_DAY` (30 by default), `ai-wiki ingest <link>`,
+  each submission committed to Git at intake, the member quota `AIWIKI_SUBMISSIONS_PER_DAY`
+  (30 by default), `ai-wiki ingest <link>`,
   `maint next` reading a bare Feishu link as the wiki's app, and the rollback verb
   `ai-wiki admin inbox requeue`.
 - W16/W17, external audit: `AIWIKI_AUDIT=external` with `AIWIKI_BACKLOG_EPOCH`,
@@ -143,7 +144,8 @@ point is §13 (issue RB1).
     inbox job it sees `needs_repair` at once (`jobs <id>` answers `ready`).
 11. **Step 6: the final flags** (not before 06:30 CST). Where: host. Verify: the modes,
     `writer_agent {"runtime":"off"}`, 409 on the Codex audit route, `/audit/backlog`
-    answers, no codex process, and a member submission to the shadow bundle answers `ready`.
+    answers, no codex process, and a member submission to the shadow bundle answers `ready`
+    with its intake commit pushed.
     Rollback: remove the drop-in and restart, then `ai-wiki admin inbox requeue` per bundle
     (§6); after step 11, its rollback first, with new credentials once revoked. Owner: no.
 12. **Step 7: the legacy token to read and submit.** Where: host. Verify: the legacy token's
@@ -176,6 +178,7 @@ MERGE_SHA=$(git rev-parse origin/main); echo "$MERGE_SHA"
 grep -q '"llm": _mode("AIWIKI_LLM"' src/aiwiki/service/app.py && echo llm-switch
 grep -q -- '--no-checkpoint' scripts/maintenance_watchdog.py && echo watchdog-final
 grep -q -- '--writer-url' scripts/maintenance_watchdog.py && echo audit-watchdog
+grep -q 'def pending_intakes' src/aiwiki/service/inbox.py && echo intake-commits
 uv run ai-wiki review end --help >/dev/null && uv run ai-wiki admin inbox requeue --help >/dev/null \
   && echo review-and-requeue-verbs
 test -f skills/ai-wiki-auditor/SKILL.md && test -f docs/prompts/auditor-autopilot-prompt.md \
@@ -187,8 +190,8 @@ AIWIKI_BUNDLES=$(mktemp -d) AIWIKI_TOKEN=probe AIWIKI_CURATE=off AIWIKI_INTAKE=i
 gh run list --branch main --limit 1 --json conclusion,headSha | jq -c '.[0]'   # success, headSha $MERGE_SHA
 ```
 
-The checks print `llm-switch`, `watchdog-final`, `audit-watchdog`, `review-and-requeue-verbs`,
-`auditor-package` and `inbox external off`;
+The checks print `llm-switch`, `watchdog-final`, `audit-watchdog`, `intake-commits`,
+`review-and-requeue-verbs`, `auditor-package` and `inbox external off`;
 CI is green on `$MERGE_SHA`. Then apply §10.3 (the deploy procedure's lease guard, run
 windows and modes check) to `deploy_aliyun.sh`, and deploy:
 
@@ -369,6 +372,12 @@ Send the members the change for day 0:
 - `ai-wiki ingest` works as before, but a submission is curated by the maintainer's next daily
   run (04:00 CST), so within about a day, instead of within minutes; `ai-wiki jobs <id>`
   follows it. Update the CLI (`uv tool install --force …@$MERGE_SHA`) to send links.
+- Every submission is committed to the wiki's Git at once, before `ai-wiki ingest` answers:
+  its copy lands in `sources/inbox/intake/` in a commit `intake: <title> (<member>)`, and the
+  answer and `ai-wiki jobs <id>` show that commit. Text is redacted of secrets first; images and PDFs
+  are committed as sent, so never send a file that holds a secret. If the push fails, the
+  answer says the submission is not in Git yet: it is still queued, and the writer commits it
+  on a retry by itself. A resend of the same content makes no second commit.
 - `ai-wiki ingest https://<tenant>.feishu.cn/docx/<token>` reads the doc on the member's
   machine with their own lark-cli and sends its content, which is the reliable way. Without a
   logged-in lark-cli the link goes alone, and the maintainer reads it as the wiki's app only if
@@ -741,13 +750,18 @@ journalctl -u ai-wiki-worker --since -10min --no-pager | grep -iE 'traceback|err
 ```
 
 Then one member submission, to the shadow bundle (inbox intake applies to every committing
-bundle; nothing curates the shadow any more, and the item is closed at once):
+bundle; nothing curates the shadow any more, and the item is closed at once). It is committed
+and pushed before the answer:
 
 ```bash
 curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' \
   -d '{"text": "# Cut-over intake check\n\nNot knowledge: a check of member intake.\n", "title": "cut-over intake check"}' \
-  'http://127.0.0.1:8788/ingest?bundle=solvely-wiki-shadow' | tee $FS/intake-check.json | jq -c '{mode, status, item}'
-#   {"mode":"inbox","status":"ready","item":"it_…"}: a submission becomes a work item, not a Codex job
+  'http://127.0.0.1:8788/ingest?bundle=solvely-wiki-shadow' | tee $FS/intake-check.json \
+  | jq -c '{mode, status, item, intake: .intake.status}'
+#   {"mode":"inbox","status":"ready","item":"it_…","intake":"committed"}: a work item, not a Codex job, in Git at once
+as_admin git -C $SHADOW log -1 --format='%H %s' -- "$(jq -r .intake.path $FS/intake-check.json)"
+#   the sha of .intake.commit, then: intake: cut-over intake check (human:guobaoqi)
+as_admin git -C $SHADOW branch -r --contains "$(jq -r .intake.commit $FS/intake-check.json)"   # origin/main: pushed
 curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' \
   -d '{"outcome": "skipped", "reason": "out_of_scope", "note": "cut-over intake check"}' \
   "http://127.0.0.1:8788/admin/items/$(jq -r .item $FS/intake-check.json)/resolve?bundle=solvely-wiki-shadow" | jq -r .status
@@ -776,8 +790,8 @@ item a dead run left is taken back by itself), and each `unavailable` item (a li
 stored source, or a lost source or job record) is closed by hand on the host with
 `curl -s -X POST -H @$FS/owner.h -H 'Content-Type: application/json' -d '{"outcome":
 "needs_access", "reason": "intake rolled back"}' "http://127.0.0.1:8788/admin/items/<item>/resolve?bundle=<bundle>"`.
-Changesets already committed, and verifications the Auditor stamped, are valid OKF content and
-stay.
+Changesets and intake copies already committed, and verifications the Auditor stamped, are
+valid bundle content and stay.
 
 ## 7. Members: the legacy token to read and submit (host)
 
@@ -1198,8 +1212,10 @@ Finally, `shred -u $FS/owner.h $FS/legacy.h` on the host, and `unset AIWIKI_TOKE
   legacy texts), the legacy ledger on the runtime host
   (`~/.local/state/ai-wiki-maintainer/solvely-wiki`, read-only from step 4 on).
 - Member uploads stay verbatim in the git-ignored `sources/inbox/` after their item closes
-  (the requeue needs them); only the evidence a changeset cites is committed. Their cleanup
-  belongs with W19.
+  (the requeue needs them); what Git holds of each is its intake copy under
+  `sources/inbox/intake/` (text redacted), and a changeset still commits the evidence it cites
+  under `sources/` (a packet of one member file is the same Git blob). The verbatim copies'
+  cleanup belongs with W19.
 - Docs: `docs/prompts/shadow-*.md` record the Phase 2 shadow agent; a canary on the shadow runs
   the production texts instead (docs/external-agents.md §6).
 
@@ -1300,14 +1316,9 @@ Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` show
   generated by an auditor, so they never enter the backlog (A4). Until W18, the Auditor's run
   comment names such paths: the owner reads them there, and reviews one with §14 or hands it
   to the maintainer as new evidence.
-- Member submissions are not committed at intake. A submission lives on the writer's disk
-  (the git-ignored `sources/inbox/` and `.okf/maint`) until a changeset cites its evidence, up
-  to a day with one run a day, and an uncurated or skipped one only there (§12). The owner
-  asked on 2026-09-28 for members' raw sources to be committed to the wiki's Git on intake;
-  this build does not, so the owner confirms that deviation, or it is scheduled as a follow-up
-  (a service commit per submission, with a trailer the backlog treats as the service's own).
-  Until then a lost writer disk loses them; back up `sources/inbox` and `.okf/maint` with the
-  host.
+- An image or PDF a member submits is committed to Git as sent at intake: nothing can redact
+  a binary, and Git history keeps what it commits, so removing a secret someone sent in one
+  means rewriting the history of the remote and every mirror. The member notice says so (§1).
 - The heavy reads (`/workspace`, `/maint/status` and `/audit/backlog`, each a `git archive` or
   a walk of the bundle's history) answer any read token, the shared legacy one included, with
   no throttle on the writer. Rotating that token to per-member ones (design W20) narrows who can
