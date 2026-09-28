@@ -134,7 +134,9 @@ ai-wiki -b "$bundle" review submit --json
 | `8` | the writer gave no final answer | run `review submit` once more later; the writer dedupes. Never re-POST by hand |
 | `4` | the token lost its rights | §5, blocked |
 
-`review submit --dry-run --json` asks the writer's verdict without committing (a shadow run).
+`review submit --dry-run --json` asks the writer's verdict without committing; verdicts stay
+pending. When `begin` printed `mode: codex` the writer still runs Codex audits: every submit
+is then such a dry-run that settles its verdicts (`shadow: true`), and nothing is committed.
 
 ## 4. End and report
 
@@ -143,9 +145,11 @@ ai-wiki -b "$bundle" review end --run "$run" --json > "${TMPDIR:-/tmp}/ai-wiki-r
 ```
 
 It releases the lease and summarizes: `reviewed`, `verified`, `corrected`, `unverified`,
-`downgraded` codes, `dropped`, `unsubmitted` (must be empty: submit first) and
-`backlog_remaining`. Post a comment with those counts and at most 5 lines on notable findings
-(concept paths and what did not hold), then set the issue done with `--no-start`:
+`downgraded` codes, `dropped`, `unsubmitted` (must be empty: submit first),
+`backlog_remaining`, and `dry_run`: what the writer would have concluded for each dry-run.
+Post a comment with those counts (in a shadow run, also the `dry_run` rows as a JSON code
+block) and at most 5 lines on notable findings (concept paths and what did not hold), then set
+the issue done with `--no-start`:
 
 ```sh
 multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin < "${TMPDIR:-/tmp}/ai-wiki-review-comment-$run.md"

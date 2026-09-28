@@ -99,6 +99,7 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
         with contextlib.suppress(MaintError):
             maint._call("DELETE", "/maint/lease/auditor", bundle=bundle, run=run)
         return PREFLIGHT, {"run": run, "failed": "workspace", "error": str(exc)}
+    state["mode"] = found.get("mode")  # codex: the writer still runs Codex audits, so this run shadows them
     _save(state_dir, state)
     maint._write(_pointer(state_dir, bundle), {"run": run, "bundle": bundle})
     return OK, {"run": run, "bundle": bundle, "workspace": state["workspace"], "base_revision": pulled["base_revision"],
@@ -290,10 +291,14 @@ def verdict(state_dir: Path, bundle: str | None, path: str, value: str, note: st
 def submit(state_dir: Path, bundle: str | None, *, dry_run: bool, wait: float) -> tuple[int, dict]:
     """Send the pending verdicts in audit changesets of at most 5. A review the writer rejects or
     finds stale is dropped (its code kept) and the rest are sent again; the writer's receipt
-    records the rest. A dry-run asks the writer's verdict and changes nothing."""
+    records the rest. A dry-run asks the writer's verdict, changes nothing and records it under
+    ``dry_run`` (verdicts stay pending). While the writer runs Codex audits (mode codex) every
+    submit is such a dry-run and settles its verdicts: a shadow run (design §9, phase 4a)."""
     from aiwiki.cli import workspace
 
     state = _load(state_dir, bundle)
+    shadow = state.get("mode") == "codex"
+    dry_run = dry_run or shadow
     root = Path(state["workspace"])
     results, dropped, code = [], [], OK
     pending = dict(state["pending"])
@@ -320,20 +325,24 @@ def submit(state_dir: Path, bundle: str | None, *, dry_run: bool, wait: float) -
             raise MaintError(f"the writer refused the review ({status}): "
                              + "; ".join(f"{error.get('code')}: {error.get('message')}"
                                          for error in answer.get("errors") or []) or str(answer.get("detail")), FAILED)
-        results += [{"job": answer.get("id"), **{key: row.get(key) for key in ("path", "outcome", "downgrade")}}
+        results += [{"job": answer.get("id"), **{key: row.get(key) for key in
+                                                 ("path", "base", "verdict", "outcome", "downgrade")}}
                     for row in answer.get("reviews") or []]
         for path in batch:
             pending.pop(path)
-    if not dry_run:
+    if dry_run:
+        state.setdefault("dry_run", {}).update((row["path"], row) for row in results)
+    if shadow or not dry_run:
         state["pending"] = pending
-        state["submitted"] += results
         state["dropped"] += dropped
-        _save(state_dir, state)
-        if results:
-            with contextlib.suppress(workspace.WorkspaceError, OSError):
-                workspace.pull(root, state["bundle"])
-    return code, {"dry_run": dry_run, "reviews": results, "dropped": dropped,
-                  "pending": len(state["pending"])}  # a dry-run keeps every verdict pending
+    if not dry_run:
+        state["submitted"] += results
+    _save(state_dir, state)
+    if results and not dry_run:
+        with contextlib.suppress(workspace.WorkspaceError, OSError):
+            workspace.pull(root, state["bundle"])
+    return code, {"dry_run": dry_run, "shadow": shadow, "reviews": results, "dropped": dropped,
+                  "pending": len(state["pending"])}
 
 
 def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
@@ -354,11 +363,14 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
     outcomes = [row.get("outcome") for row in state["submitted"]]
     if (maint._read(_pointer(state_dir, state["bundle"])) or {}).get("run") == run:
         _pointer(state_dir, state["bundle"]).unlink()
-    return OK, {"run": run, "bundle": state["bundle"], "reviewed": len(state["submitted"]),
-                **{name: outcomes.count(name) for name in VERDICTS},
+    return OK, {"run": run, "bundle": state["bundle"], "shadow": state.get("mode") == "codex",
+                "reviewed": len(state["submitted"]), **{name: outcomes.count(name) for name in VERDICTS},
                 "downgraded": sorted({row["downgrade"] for row in state["submitted"] if row.get("downgrade")}),
                 "dropped": state["dropped"], "unsubmitted": sorted(state["pending"]), "backlog_remaining": remaining,
-                "lease": released, "jobs": sorted({row["job"] for row in state["submitted"] if row.get("job")})}
+                "lease": released, "jobs": sorted({row["job"] for row in state["submitted"] if row.get("job")}),
+                # What the writer would have concluded (a dry-run commits nothing): compare with Codex.
+                "dry_run": [{key: row.get(key) for key in ("path", "base", "verdict", "outcome", "downgrade")}
+                            for _path, row in sorted((state.get("dry_run") or {}).items())]}
 
 
 # --- the command line ----------------------------------------------------------------------------

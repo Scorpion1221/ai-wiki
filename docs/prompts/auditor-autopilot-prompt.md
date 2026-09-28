@@ -26,6 +26,7 @@ cfg="$HOME/.ai-wiki/maint.json"            # 只读其中的 repos.root，用来
 ## 结项
 
 - 先 `review submit` 把所有结论送出，`review end --json` 里的 `unsubmitted` 必须为空。
-- 评论先贴 `review end` 的计数（英文，不翻译），再用中文补最多 5 行发现（概念路径和哪条主张不成立），然后 `multica issue status "$MULTICA_ISSUE_ID" done --no-start`。
+- writer 仍在 `AIWIKI_AUDIT=codex` 时（`review begin` 输出 `mode: codex`）这一轮是影子运行：`review submit` 只做 dry-run，不提交任何东西，照常走完流程即可。
+- 评论先贴 `review end` 的计数（英文，不翻译；影子运行再贴 `dry_run` 各行的 JSON 代码块，用来和 Codex 审计比对），再用中文补最多 5 行发现（概念路径和哪条主张不成立），然后 `multica issue status "$MULTICA_ISSUE_ID" done --no-start`。
 - 只有预检或 `review begin` 退出 4 时 issue 设为 blocked 并写明失败的检查项。backlog 积压、unverified、被 drop 的条目都不阻塞，watchdog 负责告警。
 - 不要手工 POST、curl 或轮询 job；不创建子 agent 或子 issue；不运行 Git 改动 workspace。

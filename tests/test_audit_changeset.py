@@ -758,3 +758,31 @@ def test_a_human_reviews_any_concept_through_the_cli(gate, capsys, monkeypatch) 
     agent = gate.tmp / "auditor-state"
     assert wiki(capsys, "review", "begin", "--run", "AUD-2", "--state-dir", agent)[0] == 0
     assert wiki(capsys, "review", "next", "--path", METRIC, "--state-dir", agent)[0] == 2
+
+
+def test_a_run_against_a_codex_writer_shadows_and_keeps_its_verdicts(gate, capsys, monkeypatch) -> None:
+    """Phase 4a: while the writer runs Codex audits, the same prompt and verbs dry-run every
+    verdict and ``review end`` lists what the writer would have concluded, for comparison."""
+    tools = gate.tmp / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    gate.app(AIWIKI_AUDIT="codex")
+    gate.connect("auditor")
+    state, head = gate.tmp / "auditor-state", gate.remote_head()
+    code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--state-dir", state)
+    assert code == 0 and begun["mode"] == "codex", begun
+    code, taken = wiki(capsys, "review", "next", "--state-dir", state)
+    assert code == 0 and taken["path"] == AIO_AB
+    assert wiki(capsys, "review", "verdict", AIO_AB, "unverified", "--note", "lift not in S1",
+                "--state-dir", state)[0] == 0
+
+    code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
+
+    assert code == 0 and (sent["dry_run"], sent["shadow"], sent["pending"]) == (True, True, 0), sent
+    code, report = wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)
+    assert code == 0 and report["shadow"] is True and (report["reviewed"], report["unsubmitted"]) == (0, [])
+    assert report["dry_run"] == [{"path": AIO_AB, "base": taken["base"], "verdict": "unverified",
+                                  "outcome": "unverified", "downgrade": None}]
+    assert gate.remote_head() == head and gate.jobs() == []
