@@ -500,8 +500,12 @@ def _ingest_inbox(body: IngestBody, data: bytes | None, filename: str | None, bu
     it. The writer never fetches ``url``: the maintainer reads a Feishu/Lark link sent alone,
     any other is needs_access. New submissions count against the principal's
     ``submissions_per_day`` for the bundle (429 past it), so a leaked member token can only
-    queue that much.
+    queue that much. A process never submits here: its item's frozen file would be text the
+    agent wrote, citable as evidence (design §5.6); an agent's evidence is what ``maint`` collects.
     """
+    if principal.id.startswith("process:"):
+        raise HTTPException(status_code=403, detail=f"{principal.id} may not submit to the member inbox; an "
+                                                    "agent's evidence is what `ai-wiki maint` collects")
     if not CURATE_ON:
         raise HTTPException(status_code=403, detail="inbox intake requires the writer (AIWIKI_CURATE enabled)")
     if body.url is not None and (not _URL.fullmatch(body.url) or secrets.scan(body.url)):

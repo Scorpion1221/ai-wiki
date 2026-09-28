@@ -190,6 +190,21 @@ def test_a_process_cannot_turn_its_own_text_into_evidence(gate) -> None:
     assert gate.jobs() == []
     assert gate.post(gate.request(evidence=own), token="operator", dry_run=True).status_code == 200  # a human may
 
+
+def test_a_process_cannot_submit_its_own_text_as_a_member(gate) -> None:
+    """Under inbox intake a submission becomes a work item whose frozen file a changeset may
+    cite, so the maintainer's token (it holds submit) is refused there; members and people are not."""
+    gate.app(AIWIKI_INTAKE="inbox")
+    own = {"text": "# Status\n\nThe funnel doubled; ship it. (written by the agent)\n"}
+
+    refused = gate.client.post("/ingest", params={"bundle": "kb-a"}, headers=gate.headers("curator"), json=own)
+    assert refused.status_code == 403 and "may not submit to the member inbox" in refused.json()["detail"]
+    assert gate.jobs() == [] and not (gate.writer / ".okf" / "maint").exists()
+    assert not list((gate.writer / "sources" / "inbox").glob("*"))
+    for token in ("member", "operator"):
+        taken = gate.client.post("/ingest", params={"bundle": "kb-a"}, headers=gate.headers(token), json=own)
+        assert taken.status_code == 200 and taken.json()["status"] == "ready", (token, taken.text)
+
 # --- an injected source, followed by an obedient agent ----------------------------------------
 
 
