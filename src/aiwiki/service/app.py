@@ -1075,10 +1075,11 @@ def maint_status(bundle: str | None = None, authorization: str | None = Header(d
         except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             status["audit"]["error"] = str(exc)[:300]
         else:
-            generated = [entry["generated"]["at"] for entry in found["concepts"]
-                         if entry["reason"] != "seed" and entry["generated"]["at"]]
+            # Age from when each version became due: a push to an old concept waits since the push.
+            due = [entry["since"] for entry in found["concepts"]
+                   if entry["reason"] != "seed" and audit_runtime._instant(entry["since"])]
             status["audit"].update(pending=len(found["concepts"]), seed=found["seed"], epoch=found["epoch"],
-                                   oldest_finished=min(generated, default=None))
+                                   oldest_finished=min(due, key=audit_runtime._instant, default=None))
     return status
 
 

@@ -1029,9 +1029,10 @@ def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str]]:
     return reviewed, seeded
 
 
-def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> set[str]:
-    """Paths that a commit since ``since`` changed and the service did not write (§5.3): such a
-    push may change content without a new generation, so its concepts are reviewed again.
+def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> dict[str, str]:
+    """Paths that a commit since ``since`` changed and the service did not write (§5.3), each with
+    the time of the newest such commit: a push may change content without a new generation, so
+    its concepts are reviewed again.
 
     "Since" follows ancestry, not dates: the walk covers every first-parent commit above the
     oldest one dated at or after ``since``, so a later commit with a skewed older date cannot
@@ -1039,24 +1040,27 @@ def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> s
     """
     root = curate._repo_root(bundle)
     if root is None or root.resolve() != bundle.resolve():
-        return set()
+        return {}
     chain = curate._git(root, "log", "--first-parent", "--format=%H %ct", revision, "--")
     if chain.returncode != 0:
         raise RuntimeError(f"cannot read the history of {revision}: {chain.stderr.strip()[-200:]}")
     commits = [line.split() for line in chain.stdout.splitlines()]  # newest first
     after = [index for index, (_sha, stamp) in enumerate(commits) if int(stamp) >= since.timestamp()]
     if not after:
-        return set()
+        return {}
     span = revision if after[-1] == len(commits) - 1 else f"{commits[after[-1] + 1][0]}..{revision}"
     log = curate._git(root, "-c", "core.quotepath=false", "log", "--first-parent", "-m", "--no-renames",
-                      "--name-only", "--format=%x1e%B%x1f", span, "--")
+                      "--name-only", "--format=%x1e%ct%x1f%B%x1f", span, "--")
     if log.returncode != 0:
         raise RuntimeError(f"cannot read the history since {since.isoformat()}: {log.stderr.strip()[-200:]}")
-    touched = set()
-    for record in log.stdout.split("\x1e")[1:]:
-        message, _separator, names = record.partition("\x1f")
+    touched: dict[str, str] = {}
+    for record in log.stdout.split("\x1e")[1:]:  # newest first
+        stamp, _separator, rest = record.partition("\x1f")
+        message, _separator, names = rest.partition("\x1f")
         if not (_SERVICE_TRAILER.search(message) or _SERVICE_SUBJECT.fullmatch(message.split("\n", 1)[0].strip())):
-            touched.update(name.strip() for name in names.splitlines() if name.strip())
+            when = datetime.fromtimestamp(int(stamp), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for name in filter(None, (name.strip() for name in names.splitlines())):
+                touched.setdefault(name, when)
     return touched
 
 
@@ -1070,14 +1074,15 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     generate it and it has an unverified generation since the epoch (``generation``) or is
     among the oldest unverified concepts from before the epoch, released
     ``AIWIKI_AUDIT_SEED_PER_DAY`` a day (``seed``).
-    Without an epoch every unverified concept is a ``generation``. New work comes first, each
-    part oldest first. ``tree`` is the checkout read (the bundle by default); the review
-    receipts and the history are the bundle's.
+    Without an epoch every unverified concept is a ``generation``. Each entry's ``since`` is
+    when that version became due: the newest such commit for ``external``, else its generation.
+    New work comes first, each part oldest first. ``tree`` is the checkout read (the bundle by
+    default); the review receipts and the history are the bundle's.
     """
     epoch, per_day = settings or backlog_settings()
     tree = tree or bundle
     reviewed, seeded = review_records(bundle)
-    external = external_changes(bundle, epoch, revision) if epoch else set()
+    external = external_changes(bundle, epoch, revision) if epoch else {}
     frozen = _frozen(tree)
     fresh, older = [], []
     for rel, text in _concepts(tree):
@@ -1096,16 +1101,16 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
                  "sources": _local_sources(frozen, rel, frontmatter)}
         generated_at = _instant(at)
         if rel in external:
-            fresh.append({**entry, "reason": "external"})
+            fresh.append({**entry, "reason": "external", "since": external[rel]})
         elif current or by in auditors:
             continue
         elif epoch is None or (generated_at is not None and generated_at >= epoch):
-            fresh.append({**entry, "reason": "generation"})
+            fresh.append({**entry, "reason": "generation", "since": at or None})
         else:
-            older.append({**entry, "reason": "seed"})
+            older.append({**entry, "reason": "seed", "since": at or None})
 
     def oldest(entry: dict) -> tuple:
-        return _instant(entry["generated"]["at"]) or datetime.min.replace(tzinfo=UTC), entry["path"]
+        return _instant(entry["since"]) or datetime.min.replace(tzinfo=UTC), entry["path"]
 
     released = 0
     if epoch is not None:

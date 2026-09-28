@@ -616,6 +616,74 @@ def test_a_maintainer_backlog_cannot_hide_what_changed_on_the_card() -> None:
     assert "……另有 2 项" in text
 
 
+# --- external audit backlog -------------------------------------------------------------------
+
+
+class Writer:
+    """Local stand-in for the writer's GET /maint/status."""
+
+    def __init__(self) -> None:
+        self.audit: dict = {"mode": "codex", "pending": 0, "oldest_finished": None}
+        self.status, self.requests = 200, []
+        writer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - http.server API
+                writer.requests.append((self.path, self.headers.get("Authorization")))
+                body = json.dumps({"audit": writer.audit} if writer.status == 200 else {"detail": "no"}).encode()
+                self.send_response(writer.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:
+                pass
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_the_external_audit_backlog_alerts_past_its_slo(tmp_path: Path) -> None:
+    """Design §5.2: the backlog is derived by the writer, so the watchdog asks it; an auditor that
+    stopped running shows as the oldest entry waiting past 72h."""
+    bundle = make_bundle(tmp_path, iso(datetime.now(UTC)), [])
+    writer = Writer()
+    token = "reader-" + "token"
+    args = ("--bundle", str(bundle), "--writer-url", writer.url)
+    try:
+        code, result = run(*args, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        assert (code, result["alerts"], result["errors"]) == (0, [], [])  # Codex audits are writer jobs
+        assert writer.requests == [("/maint/status?bundle=solvely-wiki", f"Bearer {token}")]
+
+        writer.audit = {"mode": "external", "pending": 3, "seed": {"waiting": 5},
+                        "oldest_finished": iso(datetime.now(UTC) - timedelta(hours=71))}
+        assert run(*args, env={"AIWIKI_WATCHDOG_TOKEN": token})[0] == 0
+        writer.audit["oldest_finished"] = iso(datetime.now(UTC) - timedelta(hours=80))
+        code, result = run(*args, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        assert (code, keys(result)) == (1, {"audit_backlog_stale:solvely-wiki"})
+        assert "3 个概念待审" in result["alerts"][0]["message"]
+        assert result["checks"]["audit:solvely-wiki"]["age_hours"] >= 80
+
+        writer.audit = {"mode": "external", "pending": None, "error": "cannot read the history"}
+        assert keys(run(*args, env={"AIWIKI_WATCHDOG_TOKEN": token})[1]) == {"audit_backlog_error:solvely-wiki"}
+        writer.status = 401
+        code, result = run(*args, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        assert code == 2 and result["errors"][0]["check"] == "audit:solvely-wiki" and "401" in result["errors"][0][
+            "error"]
+    finally:
+        writer.close()
+    assert token not in json.dumps(result)
+    proc = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, timeout=60,
+                          env={k: v for k, v in os.environ.items() if not k.startswith("AIWIKI_WATCHDOG_")})
+    assert proc.returncode == 2 and "AIWIKI_WATCHDOG_TOKEN" in proc.stderr
+
+
 # --- Feishu notification and deduplication ----------------------------------------------------
 
 

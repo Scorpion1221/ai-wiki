@@ -100,7 +100,8 @@ def test_the_backlog_lists_unverified_generations_since_the_epoch(gate) -> None:
     assert (found["shown"], found["total"], found["truncated"]) == (1, 1, False)
     # Nothing a curator wrote to hand the audit over is part of it.
     assert set(entry) == {"path", "base", "type", "title", "status", "generated", "verification_current",
-                          "sources", "reason"}
+                          "sources", "reason", "since"}
+    assert entry["since"] == entry["generated"]["at"]
 
 
 def test_the_backlog_is_derived_so_any_rebuild_agrees(gate) -> None:
@@ -114,8 +115,8 @@ def test_the_backlog_is_derived_so_any_rebuild_agrees(gate) -> None:
     gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=EPOCH)  # a restart holds no backlog state to lose
     rebuilt = audit.backlog(gate.writer, auditors=gate.appmod._auditors(), now=datetime.now(UTC))
 
-    assert [(entry["path"], entry["reason"]) for entry in served["concepts"]] == [
-        (METRIC, "external"), ("metrics/owned.md", "generation")]  # oldest generation first
+    assert sorted((entry["path"], entry["reason"]) for entry in served["concepts"]) == [
+        ("metrics/owned.md", "generation"), (METRIC, "external")]
     assert rebuilt["concepts"] == served["concepts"] == backlog(gate)["concepts"]
 
 
@@ -611,6 +612,15 @@ def test_maint_status_counts_the_backlog_in_external_mode(gate) -> None:
 
     assert status["audit"]["mode"] == "external" and status["audit"]["pending"] == 1
     assert status["audit"]["oldest_finished"] == "2026-09-23T15:46:00Z" and status["audit"]["epoch"] == EPOCH
+    # A push to a concept generated long ago waits since the push, not since that generation.
+    pushed = push(gate, METRIC, gate.read(METRIC).replace("# Summary", "# Summary\n\nA hand note.", 1))
+    since = datetime.fromtimestamp(int(git(gate.remote, "log", "-1", "--format=%ct", pushed)), UTC)
+    entry = next(entry for entry in backlog(gate)["concepts"] if entry["path"] == METRIC)
+    assert entry["since"] == since.strftime("%Y-%m-%dT%H:%M:%SZ") and entry["generated"]["at"] < EPOCH
+    lease(gate)
+    assert submit(gate, review(gate, AIO_AB)).status_code == 201  # the writer syncs to the push too
+    status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers("auditor")).json()
+    assert (status["audit"]["pending"], status["audit"]["oldest_finished"]) == (1, entry["since"])
 
 
 def test_the_read_mirror_never_serves_the_backlog(gate) -> None:
