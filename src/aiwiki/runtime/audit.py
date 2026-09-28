@@ -981,14 +981,32 @@ def _concepts(tree: Path) -> Iterator[tuple[str, str]]:
         yield rel.as_posix(), path.read_bytes().decode("utf-8", errors="replace")
 
 
-def _local_sources(tree: Path, rel: str, frontmatter: Mapping) -> list[str]:
+def _frozen(tree: Path) -> Callable[[str], bool]:
+    """Whether a bundle file holds the bytes ``sources/.hashes.yaml`` recorded for it. Only the
+    service's ledger makes a file frozen evidence, never its presence: a push can add any file."""
+    try:
+        ledger = yaml.safe_load((tree / "sources" / ".hashes.yaml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        ledger = None
+    ledger = ledger if isinstance(ledger, dict) else {}
+    checked: dict[str, bool] = {}
+
+    def frozen(target: str) -> bool:
+        if target not in checked:
+            path = tree / target
+            checked[target] = path.is_file() and not has_symlink_component(tree, path) \
+                and hashlib.sha256(path.read_bytes()).hexdigest() == str(ledger.get(target))
+        return checked[target]
+    return frozen
+
+
+def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping) -> list[str]:
     """The cited sources that are frozen files of the bundle: the only evidence an audit weighs."""
     found = set()
     for source in frontmatter.get("sources") if isinstance(frontmatter.get("sources"), list) else []:
         resource = source.get("resource") if isinstance(source, dict) else None
         target = _source_resource_rel(resource.strip(), rel) if isinstance(resource, str) else None
-        if target and target.startswith("sources/") and (tree / target).is_file() \
-                and not has_symlink_component(tree, tree / target):
+        if target and target.startswith("sources/") and frozen(target):
             found.add(target)
     return sorted(found)
 
@@ -1047,6 +1065,7 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     tree = tree or bundle
     reviewed, seeded = review_records(bundle)
     external = external_changes(bundle, epoch, revision) if epoch else set()
+    frozen = _frozen(tree)
     fresh, older = [], []
     for rel, text in _concepts(tree):
         try:
@@ -1061,7 +1080,7 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
         entry = {"path": rel, "base": base, **{key: None if frontmatter.get(key) is None else str(frontmatter[key])
                                               for key in ("type", "title", "status")},
                  "generated": {"by": by or None, "at": at or None}, "verification_current": current,
-                 "sources": _local_sources(tree, rel, frontmatter)}
+                 "sources": _local_sources(frozen, rel, frontmatter)}
         generated_at = _instant(at)
         if rel in external:
             fresh.append({**entry, "reason": "external"})
@@ -1173,6 +1192,7 @@ def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: dateti
 def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, now: datetime,
                scope: Mapping[str, Mapping] | None, auditors: frozenset[str]) -> dict:
     before_errors = validate_bundle(workspace)
+    frozen = _frozen(workspace)
     errors, conflicts, reviews, written, repairs = [], [], [], {}, {}
     for review in sorted(request["reviews"], key=lambda item: unicodedata.normalize("NFC", item["path"])):
         rel = unicodedata.normalize("NFC", review["path"])
@@ -1209,9 +1229,9 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
         if not ((verdict == "corrected" and content is not None)
                 or (verdict in ("verified", "unverified") and content is None)):
             verdict, downgrade = "unverified", "D_INVALID_VERDICT"  # A8
-        sources = _local_sources(workspace, rel, head)
-        if verdict != "unverified" and not sources:
-            verdict, downgrade = "unverified", "D_NO_EVIDENCE"  # a reviewer's note is never evidence
+        sources = _local_sources(frozen, rel, head)
+        if verdict != "unverified" and not sources:  # a reviewer's note or a pushed file is never evidence
+            verdict, downgrade = "unverified", "D_NO_EVIDENCE"
         edited = before
         if verdict == "corrected":
             errors.extend(changeset._error("secret_detected", f"content matches secret rule {rule}", rel, line=line,

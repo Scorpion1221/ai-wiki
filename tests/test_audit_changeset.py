@@ -452,6 +452,31 @@ def test_a_note_is_never_evidence(gate) -> None:
     assert "verified" not in published(gate, "metrics/hearsay.md")
 
 
+@pytest.mark.parametrize("source", ["unrecorded", "drifted"])
+def test_only_sources_the_ledger_froze_are_evidence(gate, source) -> None:
+    """A file a push added, or a cited source a push rewrote, is not in sources/.hashes.yaml as
+    it stands: it is no frozen evidence, so it cannot carry a verification."""
+    cited = parse_document(gate.read(METRIC)).frontmatter["sources"][0]["resource"].lstrip("/")
+    text = gate.read(METRIC).replace("# Summary", "# Summary\n\nA hand note.", 1)
+    if source == "unrecorded":
+        text = text.replace(f"resource: /{cited}", "resource: /sources/fake-note.md")
+        cited = "sources/fake-note.md"
+    other = clone(gate.remote, gate.tmp / "other-evidence")
+    (other / METRIC).write_text(text, encoding="utf-8")
+    (other / cited).write_text("The funnel moved. (agent-written note)\n", encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-qm", "hand edit")
+    git(other, "push", "-q", "origin", "main")
+    git(gate.writer, "fetch", "-q")
+    entry = next(entry for entry in backlog(gate)["concepts"] if entry["path"] == METRIC)
+    assert entry["reason"] == "external" and entry["sources"] == []
+    lease(gate)
+
+    job = submit(gate, review(gate, METRIC)).json()
+
+    assert (job["reviews"][0]["outcome"], job["reviews"][0]["downgrade"]) == ("unverified", "D_NO_EVIDENCE"), job
+
+
 # --- replay of the real Codex audits 71ea85ca9c20 / e94c8b707aea -------------------------------------
 
 

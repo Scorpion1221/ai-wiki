@@ -75,8 +75,9 @@ empty) or `11` (budget spent): go to §3.5, then §4.
 ai-wiki -b "$bundle" review evidence <path> --config "$cfg" --json
 ```
 
-Each cited source: `frozen` (matches the service's hash ledger), `drifted` or `missing`
-(unreliable), `external` (a URL: not evidence). Each Git part of a packet re-read on this host:
+Each cited source: `frozen` (matches the service's hash ledger), `unrecorded`, `drifted` or
+`missing` (unreliable: the writer does not count it as evidence either), `external` (a URL:
+not evidence). Each Git part of a packet re-read on this host:
 `match`, `differs (truncated or redacted)` (the frozen copy was clipped; read the re-read copy
 the row names), `differs` (the frozen text is not what Git holds: unreliable) or `unavailable`.
 Read evidence with `head`, `sed -n` or `rg`, never whole batches.
