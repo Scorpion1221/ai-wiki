@@ -1034,10 +1034,11 @@ def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str]]:
     return reviewed, seeded
 
 
-def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> dict[str, str]:
-    """Paths that a commit since ``since`` changed and the service did not write (§5.3), each with
-    the time of the newest such commit: a push may change content without a new generation, so
-    its concepts are reviewed again.
+def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> dict[str, tuple[int, str, bool]]:
+    """The newest commit since ``since`` that changed each path: ``(order, time, external)``, order
+    0 the newest, external when the service did not write it (§5.3). A push past the service may
+    change content without a new generation, so its concepts are reviewed again, until a later
+    service commit (their review, or a new generation) settles them.
 
     "Since" follows ancestry, not dates: the walk covers every first-parent commit above the
     oldest one dated at or after ``since``, so a later commit with a skewed older date cannot
@@ -1058,14 +1059,15 @@ def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> d
                       "--name-only", "--format=%x1e%ct%x1f%B%x1f", span, "--")
     if log.returncode != 0:
         raise RuntimeError(f"cannot read the history since {since.isoformat()}: {log.stderr.strip()[-200:]}")
-    touched: dict[str, str] = {}
-    for record in log.stdout.split("\x1e")[1:]:  # newest first
+    touched: dict[str, tuple[int, str, bool]] = {}
+    for order, record in enumerate(log.stdout.split("\x1e")[1:]):  # newest first
         stamp, _separator, rest = record.partition("\x1f")
         message, _separator, names = rest.partition("\x1f")
-        if not (_SERVICE_TRAILER.search(message) or _SERVICE_SUBJECT.fullmatch(message.split("\n", 1)[0].strip())):
-            when = datetime.fromtimestamp(int(stamp), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            for name in filter(None, (name.strip() for name in names.splitlines())):
-                touched.setdefault(name, when)
+        outside = not (_SERVICE_TRAILER.search(message)
+                       or _SERVICE_SUBJECT.fullmatch(message.split("\n", 1)[0].strip()))
+        when = datetime.fromtimestamp(int(stamp), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for name in filter(None, (name.strip() for name in names.splitlines())):
+            touched.setdefault(name, (order, when, outside))
     return touched
 
 
@@ -1074,8 +1076,9 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     """The audit backlog (design §5.3): derived, never stored, so it can be rebuilt at any time.
 
     A concept is due when it is not deprecated, no done audit changeset reviewed its current
-    content, and either a commit the service did not write changed it or a source it cites since
-    ``AIWIKI_BACKLOG_EPOCH`` (``external``, whoever generated it), or an auditor did not
+    content, and either a commit the service did not write changed it, or a source it cites,
+    since ``AIWIKI_BACKLOG_EPOCH`` and the service's last commit to it (``external``, whoever
+    generated it), or an auditor did not
     generate it and it has an unverified generation since the epoch (``generation``) or is
     among the oldest unverified concepts from before the epoch, released
     ``AIWIKI_AUDIT_SEED_PER_DAY`` a day (``seed``).
@@ -1087,7 +1090,7 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     epoch, per_day = settings or backlog_settings()
     tree = tree or bundle
     reviewed, seeded = review_records(bundle)
-    external = external_changes(bundle, epoch, revision) if epoch else {}
+    latest = external_changes(bundle, epoch, revision) if epoch else {}
     frozen = _frozen(tree)
     fresh, older = [], []
     for rel, text in _concepts(tree):
@@ -1101,7 +1104,11 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
             continue
         current = bool(current_verified(frontmatter))
         generated_at = _instant(at)
-        pushed = [external[path] for path in {rel, *_cited(rel, frontmatter)} if path in external]
+        own, pushed = latest.get(rel), []
+        for path in {rel, *_cited(rel, frontmatter)}:
+            order, when, outside = latest.get(path, (0, None, False))
+            if outside and (own is None or order <= own[0]):  # no later service commit to the concept
+                pushed.append(when)
         if pushed:  # the concept, or evidence it cites, changed past the service
             reason, since = "external", max(pushed, key=_instant)
         elif current or by in auditors:

@@ -147,6 +147,18 @@ def test_a_push_past_the_service_puts_its_concepts_under_review(gate) -> None:
     assert (METRIC, "external") not in due(gate)
     push(gate, METRIC, gate.read(METRIC).replace("A hand note.", "A second hand note."))
     assert (METRIC, "external") in due(gate)  # another push is another version to review
+    # A generation after the push is a generation to review, due since the service stamped it.
+    git(gate.writer, "merge", "-q", "--ff-only", "origin/main")  # the curator's base is the pushed version
+    assert gate.post(gate.request()).status_code == 201
+    entry = next(entry for entry in backlog(gate)["concepts"] if entry["path"] == METRIC)
+    assert (entry["reason"], entry["since"]) == ("generation", published(gate, METRIC)["generated"]["at"])
+    # Only a later service commit settles a push, never the stamps the push itself writes.
+    forged = re.sub(r"(?m)^generated:.*\n(?:  .*\n)*", "generated: {by: process:ai-wiki-auditor, at: "
+                    "'2099-01-01T00:00:00Z'}\nverified:\n- {by: process:ai-wiki-auditor, at: 2099-01-02T00:00:00Z}\n",
+                    gate.read(METRIC).replace("A second hand note.", "Revenue doubled."), count=1)
+    push(gate, METRIC, re.sub(r"(?m)^verified:\n(?:- .*\n)+(?=sources:)", "", forged, count=1))
+    assert published(gate, METRIC)["generated"]["by"] == AUDITOR and len(published(gate, METRIC)["verified"]) == 1
+    assert (METRIC, "external") in due(gate)
 
 
 def test_external_attention_follows_ancestry_not_commit_dates(gate) -> None:
