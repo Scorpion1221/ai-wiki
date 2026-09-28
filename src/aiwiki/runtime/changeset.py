@@ -199,7 +199,10 @@ def _upload_bytes(upload: Mapping) -> bytes:
 
 
 def changeset_sha256(request: Mapping, evidence_sha256: Mapping[str, str] | None = None) -> str:
-    """Idempotency key (§2.7): content and evidence digests, never base, run or message.
+    """Idempotency key (§2.7): content and evidence digests, never run or message.
+
+    A file's ``base`` stays out (a put's content identifies it); a review's ``base`` is in,
+    since it names the version the verdict judged.
 
     ``evidence_sha256`` maps each ``evidence.item_files`` name to its frozen bytes' sha256.
     Call it only for a request ``check_request`` admitted.
@@ -213,7 +216,7 @@ def changeset_sha256(request: Mapping, evidence_sha256: Mapping[str, str] | None
         else:
             files.append([path, entry.get("op"), _nfc(entry.get("superseded_by")), entry.get("reason")])
     reviews = [
-        [_nfc(review.get("path")), review.get("verdict"),
+        [_nfc(review.get("path")), review.get("base"), review.get("verdict"),
          _sha(review["content"].encode("utf-8")) if isinstance(review.get("content"), str) else None,
          review.get("note")]
         for review in request.get("reviews") or []

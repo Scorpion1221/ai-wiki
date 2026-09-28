@@ -147,6 +147,23 @@ def test_a_push_past_the_service_puts_its_concepts_under_review(gate) -> None:
     assert (METRIC, "external") in due(gate)  # another push is another version to review
 
 
+def test_the_same_verdict_on_a_new_version_is_a_new_review(gate) -> None:
+    """The idempotency key holds each review's base: a repeated verdict and note on a version
+    pushed since is judged again, never deduplicated onto the old version's receipt."""
+    lease(gate)
+    sent = review(gate, AIO_AB, "unverified", note="lift not in S1")
+    first = submit(gate, sent)
+    assert first.status_code == 201 and submit(gate, sent).json()["id"] == first.json()["id"]  # a resend
+    push(gate, AIO_AB, gate.read(AIO_AB).replace("Redacted fixture body.", "Redacted fixture body, edited."))
+    assert (AIO_AB, "external") in due(gate)
+
+    second = submit(gate, review(gate, AIO_AB, "unverified", note="lift not in S1"))
+
+    assert second.json()["deduplicated"] is False and second.json()["id"] != first.json()["id"], second.text
+    assert second.json()["reviews"][0]["base"] == changeset.content_hash(git(gate.remote, "show", f"main:{AIO_AB}"))
+    assert (AIO_AB, "external") not in due(gate)
+
+
 def test_a_reverted_audit_returns_its_concept_to_the_backlog(gate) -> None:
     lease(gate)
     job = submit(gate, review(gate, AIO_AB)).json()
