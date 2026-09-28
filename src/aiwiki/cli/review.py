@@ -137,7 +137,8 @@ def next_concept(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
 
 
 def _parts(text: str) -> list[dict]:
-    """The origin parts in a packet's header (design §5.6); none for a one-file packet."""
+    """The origin parts in a packet's header (design §5.6). The service writes a header only for
+    several parts: a one-file packet keeps collected bytes, which may merely look like one."""
     if not text.startswith("---\nai_wiki_evidence:"):
         return []
     try:
@@ -145,7 +146,8 @@ def _parts(text: str) -> list[dict]:
     except (ValueError, yaml.YAMLError):
         return []
     parts = header.get("parts") if isinstance(header, dict) else None
-    return [part for part in parts or [] if isinstance(part, dict)]
+    parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
+    return parts if len(parts) > 1 else []
 
 
 def _reread(part: dict, repos: object) -> tuple[str, str, bytes | None]:
@@ -209,13 +211,17 @@ def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tu
                      "status": "frozen" if recorded == digest else "unrecorded" if recorded is None else "drifted",
                      "detail": f"sha256 {digest[:12]}" + (f", recorded {str(recorded)[:12]}" if recorded != digest
                                                           and recorded is not None else "")})
-        for part in _parts(data.decode("utf-8", errors="replace")):
+        text = data.decode("utf-8", errors="replace")
+        # Header values are collected data: they pick what to re-read, never where a copy lands.
+        for index, part in enumerate(_parts(text) if recorded == digest else [], start=1):
             status, detail, reread = _reread(part, settings.get("repos"))
             if reread is not None:
-                copy = out / f"{Path(rel).name}-{part.get('ref')}"
+                copy = out / f"{Path(rel).name}.part{index}"
                 copy.parent.mkdir(parents=True, exist_ok=True)
                 copy.write_bytes(reread)
-                same = hashlib.sha256(reread).hexdigest() == part.get("sha256")
+                # A match needs the Git text itself in the packet, not only the sha256 its header claims.
+                same = hashlib.sha256(reread).hexdigest() == part.get("sha256") \
+                    and reread.decode("utf-8", errors="replace").rstrip("\n") in text
                 clipped = part.get("truncated") or part.get("redactions")
                 status = "match" if same else "differs (truncated or redacted)" if clipped else "differs"
                 detail = f"{detail}; re-read copy {copy}"

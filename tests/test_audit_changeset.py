@@ -7,6 +7,7 @@ auditor anywhere reads GET /audit/backlog and proposes verdicts; the service sta
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -521,3 +522,60 @@ def test_review_verbs_keep_the_workspace_clean_and_drop_what_the_writer_refuses(
     code, report = wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)
     assert code == 0 and report["reviewed"] == 0 and report["dropped"] == sent["dropped"]
     assert report["backlog_remaining"] == 1 and report["lease"]["released"] is True  # the push is due again
+
+
+def test_review_evidence_never_writes_where_a_packet_header_points(tmp_path) -> None:
+    """Header values are collected data (a one-file packet keeps collected bytes verbatim): they
+    choose what is re-read, never where the copy lands, and a match needs the Git text itself."""
+    from aiwiki.cli import maint
+    from aiwiki.cli import review as verbs
+
+    upstream = tmp_path / "upstream.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(upstream))
+    checkout = clone(upstream, tmp_path / "repos" / "control")
+    (checkout / "notes.txt").write_text("attacker controlled bytes\n", encoding="utf-8")
+    git(checkout, "add", "-A")
+    git(checkout, "commit", "-qm", "notes")
+    commit = git(checkout, "rev-parse", "HEAD")
+    blob = hashlib.sha256(b"attacker controlled bytes\n").hexdigest()
+    victim = tmp_path / "home" / ".bashrc"
+
+    def part(ref: str) -> str:
+        return f"- {{ref: '{ref}', kind: git-file, remote: '{upstream}', commit: {commit}, path: notes.txt, " \
+               f"sha256: {blob}}}\n"
+
+    ws = tmp_path / "ws"
+    (ws / "sources").mkdir(parents=True)
+    (ws / "metrics").mkdir()
+    header, escape = "---\nai_wiki_evidence: 1\nparts:\n", part("/../../../../../home/.bashrc")
+    packets = {"sources/two.md": header + escape + part("../../x") + "---\n## S1\n\nattacker controlled bytes\n",
+               "sources/one.md": header + escape + "---\nx\n"}
+    for rel, text in packets.items():
+        (ws / rel).write_text(text, encoding="utf-8")
+    (ws / "sources" / ".hashes.yaml").write_text("".join(
+        f"{rel}: {hashlib.sha256(text.encode()).hexdigest()}\n" for rel, text in packets.items()), encoding="utf-8")
+    (ws / "metrics" / "m.md").write_text(
+        "---\ntype: Metric\ntitle: M\nsources:\n- {id: a, resource: /sources/two.md}\n"
+        "- {id: b, resource: /sources/one.md}\n---\n# Summary\n\nx\n", encoding="utf-8")
+    state = tmp_path / "state"
+    maint._write(verbs._folder(state, RUN) / "review.json",
+                 {"run": RUN, "bundle": "kb", "max": 5, "taken": ["metrics/m.md"], "pending": {}, "submitted": [],
+                  "dropped": [], "workspace": str(ws)})
+    maint._write(verbs._pointer(state, "kb"), {"run": RUN, "bundle": "kb"})
+    config = tmp_path / "maint.json"
+    config.write_text(json.dumps({"repos": {"root": str(tmp_path / "repos")}}), encoding="utf-8")
+
+    code, found = verbs.evidence(state, "kb", "metrics/m.md", config)
+
+    assert code == 0 and not victim.exists()
+    assert [(row["source"], row["status"]) for row in found["evidence"]] == [
+        ("sources/two.md", "frozen"), ("sources/two.md", "match"), ("sources/two.md", "match"),
+        ("sources/one.md", "frozen")]  # a one-part header is no service packet
+    copies = sorted(path.name for path in (verbs._folder(state, RUN) / "evidence").iterdir())
+    assert copies == ["two.md.part1", "two.md.part2"]
+    packets["sources/two.md"] = packets["sources/two.md"].replace("attacker controlled bytes", "other words")
+    (ws / "sources" / "two.md").write_text(packets["sources/two.md"], encoding="utf-8")
+    (ws / "sources" / ".hashes.yaml").write_text("".join(
+        f"{rel}: {hashlib.sha256(text.encode()).hexdigest()}\n" for rel, text in packets.items()), encoding="utf-8")
+    assert [row["status"] for row in verbs.evidence(state, "kb", "metrics/m.md", config)[1]["evidence"]][1:3] == [
+        "differs", "differs"]  # the header's sha256 alone proves nothing about the frozen text
