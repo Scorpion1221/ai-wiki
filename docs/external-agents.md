@@ -101,8 +101,9 @@ ai-wiki config set --endpoint https://ai-wiki.yqbqnn.com/
 Two checks on the agent's host, as its OS user, before its first run:
 
 - **The other role's token is out of reach.** `multica agent env get <the other role's agent id>
-  >/dev/null 2>&1 && echo READABLE || echo refused` must print `refused` (the output is
-  discarded, so no token is printed). `READABLE` means this host's Multica account owns that
+  >/dev/null 2>&1 && echo READABLE || echo refused` must print `refused`, and for a permission
+  error, not a missing `multica` or a network error (the runbook's step 2 shows the error; the
+  output is discarded, so no token is printed). `READABLE` means this host's Multica account owns that
   agent or is a workspace owner or admin. Then either run this runtime's daemon under a
   Multica member account that is neither, or keep the token out of Multica: a mode-600
   environment file of an OS user and host that run only this agent, loaded by whatever starts
