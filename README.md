@@ -49,7 +49,9 @@ deterministic gate. The final state is these writer flags
 Unset, each switch keeps the legacy behaviour (`codex`, `curate`, `codex`, no bundle), so a
 deploy changes nothing until the flags flip. Removing them is the rollback, as long as the
 Codex agent config and its credentials are still on the writer host. `AIWIKI_CURATE=off` is a
-different switch: it makes a read mirror, which writes nothing at all.
+different switch: it turns off curation, changesets, the workspace and `/maint`, but `POST
+/ingest` still stores a submission and its job unless `AIWIKI_DISABLE` lists `ingest` too, as
+the read mirror's does.
 
 ### Read/write split (multi-writer)
 
@@ -277,7 +279,7 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_PRINCIPALS` | principals file: per-principal token sha256, scopes, bundles, limits (`src/aiwiki/service/auth.py`); edit it with `scripts/provision_principals.py`, SIGHUP reloads it |
 | `AIWIKI_PORT` | service port (default 8787) |
 | `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`) |
-| `AIWIKI_CURATE` | `auto` (default) makes a writer; `off` makes a read mirror, which writes nothing |
+| `AIWIKI_CURATE` | `auto` (default) makes a writer; `off` turns off curation, changesets, the workspace and `/maint` (a read mirror also sets `AIWIKI_DISABLE=ingest,audit,…`, else `POST /ingest` still stores submissions) |
 | `AIWIKI_LLM` | `codex` (default) or `off`: off, the writer never starts an agent process, ignores `config.agent` and `AIWIKI_AGENT_*`, and answers the legacy Codex routes with 409 |
 | `AIWIKI_INTAKE`, `AIWIKI_AUDIT`, `AIWIKI_CHANGESETS_COMMIT`, `AIWIKI_RESTRUCTURE`, `AIWIKI_CODEX_AUDIT_MANUAL` | rollout switches, reported by `GET /whoami` under `modes` (see "Final state" above and `src/aiwiki/service/app.py`) |
 | `AIWIKI_CONFIG` | local client / worker JSON config (default `~/.ai-wiki/config.json`) |
@@ -387,11 +389,13 @@ rules.
 
 [`docs/maintenance-watchdog.md`](docs/maintenance-watchdog.md) describes
 `scripts/maintenance_watchdog.py`, a read-only, LLM-free check (Python 3.11+ on the host where
-it is installed). In the final state it runs on the writer host with `--bundle` and pages
-Feishu about collector cursors that stopped advancing, work items that wait too long or need a
-human, stuck run leases, a stale bundle commit, and writer job failures that have no later
-attempt (`job_failed`, for up to 7 days). Its `--multica` and `--ledger` checks read the legacy
-checkpoint and ledger and belong to a rollback.
+it is installed). In the final state it runs once a day at 07:00 CST, on two hosts. On the
+writer host, `--bundle` pages Feishu about collector cursors that stopped advancing, work items
+that wait too long (a member's submission after a day) or need a human, stuck run leases, a
+stale bundle commit, and writer job failures that have no later attempt (`job_failed`, for up to
+7 days). On the maintainer's runtime host, `--multica --no-checkpoint` pages about failed,
+overdue or stuck maintainer and auditor runs. The checkpoint checks and `--ledger` read the
+legacy v4 checkpoint and ledger and belong to a rollback.
 
 ## Development and CI
 
