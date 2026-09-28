@@ -156,9 +156,9 @@ def test_scopes_bundles_and_the_commit_allow_list(gate) -> None:
     only_dry = gate.post(gate.request(bundle="kb-b"), bundle="kb-b")
     assert only_dry.status_code == 403 and "AIWIKI_CHANGESETS_COMMIT" in only_dry.json()["detail"]
     assert gate.post(gate.request(bundle="kb-b"), bundle="kb-b", dry_run=True).status_code == 200
-    # An audit changeset passes G0 with the audit scope, but its gate opens in phase 4.
+    # An audit changeset passes G0 with the audit scope, but commits only with AIWIKI_AUDIT=external.
     later = gate.post(audit_request, token="auditor")
-    assert later.status_code == 400 and later.json()["errors"][0]["code"] == "input"
+    assert later.status_code == 403 and "AIWIKI_AUDIT=external" in later.json()["detail"]
     assert gate.jobs() == []
 
     gate.app(AIWIKI_DISABLE="changesets,workspace")

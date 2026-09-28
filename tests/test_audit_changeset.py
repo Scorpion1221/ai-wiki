@@ -1,0 +1,470 @@
+"""External audit (design §2.3, §5.3–§5.5, acceptance §10.1 ``test_audit_changeset.py``).
+
+The writer derives the audit backlog and judges audit changesets (A1–A8) with no agent: an
+auditor anywhere reads GET /audit/backlog and proposes verdicts; the service stamps
+``verified``, ``generated`` and ``status``. The real outputs of the failed Codex audits
+71ea85ca9c20 and e94c8b707aea are replayed as audit changesets.
+"""
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from gate_fixture import AI_STUDY, AIO_AB, METRIC, Gate, clone, concept, git, wait_for
+
+from aiwiki.engine.document import parse_document
+from aiwiki.engine.validate import body_spill_errors
+from aiwiki.runtime import audit, changeset
+from aiwiki.service import auth, worker
+from aiwiki.service import ingest as I
+
+AUDITOR = "process:ai-wiki-auditor"
+EPOCH = "2026-09-20T00:00:00Z"  # after every fixture generation but AIO_AB's (2026-09-23T15:46Z)
+ORPHAN = f"  - {{by: {audit.AUDITOR}, at: 2026-09-19T20:56:59Z}}"
+RUN = "AUD-1"
+
+
+@pytest.fixture
+def gate(tmp_path, monkeypatch):
+    gate = Gate(tmp_path, monkeypatch, AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=EPOCH)
+    yield gate
+    gate.close()
+
+
+def lease(gate: Gate, token: str = "auditor", run: str = RUN) -> None:
+    response = gate.client.post("/maint/lease/auditor", params={"bundle": "kb-a"}, headers=gate.headers(token, run))
+    assert response.status_code == 200, response.text
+
+
+def review(gate: Gate, rel: str, verdict: object = "verified", **extra) -> dict:
+    """A review of the published version, which the writer syncs to before it judges."""
+    base = changeset.content_hash(git(gate.remote, "show", f"main:{rel}"))
+    return {"path": rel, "base": base, "verdict": verdict, "note": "every claim matches the cited packet", **extra}
+
+
+def submit(gate: Gate, *reviews: dict, token: str = "auditor", run: str | None = RUN, dry_run: bool = False):
+    request = {"schema": changeset.SCHEMA, "kind": "audit", "base_revision": gate.head(), "reviews": list(reviews)}
+    return gate.post(request, token=token, run=run, dry_run=dry_run)
+
+
+def backlog(gate: Gate, token: str = "auditor") -> dict:
+    response = gate.client.get("/audit/backlog", params={"bundle": "kb-a"}, headers=gate.headers(token))
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def due(gate: Gate) -> list[tuple[str, str]]:
+    return [(entry["path"], entry["reason"]) for entry in backlog(gate)["concepts"]]
+
+
+def published(gate: Gate, rel: str) -> dict:
+    return parse_document(git(gate.remote, "show", f"main:{rel}") + "\n").frontmatter
+
+
+def push(gate: Gate, rel: str, text: str, message: str = "hand edit") -> str:
+    """Someone pushes past the writer (no service trailer); the writer fetches it."""
+    other = clone(gate.remote, gate.tmp / f"other-{len(list(gate.tmp.glob('other-*')))}")
+    (other / rel).parent.mkdir(parents=True, exist_ok=True)
+    (other / rel).write_text(text, encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-qm", message)
+    git(other, "push", "-q", "origin", "main")
+    git(gate.writer, "fetch", "-q")
+    return git(other, "rev-parse", "HEAD")
+
+
+def narrowed(text: str) -> str:
+    return text.replace("Redacted fixture body.", "Redacted body.")
+
+
+# --- the backlog (design §5.3) --------------------------------------------------------------------
+
+
+def test_the_backlog_lists_unverified_generations_since_the_epoch(gate) -> None:
+    found = backlog(gate)
+
+    assert [(entry["path"], entry["reason"]) for entry in found["concepts"]] == [(AIO_AB, "generation")]
+    entry = found["concepts"][0]
+    assert entry["base"] == changeset.content_hash(gate.read(AIO_AB))
+    assert entry["generated"] == {"by": "process:ai-wiki-curator", "at": "2026-09-23T15:46:00Z"}
+    assert entry["verification_current"] is False and entry["status"] == "draft"
+    assert entry["sources"] and all(rel.startswith("sources/") for rel in entry["sources"])
+    assert (found["mode"], found["epoch"], found["revision"]) == ("external", EPOCH, gate.remote_head())
+    assert (found["shown"], found["total"], found["truncated"]) == (1, 1, False)
+    # Nothing a curator wrote to hand the audit over is part of it.
+    assert set(entry) == {"path", "base", "type", "title", "status", "generated", "verification_current",
+                          "sources", "reason"}
+
+
+def test_the_backlog_is_derived_so_any_rebuild_agrees(gate) -> None:
+    lease(gate)
+    assert submit(gate, review(gate, AIO_AB, "unverified")).status_code == 201
+    push(gate, METRIC, gate.read(METRIC).replace("# Summary", "# Summary\n\nA hand note.", 1))
+    owned = gate.post(gate.request(gate.put("metrics/owned.md", concept("Owned"))), token="owner")
+    assert owned.status_code == 201
+
+    served = backlog(gate)
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=EPOCH)  # a restart holds no backlog state to lose
+    rebuilt = audit.backlog(gate.writer, auditors=gate.appmod._auditors(), now=datetime.now(UTC))
+
+    assert [(entry["path"], entry["reason"]) for entry in served["concepts"]] == [
+        (METRIC, "external"), ("metrics/owned.md", "generation")]  # oldest generation first
+    assert rebuilt["concepts"] == served["concepts"] == backlog(gate)["concepts"]
+
+
+def test_older_concepts_are_released_a_seed_a_day(gate) -> None:
+    epoch = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")  # AIO_AB is older
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=epoch, AIWIKI_AUDIT_SEED_PER_DAY="0")
+    assert backlog(gate)["concepts"] == [] and backlog(gate)["seed"] == {
+        "per_day": 0, "waiting": 1, "released": 0, "reviewed": 0}
+
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=epoch, AIWIKI_AUDIT_SEED_PER_DAY="1")
+    assert due(gate) == [(AIO_AB, "seed")]
+    lease(gate)
+    job = submit(gate, review(gate, AIO_AB, "unverified")).json()
+
+    assert job["reviews"][0]["seed"] is True
+    assert backlog(gate)["seed"] == {"per_day": 1, "waiting": 0, "released": 0, "reviewed": 1}
+
+
+def test_a_push_past_the_service_puts_its_concepts_under_review(gate) -> None:
+    """External attention (§5.3): a hand edit keeps ``generated`` and ``verified`` as they were,
+    so its verified concept stays verification-current, yet it is due for review."""
+    push(gate, METRIC, gate.read(METRIC).replace("# Summary", "# Summary\n\nA hand note.", 1))
+    assert published(gate, METRIC)["verified"] and (METRIC, "external") in due(gate)
+
+    lease(gate)
+    assert submit(gate, review(gate, METRIC)).status_code == 201
+
+    assert (METRIC, "external") not in due(gate)
+    push(gate, METRIC, gate.read(METRIC).replace("A hand note.", "A second hand note."))
+    assert (METRIC, "external") in due(gate)  # another push is another version to review
+
+
+def test_a_reverted_audit_returns_its_concept_to_the_backlog(gate) -> None:
+    lease(gate)
+    job = submit(gate, review(gate, AIO_AB)).json()
+    assert due(gate) == []
+
+    reverted = gate.client.post("/admin/revert", params={"bundle": "kb-a"}, headers=gate.headers("owner"),
+                                json={"changeset": job["id"], "reason": "the auditor's token leaked"})
+
+    assert reverted.status_code == 201, reverted.text
+    assert due(gate) == [(AIO_AB, "generation")]
+
+
+# --- the gate: A1–A8 (design §5.4) -------------------------------------------------------------------
+
+
+def test_a_verified_review_is_stamped_by_the_service_and_leaves_the_backlog(gate) -> None:
+    lease(gate)
+    before = gate.read(AIO_AB)
+
+    response = submit(gate, review(gate, AIO_AB))
+
+    assert response.status_code == 201, response.text
+    job = response.json()
+    assert (job["kind"], job["mode"], job["status"], job["principal"], job["actor"]) == (
+        "audit", "changeset", "done", AUDITOR, AUDITOR)
+    assert job["audit"] == {"status": "passed", "verified_concepts": [AIO_AB], "unverified_concepts": [],
+                            "corrected_concepts": []}
+    assert job["concept_files"] == [AIO_AB] and job["validation"]["status"] == "passed"
+    record = job["reviews"][0]
+    assert (record["outcome"], record["base"]) == ("verified", changeset.content_hash(before))
+    frontmatter = published(gate, AIO_AB)
+    assert frontmatter["status"] == "stable" and frontmatter["generated"]["by"] == "process:ai-wiki-curator"
+    event = frontmatter["verified"][-1]
+    assert event["by"] == AUDITOR and job["started"] <= event["at"].strftime("%Y-%m-%dT%H:%M:%SZ") <= job["finished"]
+    metadata = gate.client.get("/cat", params={"bundle": "kb-a", "path": AIO_AB},
+                               headers=gate.headers("auditor")).json()["metadata"]
+    assert (metadata["trust"], metadata["verification_current"]) == ("machine-confirmed", True)
+    message = git(gate.remote, "log", "-1", "--format=%B", "main")
+    assert f"Changeset: {job['id']}" in message and f"Principal: {AUDITOR}" in message and f"Run: {RUN}" in message
+    assert due(gate) == []
+    assert git(gate.writer, "status", "--porcelain") == ""
+
+
+def test_a1_only_the_audit_scope_reviews(gate) -> None:
+    head = gate.head()
+    denied = submit(gate, review(gate, AIO_AB), token="curator")
+    assert denied.status_code == 403 and "lacks scope" in denied.json()["detail"]
+    with pytest.raises(auth.PrincipalsError, match="must not hold both curate and audit"):
+        auth.parse({"principals": [{"id": "process:ai-wiki-auditor", "token_sha256": "0" * 64,
+                                    "scopes": ["read", "audit", "curate"]}]})
+    gate.assert_untouched(head)
+
+
+def test_a2_an_auditor_reviews_only_the_backlog_and_a_human_anything(gate) -> None:
+    lease(gate)
+    head = gate.head()
+
+    outside = submit(gate, review(gate, METRIC))
+    missing = submit(gate, {**review(gate, METRIC), "path": "metrics/no-such-concept.md"})
+
+    assert outside.status_code == 422 and outside.json()["errors"][0]["code"] == "audit_scope"
+    assert "not in the audit backlog" in outside.json()["errors"][0]["message"]
+    assert missing.status_code == 422 and missing.json()["errors"][0]["code"] == "audit_scope"
+    gate.assert_untouched(head)
+    gate.client.delete("/maint/lease/auditor", params={"bundle": "kb-a"}, headers=gate.headers("auditor", RUN))
+    lease(gate, "owner")
+    human = submit(gate, review(gate, METRIC), token="owner")
+    assert human.status_code == 201, human.text
+    metadata = gate.client.get("/cat", params={"bundle": "kb-a", "path": METRIC},
+                               headers=gate.headers("owner")).json()["metadata"]
+    assert metadata["trust"] == "human-reviewed" and published(gate, METRIC)["verified"][-1]["by"] == "human:owner"
+
+
+def test_a3_a_review_of_another_version_is_a_conflict(gate) -> None:
+    lease(gate)
+    stale = review(gate, AIO_AB)
+    push(gate, AIO_AB, gate.read(AIO_AB).replace("Redacted fixture body.", "Redacted fixture body, edited."))
+    head = gate.remote_head()
+
+    response = submit(gate, stale)
+
+    assert response.status_code == 409, response.text
+    assert response.json()["conflicts"][0]["path"] == AIO_AB
+    assert gate.remote_head() == head
+
+
+def test_a4_no_reviewer_verifies_its_own_generation(gate) -> None:
+    owned = gate.post(gate.request(gate.put("metrics/owned.md", concept("Owned"))), token="owner")
+    assert owned.status_code == 201 and ("metrics/owned.md", "generation") in due(gate)
+    lease(gate, "owner")
+
+    own = submit(gate, review(gate, "metrics/owned.md"), token="owner")
+
+    assert own.status_code == 422 and own.json()["errors"][0]["code"] == "self_verification"
+    # By class too: one auditor never verifies another auditor's correction.
+    second = "process:ai-wiki-auditor-2"
+    original = gate.read(AIO_AB)
+    (gate.writer / AIO_AB).write_text(original.replace("'process:ai-wiki-curator'", AUDITOR), encoding="utf-8")
+    request = {"schema": changeset.SCHEMA, "kind": "audit", "base_revision": gate.head(),
+               "reviews": [review(gate, AIO_AB)]}
+    judged = audit.evaluate_review(gate.writer, request, actor=second, now=datetime.now(UTC),
+                                   scope={AIO_AB: {"reason": "generation"}},
+                                   auditors=audit.AUDITOR_ACTORS | {second})
+    pushed = audit.evaluate_review(gate.writer, request, actor=second, now=datetime.now(UTC),
+                                   scope={AIO_AB: {"reason": "external"}}, auditors=audit.AUDITOR_ACTORS | {second})
+    (gate.writer / AIO_AB).write_text(original, encoding="utf-8")
+    assert judged["errors"][0]["code"] == "self_verification"
+    assert pushed["status"] == "would_apply"  # a push since then is someone else's version to review
+
+
+def test_a5_sources_identity_and_freshness_are_restored_not_refused(gate) -> None:
+    lease(gate)
+    before = gate.read(AIO_AB)
+    frontmatter = parse_document(before).frontmatter
+    first = frontmatter["sources"][0]["resource"]
+    edited = narrowed(before).replace(f"    resource: {first}\n", "    resource: https://example.com/elsewhere\n")
+    edited = edited.replace("type: Experiment", "type: Decision")
+    edited = edited.replace("title: Redacted title\n", "title: Other\n", 1)
+    edited = edited.replace("confidence: medium\n", "confidence: medium\nstale_after: 2099-01-01\n")
+
+    job = submit(gate, review(gate, AIO_AB, "corrected", content=edited)).json()
+
+    assert job["status"] == "done" and job["reviews"][0]["outcome"] == "corrected", job
+    assert set(job["deterministic_repairs"][AIO_AB]) >= {
+        "restored immutable sources provenance", "restored identity-locked type",
+        "restored identity-locked title", "restored frozen stale_after"}
+    after = published(gate, AIO_AB)
+    assert after["sources"] == frontmatter["sources"] and (after["type"], after["title"]) == ("Experiment",
+                                                                                             "Redacted title")
+    assert "stale_after" not in after
+    assert after["generated"]["by"] == after["verified"][-1]["by"] == AUDITOR
+    assert audit._instant(after["generated"]["at"]) == audit._instant(after["verified"][-1]["at"])  # one instant T
+    assert "Redacted body." in git(gate.remote, "show", f"main:{AIO_AB}")
+
+
+@pytest.mark.parametrize(("edit", "code"), [
+    (lambda text: narrowed(text).replace("Redacted body.", "Redacted body. Lift was 12.5%."), "D_NOVEL_TOKEN"),
+    (lambda text: narrowed(text).replace("Redacted body.", "Redacted body with `checkout_retry_rate`."),
+     "D_NOVEL_TOKEN"),
+    (lambda text: text.replace("Redacted fixture body.", "Redacted fixture body, which the redacted "
+                                                         "fixture body restates."), "D_GROWTH"),
+    (lambda text: text.replace("Redacted fixture body.", "[R](x.md) fixture body."), "D_NEW_LINK"),
+])
+def test_a6_a_correction_that_adds_is_downgraded_not_failed(gate, edit, code) -> None:
+    lease(gate)
+    before = gate.read(AIO_AB)
+
+    response = submit(gate, review(gate, AIO_AB, "corrected", content=edit(before)))
+
+    assert response.status_code == 201, response.text
+    job = response.json()
+    assert job["reviews"][0] | {"content_hash": None, "note": None} == {
+        "path": AIO_AB, "base": changeset.content_hash(before), "verdict": "corrected", "outcome": "unverified",
+        "downgrade": code, "content_hash": None, "note": None}
+    assert job["audit"]["status"] == "needs_attention" and job["audit"]["unverified_concepts"] == [AIO_AB]
+    after = git(gate.remote, "show", f"main:{AIO_AB}") + "\n"
+    assert parse_document(after).body == parse_document(before).body.replace(ORPHAN + "\n", "")  # HEAD kept
+    assert published(gate, AIO_AB)["status"] == "stable"
+    assert published(gate, AIO_AB)["verified"] == parse_document(before).frontmatter["verified"]  # no new event
+    assert due(gate) == []  # reviewed at this content: the maintainer brings new evidence first
+
+
+def test_a6_whole_words_decide_what_a_correction_adds() -> None:
+    before = "---\ntype: Metric\ntitle: T\n---\n# Summary\n\nRelease v2 shipped 5k seats on 2026-09-17T10:00Z.\n"
+    known = before + "\nsha256 a55e99db8c\n"
+
+    assert audit._narrowing(before, before.replace("shipped", "may have shipped"), known) is None
+    assert audit._narrowing(before, before.replace("5k", "99"), known) == "D_NOVEL_TOKEN"  # 99 is only in a hash
+    assert audit._narrowing(before, before.replace("v2", "v3"), known) is None  # not a number word
+    assert audit._narrowing(before, before.replace("seats", "`seat_count`"), known) == "D_NOVEL_TOKEN"
+
+
+def test_a7_a_deprecated_concept_is_never_reviewed(gate) -> None:
+    retired = gate.post(gate.request(gate.deprecate(AI_STUDY)), token="owner")
+    assert retired.status_code == 201 and published(gate, AI_STUDY)["status"] == "deprecated"
+    lease(gate, "owner")
+
+    response = submit(gate, review(gate, AI_STUDY), token="owner")
+
+    assert response.status_code == 422 and "deprecated" in response.json()["errors"][0]["message"]
+    assert published(gate, AI_STUDY)["status"] == "deprecated"
+
+
+@pytest.mark.parametrize("verdict", [None, "Verified", 42, "corrected"])
+def test_a8_a_missing_or_unusable_verdict_concludes_unverified(gate, verdict) -> None:
+    lease(gate)
+    body = review(gate, AIO_AB, verdict)
+    if verdict is None:
+        del body["verdict"]
+
+    job = submit(gate, body).json()
+
+    assert job["status"] == "done", job
+    assert (job["reviews"][0]["outcome"], job["reviews"][0]["downgrade"]) == ("unverified", "D_INVALID_VERDICT")
+    assert published(gate, AIO_AB)["status"] == "stable" and job["audit"]["status"] == "needs_attention"
+
+
+def test_a_note_is_never_evidence(gate) -> None:
+    """A concept citing no frozen source cannot be verified, whatever the reviewer writes."""
+    text = concept("Hearsay").replace("sources:\n- {id: funnel-status-2026-09-24, resource: evidence:packet}\n",
+                                      "sources:\n- {id: hearsay, resource: 'https://example.com/hearsay'}\n")
+    text = text.replace("tags: [metric]\n", "tags: [metric]\nstatus: draft\ngenerated: {by: "
+                        "'process:ai-wiki-maintainer', at: '2026-09-27T00:00:00Z'}\n").replace(
+        "[^funnel-status-2026-09-24]", "[^hearsay]")
+    push(gate, "metrics/hearsay.md", text)
+    assert ("metrics/hearsay.md", "external") in due(gate)
+    lease(gate)
+
+    job = submit(gate, review(gate, "metrics/hearsay.md", note="I checked the vendor dashboard myself")).json()
+
+    assert (job["reviews"][0]["outcome"], job["reviews"][0]["downgrade"]) == ("unverified", "D_NO_EVIDENCE")
+    assert "verified" not in published(gate, "metrics/hearsay.md")
+
+
+# --- replay of the real Codex audits 71ea85ca9c20 / e94c8b707aea -------------------------------------
+
+
+def _lifted(text: str) -> str:
+    """The reviewer's output in both failed audits: the 2026-09-19 orphan lifted into ``verified``
+    with its own new event, ``generated`` refreshed and the concept promoted to stable."""
+    tail = f"  - {{by: {audit.AUDITOR}, at: 2026-09-17T21:18:46Z}}\n"
+    lifted = text.replace(tail + "---\n" + ORPHAN + "\n", tail + ORPHAN + "\n"
+                          + f"  - {{by: {audit.AUDITOR}, at: 2026-09-23T15:52:00Z}}\n---\n")
+    lifted = lifted.replace("  by: 'process:ai-wiki-curator'\n  at: '2026-09-23T15:46:00Z'",
+                            f"  by: {audit.AUDITOR}\n  at: '2026-09-23T15:52:00Z'")
+    assert lifted != text
+    return lifted.replace("status: draft", "status: stable")
+
+
+@pytest.mark.parametrize("verdict", ["verified", "corrected"])
+def test_replay_of_71ea85ca9c20_and_e94c8b707aea_as_audit_changesets(gate, verdict) -> None:
+    """Both audits of ingest 6f4b6f97e4b2 failed ("audit verification timestamp is outside the
+    trusted audit window") because the reviewer wrote bookkeeping. As an audit changeset the
+    same verdict, with or without that output as its correction, lands: the service keeps the
+    history, removes the orphan from the body and adds one event at its own time."""
+    original = gate.read(AIO_AB)
+    assert ("---\n" + ORPHAN + "\n# Summary") in original
+    lease(gate)
+    extra = {"content": _lifted(original)} if verdict == "corrected" else {}
+
+    response = submit(gate, review(gate, AIO_AB, verdict, **extra))
+
+    assert response.status_code == 201, response.text
+    job = response.json()
+    assert job["status"] == "done" and job["validation"]["status"] == "passed"
+    assert job["reviews"][0]["outcome"] == "verified"  # lifting bookkeeping is no correction
+    assert f"removed spilled frontmatter line from body: {ORPHAN.strip()!r}" in job["deterministic_repairs"][AIO_AB]
+    after = git(gate.remote, "show", f"main:{AIO_AB}") + "\n"
+    events = parse_document(after).frontmatter["verified"]
+    assert events[:-1] == parse_document(original).frontmatter["verified"] and events[-1]["by"] == AUDITOR
+    assert parse_document(after).frontmatter["generated"] == parse_document(original).frontmatter["generated"]
+    assert body_spill_errors(parse_document(after).body) == [] and ORPHAN not in after
+    expected = original.replace("status: draft", "status: stable").replace("---\n" + ORPHAN + "\n", "---\n")
+    assert re.sub(r"\n  - \{by: process:ai-wiki-auditor, at: [^}]+\}\n---", "\n---", after, count=1) == expected
+
+
+# --- modes, leases and the legacy route ------------------------------------------------------------
+
+
+def test_codex_mode_judges_reviews_but_never_commits_them(gate) -> None:
+    gate.app(AIWIKI_AUDIT="codex")
+    lease(gate)
+    head = gate.head()
+
+    judged = submit(gate, review(gate, AIO_AB), dry_run=True)
+    committed = submit(gate, review(gate, AIO_AB))
+
+    assert judged.status_code == 200 and judged.json()["status"] == "would_apply", judged.text
+    assert judged.json()["dry_run"] is True and AIO_AB in judged.json()["diffs"]
+    assert committed.status_code == 403 and "AIWIKI_AUDIT=external" in committed.json()["detail"]
+    gate.assert_untouched(head)
+    assert gate.jobs() == []
+
+
+def test_an_audit_changeset_needs_the_auditor_lease_and_a_human_needs_human_verify(gate) -> None:
+    head = gate.head()
+    unleased = submit(gate, review(gate, AIO_AB))
+    assert unleased.status_code == 409 and unleased.json()["errors"][0]["code"] == "lease_required"
+
+    token = "aiw_h_" + "reviewer"
+    gate.appmod.AUTH.principals += (auth.Principal("human:reviewer", auth.token_sha256(token),
+                                                   frozenset({"read", "audit"})),)
+    request = {"schema": changeset.SCHEMA, "kind": "audit", "base_revision": head, "reviews": [review(gate, AIO_AB)]}
+    human = gate.client.post("/changesets", params={"bundle": "kb-a", "dry_run": "true"}, json=request,
+                             headers={"Authorization": f"Bearer {token}"})
+    assert human.status_code == 403 and "human_verify" in human.json()["detail"]
+    gate.assert_untouched(head)
+
+
+def test_external_mode_retires_the_codex_audit(gate) -> None:
+    parent = gate.post(gate.request()).json()
+    assert parent["status"] == "done" and parent["audit"] == {"mode": "external"}  # none registered
+
+    legacy = gate.client.post(f"/jobs/{parent['id']}/audit", params={"bundle": "kb-a"}, headers=gate.headers("owner"))
+    assert legacy.status_code == 409 and "GET /audit/backlog" in legacy.json()["detail"]
+
+    # A Codex audit queued before the switch is cancelled when it comes up, never run.
+    queued = I.new_audit_job(gate.writer, parent["id"], [METRIC])
+    worker.submit_audit(gate.writer, parent["id"], I.job_path(gate.writer, queued["id"]))
+    wait_for(lambda: gate.job(queued["id"])["status"] != "queued")
+    assert gate.job(queued["id"])["status"] == "cancelled" and gate.audits == []
+
+
+def test_external_mode_needs_a_usable_epoch_to_start(gate) -> None:
+    for env, message in (({"AIWIKI_BACKLOG_EPOCH": ""}, "needs AIWIKI_BACKLOG_EPOCH"),
+                         ({"AIWIKI_BACKLOG_EPOCH": "2026-11-03"}, "ISO 8601 time with a zone"),
+                         ({"AIWIKI_BACKLOG_EPOCH": EPOCH, "AIWIKI_AUDIT_SEED_PER_DAY": "ten"},
+                          "AIWIKI_AUDIT_SEED_PER_DAY")):
+        with pytest.raises(RuntimeError, match=message):
+            gate.app(AIWIKI_AUDIT="external", **env)
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=EPOCH)
+    assert gate.client.get("/whoami", headers=gate.headers("owner")).json()["modes"]["audit"] == "external"
+
+
+def test_maint_status_counts_the_backlog_in_external_mode(gate) -> None:
+    status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers("auditor")).json()
+
+    assert status["audit"]["mode"] == "external" and status["audit"]["pending"] == 1
+    assert status["audit"]["oldest_finished"] == "2026-09-23T15:46:00Z" and status["audit"]["epoch"] == EPOCH
+
+
+def test_the_read_mirror_never_serves_the_backlog(gate) -> None:
+    gate.app(AIWIKI_CURATE="off")
+    response = gate.client.get("/audit/backlog", params={"bundle": "kb-a"}, headers=gate.headers("auditor"))
+    assert response.status_code == 403
+

@@ -1,10 +1,14 @@
-"""Run an independent adversarial review over one completed ingest job.
+"""Independent adversarial review: the Codex pass over one ingest, and external audit changesets.
 
 The curation pass writes probationary OKF v0.2 concepts.  This second, independent
 headless-agent pass checks only the concepts changed by that ingest against the immutable
 source snapshot (and sources already attached to those concepts) and reports a JSON verdict.
 The service owns bookkeeping (``verified``, ``generated``, ``status``, ``sources``; see
 ``engine.bookkeeping``), validation and the git transaction; the agent never runs git.
+
+With ``AIWIKI_AUDIT=external`` no agent runs here (design §5): an auditor anywhere reads the
+backlog the service derives (``backlog``) and proposes verdicts as an audit changeset, which
+``run_changeset`` judges (§5.4 A2-A8) and commits with the same closeout and validation.
 """
 from __future__ import annotations
 
@@ -15,19 +19,30 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
 from ..engine import append_log, bookkeeping
-from ..engine.document import OKFDocumentError, _instant, current_verified, normalize_verified
+from ..engine.document import (
+    OKFDocumentError,
+    _instant,
+    current_verified,
+    generated_fields,
+    has_symlink_component,
+    normalize_verified,
+    parse_document,
+)
 from ..engine.gen_indexes import generate_indexes
 from ..engine.scan_sources import _source_resource_rel
 from ..engine.validate import parse_doc, should_check, validate_changed
 from ..engine.validate import validate as validate_bundle
+from ..service import ingest as I
 from ..version import service_identity
-from . import curate, policy
+from . import changeset, curate, policy, secrets
 from .config import load_agent_timeouts
 from .failure import classify, failure, model_output_error, output_tail, redact
 
@@ -389,11 +404,12 @@ def _set_failure(job: dict, message: str, *, validation: dict | None = None) -> 
     }
 
 
-def _deterministic_closeout(bundle: Path, parent_job_id: str, concept_files: list[str]) -> dict:
+def _deterministic_closeout(bundle: Path, parent_job_id: str, concept_files: list[str],
+                            subject: str | None = None) -> dict:
     """Trusted audit bookkeeping, intentionally after the agent scope gate."""
     written, missing = generate_indexes(bundle)
     try:
-        append_log.append(bundle.resolve(), "audit", f"Audited ingest {parent_job_id}", concept_files,
+        append_log.append(bundle.resolve(), "audit", subject or f"Audited ingest {parent_job_id}", concept_files,
                           day=datetime.now(UTC).date().isoformat())
     except ValueError as exc:
         raise RuntimeError("deterministic audit append_log closeout failed") from exc
@@ -917,3 +933,465 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
         _save(job_path, job)
         if agent_output_dir is not None:
             shutil.rmtree(agent_output_dir, ignore_errors=True)
+
+
+# --- external audit: the backlog and audit changesets (design §5.3, §5.4) --------------------------
+
+# Auditor-class actors whatever the principals file holds (§5.3): the Codex reviewer and the
+# external auditor. The service adds every process principal that holds the audit scope.
+AUDITOR_ACTORS = frozenset({AUDITOR, "process:ai-wiki-auditor"})
+SEED_PER_DAY = 10
+# The service's own commits (§5.3 external attention): a changeset or a revert names itself in
+# a trailer; the Codex path and bundle creation write exactly these subjects.
+_SERVICE_TRAILER = re.compile(r"^(?:Changeset|Revert): \S", re.MULTILINE)
+_SERVICE_SUBJECT = re.compile(r"ingest: sources/\S.*|audit: ingest [0-9a-f]{12}|bundle: create \S+")
+# A6: the URLs, backticked names, numbers (a word that starts with a digit: dates, percentages,
+# versions, 5k) and snake_case or camelCase identifiers a correction writes must already be words
+# of the concept or of the sources it cites. A digit inside a hash or a longer word is not one.
+_WORD = "A-Za-z0-9_"
+_TOKEN = re.compile(
+    rf"https?://[^\s)\]>\"'`]+|`([^`\n]+)`|(?<![{_WORD}])\d[{_WORD}.,:/-]*"
+    r"|[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+|[a-z]+[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*"
+)
+_LINK = re.compile(r"\]\(\s*<?([^)\s>]+)|\[\[([^\]|#]+)")
+MAX_GROWTH = 1.2  # a correction's body grows by at most 20%
+
+
+def backlog_settings(environ: Mapping[str, str] = os.environ) -> tuple[datetime | None, int]:
+    """``AIWIKI_BACKLOG_EPOCH`` (None when unset) and ``AIWIKI_AUDIT_SEED_PER_DAY``; ValueError when unusable."""
+    raw = environ.get("AIWIKI_BACKLOG_EPOCH", "").strip()
+    epoch = _instant(raw) if raw else None
+    if raw and epoch is None:
+        raise ValueError(f"AIWIKI_BACKLOG_EPOCH must be an ISO 8601 time with a zone, like 2026-11-03T00:00:00Z; "
+                         f"got {raw!r}")
+    per_day = environ.get("AIWIKI_AUDIT_SEED_PER_DAY", "").strip() or str(SEED_PER_DAY)
+    if not per_day.isdigit():
+        raise ValueError(f"AIWIKI_AUDIT_SEED_PER_DAY must be a whole number; got {per_day!r}")
+    return epoch, int(per_day)
+
+
+def _concepts(tree: Path) -> Iterator[tuple[str, str]]:
+    for path in sorted(tree.rglob("*.md")):
+        rel = path.relative_to(tree)
+        if any(part.startswith(".") for part in rel.parts) or path.is_symlink() or not path.is_file() \
+                or not should_check(path, tree):
+            continue
+        yield rel.as_posix(), path.read_bytes().decode("utf-8", errors="replace")
+
+
+def _local_sources(tree: Path, rel: str, frontmatter: Mapping) -> list[str]:
+    """The cited sources that are frozen files of the bundle: the only evidence an audit weighs."""
+    found = set()
+    for source in frontmatter.get("sources") if isinstance(frontmatter.get("sources"), list) else []:
+        resource = source.get("resource") if isinstance(source, dict) else None
+        target = _source_resource_rel(resource.strip(), rel) if isinstance(resource, str) else None
+        if target and target.startswith("sources/") and (tree / target).is_file() \
+                and not has_symlink_component(tree, tree / target):
+            found.add(target)
+    return sorted(found)
+
+
+def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str]]:
+    """``(path, content hash)`` of every review a done audit changeset recorded, and the seed
+    paths among them. An admin-reverted audit is no review: its concepts are due again."""
+    reverted = I.reverted_by(bundle)
+    reviewed, seeded = set(), set()
+    for job in I.changeset_jobs(bundle):
+        if job.get("kind") != "audit" or job.get("status") != "done" or job.get("id") in reverted:
+            continue
+        for review in job.get("reviews") or []:
+            if not isinstance(review, dict) or not isinstance(review.get("path"), str):
+                continue
+            reviewed.update((review["path"], review[key]) for key in ("base", "content_hash")
+                            if isinstance(review.get(key), str))
+            if review.get("seed") is True:
+                seeded.add(review["path"])
+    return reviewed, seeded
+
+
+def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> set[str]:
+    """Paths that a commit since ``since`` changed and the service did not write (§5.3): such a
+    push may change content without a new generation, so its concepts are reviewed again."""
+    root = curate._repo_root(bundle)
+    if root is None or root.resolve() != bundle.resolve():
+        return set()
+    log = curate._git(root, "-c", "core.quotepath=false", "log", "--no-renames", "--name-only",
+                      "--format=%x1e%B%x1f", f"--since={since.isoformat()}", revision, "--")
+    if log.returncode != 0:
+        raise RuntimeError(f"cannot read the history since {since.isoformat()}: {log.stderr.strip()[-200:]}")
+    touched = set()
+    for record in log.stdout.split("\x1e")[1:]:
+        message, _separator, names = record.partition("\x1f")
+        if not (_SERVICE_TRAILER.search(message) or _SERVICE_SUBJECT.fullmatch(message.split("\n", 1)[0].strip())):
+            touched.update(name.strip() for name in names.splitlines() if name.strip())
+    return touched
+
+
+def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path | None = None,
+            revision: str = "HEAD", settings: tuple[datetime | None, int] | None = None) -> dict:
+    """The audit backlog (design §5.3): derived, never stored, so it can be rebuilt at any time.
+
+    A concept is due when it is not deprecated, no done audit changeset reviewed its current
+    content, and either a commit the service did not write changed it since
+    ``AIWIKI_BACKLOG_EPOCH`` (``external``, whoever generated it), or an auditor did not
+    generate it and it has an unverified generation since the epoch (``generation``) or is
+    among the oldest unverified concepts from before the epoch, released
+    ``AIWIKI_AUDIT_SEED_PER_DAY`` a day (``seed``).
+    Without an epoch every unverified concept is a ``generation``. New work comes first, each
+    part oldest first. ``tree`` is the checkout read (the bundle by default); the review
+    receipts and the history are the bundle's.
+    """
+    epoch, per_day = settings or backlog_settings()
+    tree = tree or bundle
+    reviewed, seeded = review_records(bundle)
+    external = external_changes(bundle, epoch, revision) if epoch else set()
+    fresh, older = [], []
+    for rel, text in _concepts(tree):
+        try:
+            frontmatter = parse_document(text).frontmatter
+        except OKFDocumentError:
+            continue  # a concept that does not parse is its curator's to fix first
+        by, at = generated_fields(frontmatter)
+        base = changeset.content_hash(text)
+        if frontmatter.get("status") == "deprecated" or (rel, base) in reviewed:
+            continue
+        current = bool(current_verified(frontmatter))
+        entry = {"path": rel, "base": base, **{key: None if frontmatter.get(key) is None else str(frontmatter[key])
+                                              for key in ("type", "title", "status")},
+                 "generated": {"by": by or None, "at": at or None}, "verification_current": current,
+                 "sources": _local_sources(tree, rel, frontmatter)}
+        generated_at = _instant(at)
+        if rel in external:
+            fresh.append({**entry, "reason": "external"})
+        elif current or by in auditors:
+            continue
+        elif epoch is None or (generated_at is not None and generated_at >= epoch):
+            fresh.append({**entry, "reason": "generation"})
+        else:
+            older.append({**entry, "reason": "seed"})
+
+    def oldest(entry: dict) -> tuple:
+        return _instant(entry["generated"]["at"]) or datetime.min.replace(tzinfo=UTC), entry["path"]
+
+    released = 0
+    if epoch is not None:
+        days = (now.astimezone(UTC).date() - epoch.astimezone(UTC).date()).days
+        released = max(0, per_day * max(0, days + 1) - len(seeded))
+    older.sort(key=oldest)
+    return {"concepts": sorted(fresh, key=oldest) + older[:released],
+            "epoch": epoch.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if epoch else None,
+            "seed": {"per_day": per_day, "waiting": len(older), "released": min(released, len(older)),
+                     "reviewed": len(seeded)}}
+
+
+def _leaves(value: object) -> Iterator[str]:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            yield str(key)
+            yield from _leaves(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _leaves(item)
+    elif value is not None:
+        yield str(value)
+
+
+def _known(token: str, known: str) -> bool:
+    return re.search(rf"(?<![{_WORD}]){re.escape(token)}(?![{_WORD}])", known) is not None
+
+
+def _narrowing(before: str, after: str, known: str) -> str | None:
+    """Why a correction does more than narrow the concept (§5.4 A6), or None when it only narrows."""
+    head, edit = parse_document(before), parse_document(after)
+    content = {key: value for key, value in edit.frontmatter.items()
+               if key not in bookkeeping.SERVICE_KEYS["review"]}
+    text = "\n".join([*_leaves(content), edit.body])
+    if any(not _known(token, known) for token in
+           {(match.group(1) or match.group(0)).rstrip(".,;:/-") for match in _TOKEN.finditer(text)} - {""}):
+        return "D_NOVEL_TOKEN"
+    if len(edit.body.strip()) > MAX_GROWTH * len(head.body.strip()):
+        return "D_GROWTH"
+    links = [{first or second for first, second in _LINK.findall(document.body)} for document in (head, edit)]
+    return "D_NEW_LINK" if links[1] - links[0] else None
+
+
+def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: datetime,
+                    scope: Mapping[str, Mapping] | None, auditors: frozenset[str]) -> dict:
+    """Judge one audit changeset against ``base_dir`` without changing it (design §5.4 A2-A8).
+
+    ``scope`` is the backlog by path, or None for a human reviewer, whom A2 does not limit.
+    ``actor`` is stamped in ``verified`` (and ``generated`` for a correction) at ``now``. The
+    result has the curate gate's shape: ``status`` would_apply, noop or rejected; ``files`` the
+    stamped bytes; ``reviews`` one record per review, which the backlog reads back; ``audit``
+    the verdict summary of a Codex audit receipt. Scope, base and self-verification problems
+    reject the changeset (409 for a stale base); a correction that does more than narrow, an
+    unusable verdict, or a concept without frozen evidence only downgrades to unverified.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    result: dict = {"status": "rejected", "errors": [], "warnings": [], "validation": {"status": "not_run"}}
+    errors = changeset.check_request(request)
+    if not errors and request["kind"] != "audit":
+        errors = [changeset._error("input", "curate changesets are judged by changeset.evaluate()")]
+    if errors:
+        return changeset._rejected(result, errors)
+    result.update(changeset_sha256=changeset.changeset_sha256(request), kind="audit")
+    temporary, workspace = policy._isolated_agent_bundle(Path(base_dir))
+    try:
+        return _review_in(workspace, request, result, actor=actor, now=now, scope=scope, auditors=auditors)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, now: datetime,
+               scope: Mapping[str, Mapping] | None, auditors: frozenset[str]) -> dict:
+    before_errors = validate_bundle(workspace)
+    errors, conflicts, reviews, written, repairs = [], [], [], {}, {}
+    for review in sorted(request["reviews"], key=lambda item: unicodedata.normalize("NFC", item["path"])):
+        rel = unicodedata.normalize("NFC", review["path"])
+        target = workspace / rel
+        if has_symlink_component(workspace, target) or not target.is_file() or not should_check(target, workspace):
+            errors.append(changeset._error("audit_scope", "not a concept of this bundle; an audit creates none", rel))
+            continue
+        before = target.read_bytes().decode("utf-8", errors="replace")
+        current = changeset.content_hash(before)
+        if review["base"] != current:  # A3: the review judged another version
+            conflicts.append({"path": rel, "base": review["base"], "current": current})
+            errors.append(changeset._error("conflict", "the concept changed since its base", rel,
+                                           base=review["base"], current=current))
+            continue
+        try:
+            head = parse_document(before).frontmatter
+        except OKFDocumentError:
+            errors.append(changeset._error("audit_scope", "the concept does not parse; its curator fixes it first",
+                                           rel))
+            continue
+        problem = ("the concept is deprecated" if head.get("status") == "deprecated"  # A7
+                   else "the concept is not in the audit backlog" if scope is not None and rel not in scope  # A2
+                   else None)
+        if problem:
+            errors.append(changeset._error("audit_scope", problem, rel))
+            continue
+        generator = generated_fields(head)[0]
+        pushed = scope is not None and scope[rel].get("reason") == "external"  # someone else wrote it since
+        if not pushed and (generator == actor or (actor in auditors and generator in auditors)):  # A4
+            errors.append(changeset._error("self_verification", f"{actor} may not review a generation of "
+                                           f"{generator}", rel))
+            continue
+        verdict, content, downgrade = review.get("verdict"), review.get("content"), None
+        if not ((verdict == "corrected" and content is not None)
+                or (verdict in ("verified", "unverified") and content is None)):
+            verdict, downgrade = "unverified", "D_INVALID_VERDICT"  # A8
+        sources = _local_sources(workspace, rel, head)
+        if verdict != "unverified" and not sources:
+            verdict, downgrade = "unverified", "D_NO_EVIDENCE"  # a reviewer's note is never evidence
+        edited = before
+        if verdict == "corrected":
+            errors.extend(changeset._error("secret_detected", f"content matches secret rule {rule}", rel, line=line,
+                                           rule=rule) for rule, line in secrets.scan(content))
+            unreadable = changeset._load_error(rel, content)
+            if unreadable:
+                errors.append(unreadable)
+                continue
+            known = "\n".join([before, *((workspace / source).read_bytes().decode("utf-8", errors="replace")
+                                         for source in sources)])
+            try:
+                downgrade = _narrowing(before, content, known)
+                bookkeeping.apply_bookkeeping(before, content, actor=actor, trusted_now=now, stage="review",
+                                              verdict="verified")
+            except (bookkeeping.BookkeepingError, OKFDocumentError) as exc:
+                errors.append(changeset._yaml_error(rel, content, exc))
+                continue
+            if downgrade is None:
+                edited = content
+            else:
+                verdict = "unverified"
+        try:
+            final, stamped = bookkeeping.apply_bookkeeping(
+                before, edited, actor=actor, trusted_now=now, stage="review",
+                verdict="unverified" if verdict == "unverified" else "verified",
+            )
+        except (bookkeeping.BookkeepingError, OKFDocumentError) as exc:
+            errors.append(changeset._yaml_error(rel, before, exc))
+            continue
+        outcome = "unverified" if verdict == "unverified" else (
+            "corrected" if bookkeeping.substantive_change(before, final, stage="review") else "verified")
+        record = {"path": rel, "base": current, "verdict": review.get("verdict"), "outcome": outcome,
+                  "content_hash": changeset.content_hash(final)}
+        if downgrade:
+            record["downgrade"] = downgrade
+        if scope is not None and scope[rel].get("reason") == "seed":
+            record["seed"] = True
+        if review.get("note"):
+            record["note"] = secrets.redact(review["note"])[0]
+        reviews.append(record)
+        if stamped:
+            repairs[rel] = stamped
+        if final != before:
+            target.write_text(final, encoding="utf-8")
+            written[rel] = final
+    result.update(reviews=reviews, concept_files=[record["path"] for record in reviews])
+    if errors:
+        if conflicts:
+            result["conflicts"] = conflicts
+        return changeset._rejected(result, errors)
+    # Only what the audit introduced counts: a concept's older defect is its curator's to fix.
+    before_keys = {changeset.error_key(error) for error in before_errors}
+    judged = [error for error in validate_bundle(workspace) if changeset.error_key(error) not in before_keys]
+    judged += validate_changed(workspace, sorted(written))
+    errors = [changeset._from_message(error) for error in dict.fromkeys(judged)]
+    result["validation"] = {"status": "failed" if errors else "passed", "new_errors": len(errors)}
+    if errors:
+        return changeset._rejected(result, errors)
+    verified = [record["path"] for record in reviews if record["outcome"] != "unverified"]
+    result.update(
+        status="would_apply" if written else "noop", http_status=200, files=written,
+        deterministic_repairs=repairs,
+        audit={"status": "passed" if len(verified) == len(reviews) else "needs_attention",
+               "verified_concepts": verified,
+               "unverified_concepts": [record["path"] for record in reviews if record["outcome"] == "unverified"],
+               "corrected_concepts": [record["path"] for record in reviews if record["outcome"] == "corrected"]},
+    )
+    return result
+
+
+def _review_message(job_id: str, request: Mapping, actor: str, reviews: list[dict]) -> str:
+    """One summary line, then the trailers that mark a service commit (§5.3 external attention)."""
+    trailers = [f"Changeset: {job_id}", f"Principal: {actor}"]
+    if request.get("run"):
+        trailers.append("Run: " + curate._one_line(request["run"]))
+    summary = curate._one_line(request.get("message")) or f"review: {len(reviews)} concept(s)"
+    return secrets.redact(summary + "\n\n" + "\n".join(trailers) + "\n")[0]
+
+
+def run_changeset(
+    bundle: Path,
+    job_path: Path,
+    request: Mapping,
+    *,
+    actor: str,
+    auditors: frozenset[str],
+    on_done: Callable[[dict], None] | None = None,
+) -> None:
+    """Commit one audit changeset on the writer (design §2.3, §5.4). No agent runs.
+
+    A strict pre-sync, then the backlog and the gate (``evaluate_review``) on the synced tree,
+    the Codex audit's closeout and validation, and a commit whose push-time rebase re-checks
+    every reviewed file. Rejections persist as ``status: rejected`` with the gate's errors,
+    ``http_status`` and ``failure``; the receipt reads like a Codex audit's (``audit``,
+    ``concept_files``, ``validation``) and holds the review records the backlog reads.
+    ``on_done(job)`` runs on a done job before its receipt is saved.
+    """
+    job = json.loads(job_path.read_text(encoding="utf-8")) if job_path.is_file() else {}
+    job.update(kind="audit", mode="changeset", actor=actor, status="running", started=curate._now(),
+               service=service_identity())
+    _save(job_path, job)
+    now = datetime.now(UTC)
+    git_on = os.environ.get("AIWIKI_GIT", "auto") != "off"
+    root = curate._repo_root(bundle) if git_on else None
+    base: str | None = None
+    tree_before: dict[str, bytes] | None = None
+
+    def rollback() -> None:
+        if root is not None and base:
+            curate._rollback_git(root, base)
+        elif tree_before is not None:
+            curate._restore_tree(bundle, tree_before)
+        job["phase"] = "rolled_back"
+
+    def reject(result: dict) -> None:
+        job.update({key: value for key, value in result.items() if key not in ("files", "kind", "status")},
+                   status="rejected")
+
+    try:
+        if git_on and (root is None or root.resolve() != bundle.resolve()):
+            raise RuntimeError("an audit changeset needs the bundle to be its Git repository root")
+        if root is not None:
+            curate._exclude_inbox(root, bundle)
+            if curate._working_files(root):
+                raise RuntimeError("working tree is not clean before the audit changeset")
+            job.update(phase="syncing", base_branch=curate._branch(root))
+            _save(job_path, job)
+            job["pre_sync"] = curate._pre_sync(root, strict=True)
+            if job["pre_sync"].get("refused") or curate._working_files(root):
+                job.update(status="failed", error=f"pre-sync refused a stale base: {job['pre_sync'].get('note')}",
+                           failure=failure("transient", stage="pre_sync", detail=job["pre_sync"].get("note")))
+                return
+            base = curate._git(root, "rev-parse", "HEAD").stdout.strip()
+            job.update(base_revision=base, phase="prepared")
+            _save(job_path, job)
+            if curate._git(root, "merge-base", "--is-ancestor", request["base_revision"], "HEAD").returncode:
+                reject(curate._rejection([changeset._error(
+                    "unknown_base", "base_revision is not an ancestor of the published branch",
+                    hint="workspace pull, then review again from the published revision")]))
+                return
+        else:
+            tree_before = curate._tree_snapshot(bundle)
+        scope = None if actor.startswith("human:") else {
+            entry["path"]: entry for entry in backlog(bundle, auditors=auditors, now=now)["concepts"]}
+        verdict = evaluate_review(bundle, request, actor=actor, now=now, scope=scope, auditors=auditors)
+        if verdict["status"] == "rejected":
+            reject(verdict)
+            return
+        job.update({key: value for key, value in verdict.items()
+                    if key not in ("files", "kind", "status", "http_status")})
+        written = sorted(verdict["files"])
+        if not written:  # every verdict left its concept as it was: no commit, but still reviews
+            job.update(status="done", phase="done", noop=True, commit=None, changed_files=[],
+                       git={"committed": False, "pushed": False, "changed_files": [], "note": "no changes"})
+            return
+        baseline = frozenset(changeset.error_key(error) for error in validate_bundle(bundle))
+        for rel in written:
+            (bundle / rel).write_text(verdict["files"][rel], encoding="utf-8")
+        job["closeout"] = _deterministic_closeout(bundle, str(job.get("id")), written,
+                                                  subject=f"Changeset {job.get('id')} reviewed {len(written)} concepts")
+        problems = curate._new_errors(validate_bundle(bundle), baseline, [])
+        if problems:
+            job["validation"] = {"status": "failed", "error_count": len(problems), "errors": problems[:20]}
+            raise RuntimeError(f"bundle validation failed after the audit closeout with {len(problems)} error(s)")
+        if root is None:
+            job.update(status="done", phase="done", commit=None, git={"committed": False, "pushed": False},
+                       changed_files=curate._tree_changed(bundle, tree_before or {}))
+            return
+        visualization = curate._refresh_visualization(root, bundle)
+        if visualization is not None:
+            job["visualization"] = visualization
+        job["phase"] = "before_commit"
+        _save(job_path, job)
+
+        def persist(phase: str, result: dict) -> None:
+            job.update(phase=phase, git=result, commit=result.get("commit"),
+                       changed_files=result.get("changed_files", []))
+            _save(job_path, job)
+
+        def recheck() -> list[dict]:
+            bases = [(record["path"], record["base"]) for record in verdict["reviews"]]
+            found = curate._new_errors(validate_bundle(bundle), baseline, []) + validate_changed(bundle, written)
+            return curate._changeset_conflicts(root, base, bases, written) + [
+                changeset._from_message(error) for error in dict.fromkeys(found)]
+
+        git = curate._commit_and_push(root, _review_message(str(job.get("id")), request, actor, verdict["reviews"]),
+                                      4, persist, bundle, recheck)
+        job.update(git=git, commit=git.get("commit"), changed_files=git.get("changed_files", []))
+        if git.get("committed") and (git.get("pushed") or not curate._has_remote(root)):
+            job.update(status="done", phase="done")
+            return
+        rollback()
+        problems = git.pop("recheck_errors", None)
+        if problems or git.get("note") == curate.REBASE_CONFLICT:
+            # The branch moved at push time: the reviewer pulls and reviews the current version.
+            reject(curate._rejection(problems or [changeset._error(
+                "conflict", "the published branch moved and Git could not rebase onto it")]))
+            job.update(http_status=409, failure=failure("conflict", stage="git", detail=job["failure"]["detail"]))
+        else:
+            job.update(status="failed", error="audit changeset git commit/push failed")
+    except Exception as exc:  # noqa: BLE001 — a failed audit changeset is a durable job result
+        job.update(status="failed", error=job.get("error") or repr(exc))
+        rollback()
+    finally:
+        job["finished"] = curate._now()
+        if job.get("status") == "failed" and not isinstance(job.get("failure"), dict):
+            job["failure"] = classify(job)
+        if job.get("status") == "done" and on_done is not None:
+            on_done(job)
+        _save(job_path, job)
