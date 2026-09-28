@@ -19,6 +19,7 @@ You turn on each group of checks with a flag. Every threshold can be changed wit
 | `--ledger PATH` | `ai-wiki maintain` `state.json`, or its state directory | An entry is `needs_repair`. An entry has been pending longer than `--pending-max-age-hours` (48); the pending time is measured from the earlier of its frozen evidence mtime and its first job. `done` and `superseded` entries are ignored. |
 | `--bundle PATH` (repeatable) | The writer's bundle directory | The bundle's last Git commit is older than `--commit-max-age-hours` (48). A job in `<bundle>/.okf/jobs/` failed within the last `--unresolved-failure-hours` (168, 7 days) and no later attempt on the same source SHA (ingest) or parent job (audit) is done, queued or running. A queued or running job is older than `--stuck-hours`. The output lists every failure from the last `--failed-window-hours` (24) with the attempt that resolved it, and reports queue depth and the age of the oldest queued job. |
 | `--bundle PATH` (same flag) | The maintainer queue in `<bundle>/.okf/maint/` (`service/maint_state.py`, design §7) | An item is `needs_human` (one alert per item, so each new one posts at once). An item's `item.json` fails the writer's own item check, so the writer no longer sees the item (one alert per item). Some item has waited in `ready` longer than `--ready-max-age-hours` (72); the wait restarts when the item last came back to `ready` (an owner retry, an attempt that handed it back, or a new build re-admitting an attempt-capped item), and one alert per bundle names the count and the oldest item. A member's submission (`origin.kind` `member`, `AIWIKI_INTAKE=inbox`) has waited in `ready` longer than `--member-ready-max-age-hours` (24), with the same restart rule and one alert per bundle. The `repos` or `issues` cursor has not advanced for `--cursor-max-age-hours` (30); for `repos` that includes a repository the collector could not scan and carried forward with `stale_since`, even though the collector still rewrites the cursor. A cursor that does not exist yet never alerts. A maintainer or auditor run lease still names a run that acquired it more than `--stuck-hours` ago, live or lapsed, until `maint end` or the next `maint begin` replaces it. A missing `.okf/maint` is quiet, not an error. |
+| `--writer-url URL` (with `--bundle`) | The writer's `GET /maint/status?bundle=<name>` for each `--bundle`, read with a read-only token in `$AIWIKI_WATCHDOG_TOKEN` | Only while the writer runs `AIWIKI_AUDIT=external`: the oldest non-seed entry of the external audit backlog has waited longer than `--audit-max-age-hours` (72, design §5.2), measured from when that concept version became due (`audit_backlog_stale:<bundle>`), or the writer cannot derive the backlog (`audit_backlog_error:<bundle>`). Under `AIWIKI_AUDIT=codex` it reports the facts and stays quiet. `--writer-url` without `--bundle` or the token is a usage error. |
 
 The script prints one JSON document containing `status`, `alerts[]`, `errors[]`, per-check
 `checks` facts, and `notify`. Exit codes:
@@ -161,10 +162,12 @@ them as the worker's user (`admin`). Git then owns the repository it reads, so t
 The watchdog runs once a day, at 07:00 CST, after the 04:00 maintainer run, on two hosts
 (docs/final-cutover-runbook.md step 10 installs both):
 
-- The writer host, `--bundle <production bundle>`: the curating maintainer's progress lives on
-  the writer, so its maint checks page on cursors that stopped advancing (the maintainer did
-  not run), items waiting too long (a member's submission after 24 h, any item after 72 h) or
-  needing a human, and stuck run leases.
+- The writer host, `--bundle <production bundle> --writer-url http://127.0.0.1:8788` with a
+  `process:ai-wiki-watchdog` read token in `AIWIKI_WATCHDOG_TOKEN`: the curating maintainer's
+  progress lives on the writer, so its maint checks page on cursors that stopped advancing
+  (the maintainer did not run), items waiting too long (a member's submission after 24 h, any
+  item after 72 h) or needing a human, and stuck run leases; the audit check pages when the
+  Auditor's backlog has new work older than 72 h.
 - The maintainer's runtime host, `--multica --no-checkpoint`, once for the maintainer's
   autopilot and once with `--autopilot-id <the Auditor's autopilot>`: failed, overdue and stuck
   runs and issues. `--no-checkpoint` is required: the curating maintainer writes no v4
@@ -172,8 +175,7 @@ The watchdog runs once a day, at 07:00 CST, after the 04:00 maintainer run, on t
 
 `--ledger` reads the legacy `maintain` ledger, and the checkpoint checks the legacy v4
 checkpoint; both return with a rollback. The runbook removes the shadow's `--bundle` when the
-shadow agent retires. The audit backlog's age (design §7, 72 h) has no check yet: the
-Auditor's failed or missing runs page through its autopilot.
+shadow agent retires. The Auditor's failed or missing runs also page through its autopilot.
 
 ### Maintainer queue across the migration
 

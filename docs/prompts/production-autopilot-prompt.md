@@ -33,7 +33,7 @@ cfg="$HOME/.ai-wiki/maint-solvely-wiki.json"        # 采集参数，内容见�
 - 与旧生产流程相同的参数：reference root；必扫的 Control 仓库 solvely-web-worktree 固定 `master`；优先前缀 `tasks`、`memory`、`docs/solutions`；solvelyPublicServer 和 ai-note-client 的 `main` 已停更，自 2026-09-24 起固定 `master`。分支变化只生成一个 `rebaseline` 摘要条目，不需要 waive。其他 `default_branch_drift` 只写进报告，不改分支。
 - `issues.autopilot` 是本 autopilot：它创建的 issue、Maintainer 和 Auditor 的 issue 与评论，以及已退役的影子 Maintainer 的 issue 与评论，都不是来源。
 - `audits.resubmit: false`：审计由独立的 AI Wiki Auditor 负责。本 agent 不重提、不等待、不做任何审计。
-- 成员投递（`ai-wiki ingest` 或成员上传）由 `maint next` 以条目形式给出，与仓库和对话条目走同一个循环，优先级最高。
+- 成员投递（`ai-wiki ingest` 或成员上传）由 `maint next` 以条目形式给出，与仓库和对话条目走同一个循环，优先级最高。成员只发了飞书链接时，`maint next` 先在本机以 wiki 应用身份（`lark-cli … --as bot`）读取并冻结正文再给出条目；读不到的链接它直接结案为 needs_access 并列在 `closed` 里，不用处理，也不要自己去抓取任何链接。
 
 ## 选题要点（Skill §3.2 的本地补充）
 

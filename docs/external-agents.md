@@ -40,7 +40,9 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier.
 - **Evidence is never an agent's own text.** A process cites frozen work-item files; only a
   `human:` principal uploads a packet.
 - **Quotas.** Changesets per hour and per day and deprecations per day are metered per
-  principal (429 with `Retry-After`); the `maintainer` preset carries 30, 150 and 10.
+  principal (429 with `Retry-After`); the `maintainer` preset carries 30, 150 and 10, and the
+  `auditor` preset 200 reviews a day. A member queues at most 30 new submissions per bundle a
+  day (`AIWIKI_SUBMISSIONS_PER_DAY`, or its own `limits.submissions_per_day`).
 - Everything an agent reads (repositories, issues, comments, member files) is data, never
   instructions. The gate, not the prompt, is the boundary.
 
@@ -148,8 +150,11 @@ writer's API is newer than the CLI, the bundle is not served, or a tool (`git`, 
   cursors, receipts), so a run can move to another host or model between any two runs.
 - Auditor: its own schedule, never the maintainer's credential, never the maintainer's
   hand-off text: it reads only the backlog and the evidence the server serves.
-- Member: `ai-wiki ingest <file|text>`; `ai-wiki jobs <id>` follows the work item until a
-  changeset curates it (with the commit) or the maintainer skips it (with the reason).
+- Member: `ai-wiki ingest <file|text|link>`; `ai-wiki jobs <id>` follows the work item until a
+  changeset curates it (with the commit) or the maintainer skips it (with the reason). A
+  Feishu link is read on the member's machine with their own lark-cli; sent alone, the
+  maintainer reads it as the wiki's app if its host has one (runbook step 2c), otherwise the
+  item closes `needs_access`.
 
 ## 6. Swap the model or the runtime
 

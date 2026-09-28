@@ -16,8 +16,9 @@ the writer reports but cannot see, so set them up here.
 
 Prerequisites: the writer runs with `AIWIKI_AUDIT=external` and `AIWIKI_BACKLOG_EPOCH` set (it
 refuses to start otherwise), the tunnel routes `audit/backlog` to the writer, and the host has
-`git`, `uv` and read access to the reference repositories under `repos.root` of the config the
-prompt names (only to re-read Git evidence). `ai-wiki -b <bundle> doctor --role auditor` must
+`git` and `uv`. Read access to the reference repositories under `repos.root` of the config the
+prompt names is optional and serves only to re-read Git evidence: without it every Git part is
+`unavailable` and the auditor judges the frozen copies (runbook step 2b). `ai-wiki -b <bundle> doctor --role auditor` must
 pass on the host before the autopilot is enabled. A shadow period needs no other agent or
 prompt: while the writer still runs `AIWIKI_AUDIT=codex`, every `review submit` only asks the
 writer's verdict, and `review end` lists each one under `dry_run` (path, base, outcome) for

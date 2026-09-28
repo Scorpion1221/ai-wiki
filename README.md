@@ -392,8 +392,8 @@ rules.
 it is installed). In the final state it runs once a day at 07:00 CST, on two hosts. On the
 writer host, `--bundle` pages Feishu about collector cursors that stopped advancing, work items
 that wait too long (a member's submission after a day) or need a human, stuck run leases, a
-stale bundle commit, and writer job failures that have no later attempt (`job_failed`, for up to
-7 days). On the maintainer's runtime host, `--multica --no-checkpoint` pages about failed,
+stale bundle commit, writer job failures that have no later attempt (`job_failed`, for up to
+7 days), and, with `--writer-url`, an external audit backlog whose new work waits over 72 h. On the maintainer's runtime host, `--multica --no-checkpoint` pages about failed,
 overdue or stuck maintainer and auditor runs. The checkpoint checks and `--ledger` read the
 legacy v4 checkpoint and ledger and belong to a rollback.
 

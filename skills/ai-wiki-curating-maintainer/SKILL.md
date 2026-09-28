@@ -68,8 +68,8 @@ ai-wiki -b "$bundle" maint next --json
 ```
 
 - Exit `0`: a brief of at most 2 KB (`item`, `topic_key`, `origin`, `brief`, `attempts`,
-  `evidence_dir`, `files`, `commands`). `resumed: true` means an earlier attempt of this run
-  claimed it: start it again.
+  `evidence_dir`, `files`, `commands`). `resumed: true`: an earlier attempt of this run claimed
+  it, start it again. `closed` (any exit): member links it could not read, closed; nothing to do.
 - Exit `10` (queue empty) or `11` (`--max-items` or the 100 min deadline spent): go to §5.
 - Exit `12`: the workspace holds edits. With an `item`, finish it (§3.4) or park it; without
   one, rerun the §2 `begin` command, which resets the workspace.

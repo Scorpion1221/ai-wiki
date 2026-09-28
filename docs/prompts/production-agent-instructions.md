@@ -9,7 +9,7 @@ a model or a runtime: any agent that meets the requirements below can run it
 | Setting | Value |
 |---|---|
 | Agent | `AI Wiki Maintainer` (`1dcccd34`), today on runtime `df0fb673` (ip-10-2-192-225) with model `claude-opus-5-5-combos`; swap either per docs/external-agents.md §6 |
-| Host | `ai-wiki` (the pinned release), `git`, `uv` and `multica` on PATH; the reference repositories under `/home/ubuntu/git/reference-repos/solvely-web-control/` |
+| Host | `ai-wiki` (the pinned release), `git`, `uv` and `multica` on PATH; the reference repositories under `/home/ubuntu/git/reference-repos/solvely-web-control/`; optionally `lark-cli` configured as the wiki's read-only Feishu app, so `maint next` can read a Feishu link a member sent alone (runbook step 2c; without it such items close `needs_access`) |
 | Skills | `ai-wiki-curating-maintainer`, `okf-knowledge-curator`. Not `ai-wiki-maintainer`: that is the legacy ingest and Codex audit flow, kept for rollback only |
 | Concurrency | `max_concurrent_tasks=1`, `max_attempts=2`, task timeout 3 h |
 | Custom env | `AIWIKI_TOKEN=<aiw_c_ token of process:ai-wiki-maintainer>`, the curator role (read, submit, curate) |
