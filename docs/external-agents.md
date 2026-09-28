@@ -14,7 +14,9 @@ swappable because the prompts name none and the server enforces every rule below
 | Reader | `watchdog` (or a custom reader) | `process:ai-wiki-watchdog`, `aiw_r_` | read | reads and status checks | `ai-wiki` | none |
 
 `human:*` principals (the owner) hold every scope and are the only ones that may upload
-evidence (`propose --upload`) or reach the human-reviewed trust tier.
+evidence (`propose --upload`) or reach the human-reviewed trust tier. The maintainer's
+`submit` serves only the legacy `maintain` flow: under inbox intake the writer refuses a
+`process:` token's `ingest`, since the work item it would make is evidence a changeset may cite.
 
 ## 1. Rules the server enforces
 
