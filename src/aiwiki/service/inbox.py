@@ -1,31 +1,34 @@
 """Inbox intake (AIWIKI_INTAKE=inbox): a member submission becomes a maintainer work item.
 
 POST /ingest and the inbox sweep land a source in ``sources/inbox/`` verbatim, as the Codex
-path does, but instead of queuing Codex curation they queue a ``member`` work item that the
-curating maintainer claims through ``maint next`` like any collected item, ahead of them by
-priority. The item holds the frozen evidence (text redacted of secrets as collectors do,
-binaries verbatim) and names the submitter and the job; the job (``mode: inbox``) names the
-item and answers ``GET /jobs/<id>`` from it, so the member follows one id to the changeset
-and commit that curated it.
+path does, but for a bundle that commits changesets they queue a ``member`` work item instead
+of Codex curation. The curating maintainer claims it through ``maint next`` like any collected
+item, ahead of them by priority. The item holds the frozen evidence (text redacted of secrets as
+collectors do, binaries verbatim) and names the submitter and the job; the job (``mode: inbox``)
+names the item and answers ``GET /jobs/<id>`` from it, so the member follows one id to the
+changeset and commit that curated it.
 
 The writer never fetches a URL: a link submitted without its content is recorded as a
-needs_access item, and a format nothing reads (a PDF) as needs_conversion. ``requeue`` hands
+needs_access item. A format nothing reads (a PDF) is needs_conversion. Text larger than one
+evidence packet is refused, and an inbox drop of it is needs_conversion. ``requeue`` hands
 ready and parked member items back to Codex curation, the rollback while Codex exists.
 
-Deterministic and stdlib only: nothing here runs an LLM or opens a connection.
+Deterministic: nothing here runs an LLM or opens a connection.
 """
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import re
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 from aiwiki.version import service_identity
 
 from ..maint import planner
-from ..runtime import secrets
+from ..runtime import changeset, secrets
 from . import ingest as I
 from . import maint_state as M
 
@@ -33,24 +36,33 @@ NEEDS_ACCESS = ("the writer never fetches URLs, so nothing was read from this li
                 "access (with lark-cli installed, `ai-wiki ingest <url>` reads a Feishu/Lark doc on your "
                 "machine) or export it and ingest the file")
 NEEDS_CONVERSION = "the writer reads no such format: convert it to text or Markdown and ingest that"
+TOO_LARGE = ("{size} bytes of text is more than one evidence packet holds ({limit}): split it into parts and "
+             "ingest each")
 _REQUEUE = ("ready", "parked", "requeued")
 _JOB_ID = re.compile(r"[0-9a-f]{12}")
+_DAY = timedelta(days=1)
 
 
 def receive(bundle: Path, data: bytes | None, *, filename: str | None, title: str | None, url: str | None,
-            fetched: dict | None, submitter: str) -> tuple[dict, bool]:
+            fetched: dict | None, submitter: str, quota: int | None = None) -> tuple[dict, bool]:
     """Store a member's submission and queue its work item; ``(job, deduplicated)``.
 
-    ``data`` None is a link alone. The same content (or link) again returns its first job.
+    ``data`` None is a link alone. The same content (or link) again returns its first job;
+    anything new counts against ``quota``, the submitter's submissions to this bundle a day.
     """
     with I._JOB_LOCK:
         sha = hashlib.sha256(data if data is not None else str(url).encode()).hexdigest()
         existing = I.find_job_by_sha(bundle, sha)
         if existing is not None:
             return view(bundle, existing), True
+        file, outcome, reason = _freeze(data, filename, url)
+        if outcome == "too_large":
+            raise M.MaintError(413, "too_large", reason)
+        if quota is not None:
+            _check_quota(bundle, submitter, quota)
         source = I.write_source(bundle, data, filename, title)[0] if data is not None else None
-        job = _register(bundle, sha, data, source=source, submitter=submitter, via="ingest", title=title,
-                        filename=filename, url=url, fetched=fetched)
+        job = _register(bundle, sha, file, outcome, reason, source=source, submitter=submitter, via="ingest",
+                        title=title, filename=filename, url=url, fetched=fetched)
     return view(bundle, job), False
 
 
@@ -58,36 +70,70 @@ def register_drop(bundle: Path, source: str, data: bytes) -> dict:
     """A file dropped in ``sources/inbox/`` out of band (the sweep): its job and work item."""
     with I._JOB_LOCK:
         sha = hashlib.sha256(data).hexdigest()
-        return I.find_job_by_sha(bundle, sha) or _register(
-            bundle, sha, data, source=source, submitter=None, via="drop", title=None,
-            filename=Path(source).name.removesuffix(".source"), url=None, fetched=None)
+        existing = I.find_job_by_sha(bundle, sha)
+        if existing is not None:
+            return existing
+        filename = Path(source).name.removesuffix(".source")
+        file, outcome, reason = _freeze(data, filename, None)
+        return _register(bundle, sha, file, "needs_conversion" if outcome == "too_large" else outcome, reason,
+                         source=source, submitter=None, via="drop", title=None, filename=filename, url=None,
+                         fetched=None)
 
 
-def _register(bundle: Path, sha: str, data: bytes | None, *, source: str | None, submitter: str | None, via: str,
-              title: str | None, filename: str | None, url: str | None, fetched: dict | None) -> dict:
+def _freeze(data: bytes | None, filename: str | None, url: str | None) -> tuple[dict, str | None, str | None]:
+    """The item's one evidence file ``{name, data, redactions}``, and the outcome closing it at
+    once with its reason (``too_large``: text no evidence packet holds)."""
+    if data is None:
+        return {"name": "link.txt", "data": f"{url}\n".encode(), "redactions": 0}, "needs_access", NEEDS_ACCESS
+    suffix = re.sub(r"[^A-Za-z0-9.]", "", Path(filename or "pasted.md").suffix)[:16]
+    file = {"name": f"source{suffix}", "data": data, "redactions": 0}
+    outcome = reason = None
+    if not I.is_curatable(file["name"], data):
+        outcome, reason = "needs_conversion", NEEDS_CONVERSION
+    with contextlib.suppress(UnicodeDecodeError):  # binaries stay verbatim; the gate reads no secrets in text
+        text, file["redactions"] = secrets.redact(data.decode("utf-8"))
+        file["data"] = text.encode()
+        limit = changeset.limits()["packet_text_bytes"]
+        if outcome is None and len(file["data"]) > limit:
+            outcome, reason = "too_large", TOO_LARGE.format(size=len(file["data"]), limit=limit)
+    return file, outcome, reason
+
+
+def _check_quota(bundle: Path, submitter: str, limit: int) -> None:
+    """429 once ``submitter`` queued ``limit`` submissions into this bundle within a day."""
+    now = M._now()
+    times = []
+    for path in (bundle / ".okf" / "jobs").glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        created = M._parse(job.get("created")) if isinstance(job, dict) else None
+        if created and now - created < _DAY and job.get("via") == "ingest" and job.get("submitter") == submitter:
+            times.append(created)
+    if len(times) >= limit:
+        retry = max(1, int(((sorted(times)[-limit] if limit else now) + _DAY - now).total_seconds()))
+        raise M.MaintError(429, "rate_limited", f"the submissions_per_day quota of {limit} is used up for this "
+                                                f"bundle; retry in {retry} s", retry_after_s=retry)
+
+
+def _register(bundle: Path, sha: str, file: dict, outcome: str | None, reason: str | None, *, source: str | None,
+              submitter: str | None, via: str, title: str | None, filename: str | None, url: str | None,
+              fetched: dict | None) -> dict:
     """The item first, then the job naming it: a crash between them leaves an item the next
     submission (or sweep) finds again by its item_key."""
     job_id = uuid.uuid4().hex[:12]
     declared = {"title": title, "filename": filename, "url": url, "fetched": fetched, "source": source}
     origin = {"kind": M.MEMBER, "submitter": submitter, "via": via, "job": job_id, "sha256": sha,
               **{key: value for key, value in declared.items() if value}}
-    outcome = reason = None
-    if data is None:
-        name, frozen, outcome, reason = "link.txt", f"{url}\n".encode(), "needs_access", NEEDS_ACCESS
-    else:
-        suffix = re.sub(r"[^A-Za-z0-9.]", "", Path(filename or "pasted.md").suffix)[:16]
-        name, frozen, count = f"source{suffix}", data, 0
-        if not I.is_curatable(source or name, data):
-            outcome, reason = "needs_conversion", NEEDS_CONVERSION
-        with contextlib.suppress(UnicodeDecodeError):  # binaries stay verbatim; the gate reads no secrets in text
-            text, count = secrets.redact(data.decode("utf-8"))
-            frozen = text.encode()
-        origin["redactions"] = count
+    if file["name"] != "link.txt":
+        origin["redactions"] = file["redactions"]
+    frozen = file["data"]
     [planned] = planner.plan([{
         "collector": "inbox", "topic_key": f"{M.MEMBER}:{sha[:16]}", "origin": origin,
         "brief": f"{submitter or 'inbox drop'}: {title or filename or url or 'pasted text'}",
-        "files": [{"name": name, "sha256": hashlib.sha256(frozen).hexdigest(), "bytes": len(frozen), "data": frozen,
-                   "origin": {**origin, "kind": "member-source"}}]}])
+        "files": [{"name": file["name"], "sha256": hashlib.sha256(frozen).hexdigest(), "bytes": len(frozen),
+                   "data": frozen, "origin": {**origin, "kind": "member-source"}}]}])
     item = M.intake(bundle, planned, principal=submitter or "service", outcome=outcome, reason=reason)
     job = {"id": job_id, "kind": "ingest", "mode": "inbox", "status": "inbox", "item": item["id"], "sha256": sha,
            "submitter": submitter, "via": via, "created": I._now(), "service": service_identity(),

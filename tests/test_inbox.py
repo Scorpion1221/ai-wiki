@@ -177,6 +177,7 @@ def test_the_writer_never_fetches_a_link(gate, monkeypatch) -> None:
     for url in ("ftp://example.com/x", "https://user:" + "s3cr3tvalue@example.com/doc", "https://a b"):
         assert ingest(gate, url=url).status_code == 400, url
     assert ingest(gate, url=FEISHU, fetched={"cookie": "x"}).status_code == 400
+    assert ingest(gate, text="# Note\n", title=f"notes {FAKE_KEY}").status_code == 400  # it travels with the item
     # A format nothing reads is kept, and says why it waits.
     pdf = ingest(gate, content_b64=base64.b64encode(b"%PDF-1.4 data").decode(), filename="q3.pdf").json()
     assert pdf["status"] == "needs_conversion" and "convert it" in pdf["reason"]
@@ -354,6 +355,38 @@ def test_member_uploads_keep_binary_evidence_verbatim(gate) -> None:
     assert receipt["status"] == "ready" and item["origin"]["filename"] == "Funnel Chart.PNG"
     assert M.read_file(bundle(gate), item["id"], "source.PNG") == png and item["origin"]["redactions"] == 0
     assert git(bundle(gate), "status", "--porcelain") == ""  # sources/inbox and .okf stay out of Git
+
+
+def test_text_larger_than_one_evidence_packet_is_refused(gate, monkeypatch) -> None:
+    monkeypatch.setenv("AIWIKI_CHANGESET_MAX_PACKET_TEXT_BYTES", "4096")
+    big = "# Big\n\n" + "one fact per line\n" * 300
+
+    refused = ingest(gate, text=big)
+
+    assert refused.status_code == 413 and "split it into parts and ingest each" in refused.json()["detail"]
+    assert not list((bundle(gate) / "sources" / "inbox").glob("*")) and M.list_items(bundle(gate))["total"] == 0
+    assert ingest(gate, text=big[:4000]).json()["status"] == "ready"
+    drop = bundle(gate) / "sources" / "inbox" / "big.md.source"
+    drop.write_text(big, encoding="utf-8")
+    assert worker.sweep_once([bundle(gate)]) == 1
+    [dropped] = M.list_items(bundle(gate), status="needs_conversion")["items"]
+    assert dropped["origin"]["via"] == "drop" and "split it" in dropped["resolution"]["reason"]
+
+
+def test_submissions_per_day_bound_what_one_principal_queues(gate, monkeypatch) -> None:
+    monkeypatch.setenv("AIWIKI_SUBMISSIONS_PER_DAY", "2")
+    for n in range(2):
+        assert ingest(gate, text=f"# Note {n}\n").status_code == 200
+
+    over = ingest(gate, text="# Note 2\n")
+
+    assert over.status_code == 429 and "submissions_per_day quota of 2" in over.json()["detail"]
+    assert 0 < int(over.headers["Retry-After"]) <= 86400
+    assert ingest(gate, text="# Note 0\n").json()["deduplicated"] is True  # a resend is no new submission
+    assert ingest(gate, "owner", text="# Note 2\n").status_code == 200  # each principal has its own
+    now = M._now
+    monkeypatch.setattr(M, "_now", lambda: now() + timedelta(days=1, minutes=1))
+    assert ingest(gate, text="# Note 3\n").status_code == 200
 
 
 def test_inbox_intake_applies_to_bundles_that_commit(gate) -> None:

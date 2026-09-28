@@ -23,6 +23,8 @@ Config via env (read at import):
   AIWIKI_CHANGESET_WAIT_S  seconds POST /changesets waits for its receipt before a 202 (default 60)
   AIWIKI_CHANGESETS_PER_HOUR, AIWIKI_CHANGESETS_PER_DAY, AIWIKI_DEPRECATIONS_PER_DAY
                          default changeset quotas of a principal without its own `limits`
+  AIWIKI_SUBMISSIONS_PER_DAY  default member submissions a principal may queue into one bundle a
+                         day under inbox intake (30); its own `limits.submissions_per_day` wins
 
 The writer must receive /whoami, /workspace, /changesets, /maint, /audit/backlog and /admin
 as well as /ingest and /jobs (the Cloudflare route regex of design §2.1); a read mirror
@@ -468,33 +470,38 @@ _FETCHED = frozenset({"tool", "document_id", "revision_id"})
 
 def _ingest_inbox(body: IngestBody, data: bytes | None, filename: str | None, bundle: str | None,
                   principal: auth.Principal) -> dict:
-    """AIWIKI_INTAKE=inbox: store the submission and queue its member work item (service/inbox.py).
+    """Inbox intake: store the submission and queue its member work item (service/inbox.py).
 
     The job answers ``GET /jobs/<id>`` from the item until the maintainer's changeset curates
-    it. The writer never fetches ``url``: a link alone becomes a needs_access item.
+    it. The writer never fetches ``url``: a link alone becomes a needs_access item. New
+    submissions count against the principal's ``submissions_per_day`` for the bundle (429 past
+    it), so a leaked member token can only queue that much.
     """
     if not CURATE_ON:
         raise HTTPException(status_code=403, detail="inbox intake requires the writer (AIWIKI_CURATE enabled)")
     if body.url is not None and (not _URL.fullmatch(body.url) or secrets.scan(body.url)):
         raise HTTPException(status_code=400, detail="url must be an http(s) link of at most 2048 characters, "
                                                     "without credentials")
-    if body.title is not None and len(body.title) > 500:
-        raise HTTPException(status_code=400, detail="title must be at most 500 characters")
+    if body.title is not None and (len(body.title) > 500 or secrets.scan(body.title)):
+        raise HTTPException(status_code=400, detail="title must be at most 500 characters, without secrets")
     fetched = body.fetched
     if fetched is not None and (not fetched or set(fetched) - _FETCHED or not all(
             isinstance(value, str | int) and not isinstance(value, bool) and len(str(value)) <= 200
             for value in fetched.values())):
         raise HTTPException(status_code=400, detail="fetched takes tool, document_id and revision_id, each a short "
                                                     "string or number")
+    quota = principal.limits.get("submissions_per_day", int(os.environ.get("AIWIKI_SUBMISSIONS_PER_DAY", "30")))
     try:
         with worker.serialized_lifecycle():
             _name, path = _resolve(bundle, principal)
             job, deduplicated = inbox.receive(path, data, filename=filename, title=body.title, url=body.url,
-                                              fetched=fetched, submitter=principal.id)
+                                              fetched=fetched, submitter=principal.id, quota=quota)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except M.MaintError as exc:
-        raise HTTPException(status_code=exc.status, detail=exc.detail()) from None
+        retry = exc.extra.get("retry_after_s")
+        raise HTTPException(status_code=exc.status, detail=str(exc),
+                            headers={"Retry-After": str(retry)} if retry else None) from None
     return {**job, "deduplicated": deduplicated}
 
 
