@@ -12,7 +12,8 @@ Config via env (read at import):
   AIWIKI_DISABLE         comma-list of endpoints to 403 (ingest, audit, search, grep, create, delete,
                          maint, admin, changesets, workspace); audit covers audit changesets too
   AIWIKI_LLM             ``codex`` (default) or ``off``: off, the writer never starts an agent process
-                         and ignores config.agent; the legacy Codex routes answer 409 (runtime/config.py)
+                         and ignores config.agent; the legacy Codex routes answer 409 (runtime/config.py).
+                         off refuses to start without AIWIKI_AUDIT=external: nothing else would verify
   AIWIKI_INTAKE, AIWIKI_AUDIT, AIWIKI_CHANGESETS_COMMIT, AIWIKI_RESTRUCTURE, AIWIKI_CODEX_AUDIT_MANUAL
                          rollout switches reported by /whoami; unset keeps today's behaviour.
                          AIWIKI_INTAKE=inbox turns /ingest and the inbox sweep of each bundle in
@@ -130,6 +131,9 @@ except ValueError as exc:
 if MODES["audit"] == "external" and _EPOCH is None:
     raise RuntimeError("AIWIKI_AUDIT=external needs AIWIKI_BACKLOG_EPOCH, the time external auditors took over "
                        "(design §5.3), e.g. 2026-11-03T00:00:00Z")
+if MODES["llm"] == "off" and MODES["audit"] != "external":  # else nothing would ever verify, silently
+    raise RuntimeError("AIWIKI_LLM=off runs no Codex audit: it needs AIWIKI_AUDIT=external (and "
+                       "AIWIKI_BACKLOG_EPOCH), so the external auditor verifies what this writer commits")
 API = {"changesets": 1}
 CLIENT_MIN = "0.3.0"
 # A changeset answers synchronously within this, well inside Cloudflare's ~100s origin timeout.

@@ -280,7 +280,7 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_PORT` | service port (default 8787) |
 | `AIWIKI_DISABLE` | comma-list of endpoints to 403 (e.g. `ingest,audit,create,delete,search,grep`); `audit` also refuses audit changesets |
 | `AIWIKI_CURATE` | `auto` (default) makes a writer; `off` turns off curation, changesets, the workspace and `/maint` (a read mirror also sets `AIWIKI_DISABLE=ingest,audit,…`, else `POST /ingest` still stores submissions) |
-| `AIWIKI_LLM` | `codex` (default) or `off`: off, the writer never starts an agent process, ignores `config.agent` and `AIWIKI_AGENT_*`, and answers the legacy Codex routes with 409 |
+| `AIWIKI_LLM` | `codex` (default) or `off`: off, the writer never starts an agent process, ignores `config.agent` and `AIWIKI_AGENT_*`, and answers the legacy Codex routes with 409; it refuses to start without `AIWIKI_AUDIT=external`, since nothing else would verify |
 | `AIWIKI_INTAKE`, `AIWIKI_AUDIT`, `AIWIKI_CHANGESETS_COMMIT`, `AIWIKI_RESTRUCTURE`, `AIWIKI_CODEX_AUDIT_MANUAL` | rollout switches, reported by `GET /whoami` under `modes` (see "Final state" above and `src/aiwiki/service/app.py`) |
 | `AIWIKI_CONFIG` | local client / worker JSON config (default `~/.ai-wiki/config.json`) |
 | `AIWIKI_AGENT_BIN` | override `agent.bin`; Codex executable or compatible wrapper (default `codex`) |

@@ -14,7 +14,7 @@ The final state is these writer flags, and nothing else changes on the server:
 | `AIWIKI_CHANGESETS_COMMIT` | `solvely-wiki,solvely-wiki-shadow` | `solvely-wiki-shadow` |
 | `AIWIKI_INTAKE` | `inbox`: a member's submission becomes a work item | `curate` (Codex) |
 | `AIWIKI_AUDIT` | `external`: the Auditor agent reviews the server-derived backlog | `codex` |
-| `AIWIKI_LLM` | `off`: the writer never starts an agent process, ignores `config.agent` | `codex` |
+| `AIWIKI_LLM` | `off`: the writer never starts an agent process, ignores `config.agent`; it refuses to start without `AIWIKI_AUDIT=external` | `codex` |
 | `AIWIKI_BACKLOG_EPOCH` | the moment of step 6 | unset |
 | `AIWIKI_CODEX_AUDIT_MANUAL` | empty | `solvely-wiki-shadow` |
 
@@ -1207,9 +1207,6 @@ Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` show
 - There is no shadow comparison of the Auditor's verdicts with Codex's (the design's ≥ 85 %
   agreement): the owner chose no waiting periods. Step 2d proves the path, not the judgment;
   the canary's 8b and the first week's comments are the check.
-- `AIWIKI_LLM=off` with `AIWIKI_AUDIT=codex` audits nothing (no Codex audit is queued, and
-  audit changesets only dry-run); step 6's drop-in sets both together, so only a partial
-  hand edit of it reaches that state.
 - The writer still runs as `admin`, the user of an interactive Codex login on the same host.
   `AIWIKI_LLM=off` guarantees the service never starts an agent; moving the writer to its own
   user (design §8.4) is the host hardening that remains.

@@ -32,9 +32,13 @@ def _refuse(attempts: list):
     return popen
 
 
+EPOCH = "2026-09-27T00:00:00Z"
+
+
 def _gate(tmp_path: Path, monkeypatch, **env: str) -> Gate:
+    """The writer with AIWIKI_LLM=off, and so with the external audit it needs to start."""
     real = audit.run  # the fixture swaps in a recorder; these tests keep the real reviewer
-    gate = Gate(tmp_path, monkeypatch, AIWIKI_LLM="off", **env)
+    gate = Gate(tmp_path, monkeypatch, AIWIKI_LLM="off", AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=EPOCH, **env)
     monkeypatch.setattr(worker.audit, "run", real)
     return gate
 
@@ -65,7 +69,7 @@ def test_no_legacy_path_starts_a_process(tmp_path, monkeypatch) -> None:
         for token in ("owner", "curator", "auditor"):
             requested = client.post(f"/jobs/{ingest_job['id']}/audit", params={"bundle": "kb-a"},
                                     headers=gate.headers(token))
-            assert requested.status_code == 409 and "AIWIKI_LLM=off" in requested.json()["detail"], token
+            assert requested.status_code == 409 and "GET /audit/backlog" in requested.json()["detail"], token
 
     assert swept == [0] and worker.sweep_once([gate.writer]) == 0
     for submit in (lambda: worker.submit(gate.writer, "sources/inbox/left.md", I.job_path(gate.writer, "x")),
@@ -78,15 +82,15 @@ def test_no_legacy_path_starts_a_process(tmp_path, monkeypatch) -> None:
     assert attempts == []
     assert set(gate.jobs()) == before  # nothing new was registered or stored
     assert sorted(path.name for path in inbox.iterdir()) == ["dropped.md", "left.md"]
-    # What the Codex writer left stays queued for a rollback to AIWIKI_LLM=codex.
-    assert gate.job(ingest_job["id"])["status"] == gate.job(audit_job["id"])["status"] == "queued"
+    # The Codex ingest left behind stays queued for a rollback to AIWIKI_LLM=codex; its audit
+    # is cancelled, never run, as every Codex audit is under the external audit.
+    assert (gate.job(ingest_job["id"])["status"], gate.job(audit_job["id"])["status"]) == ("queued", "cancelled")
 
 
 def test_the_final_state_takes_members_and_reviews_without_an_agent(tmp_path, monkeypatch) -> None:
     """The cut-over's flags together (runbook step 6): inbox intake and external audit keep
     working under AIWIKI_LLM=off, and none of their paths reaches Codex. Only Git runs."""
-    gate = _gate(tmp_path, monkeypatch, AIWIKI_INTAKE="inbox", AIWIKI_AUDIT="external",
-                 AIWIKI_BACKLOG_EPOCH="2026-09-27T00:00:00Z")
+    gate = _gate(tmp_path, monkeypatch, AIWIKI_INTAKE="inbox")
     owner = gate.headers("owner")
     inbox = gate.writer / "sources" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
@@ -167,7 +171,7 @@ def test_a_changeset_runs_only_git_and_queues_no_codex_audit(tmp_path, monkeypat
 
     job = response.json()
     assert response.status_code == 201, response.text
-    assert job["commit"] == gate.remote_head() and job["audit"] == {"mode": "llm_off"}
+    assert job["commit"] == gate.remote_head() and job["audit"] == {"mode": "external"}
     assert [stem for stem in gate.jobs() if gate.job(stem)["kind"] == "audit"] == []
     # Unaudited, it waits where a rollback's `maint begin` would resubmit it.
     assert [row["id"] for row in I.pending_audits(gate.writer, older_than_hours=0)["jobs"]] == [job["id"]]
@@ -192,6 +196,18 @@ def test_an_unknown_llm_mode_refuses_to_start(tmp_path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="AIWIKI_LLM must be one of codex, off; got 'claude'"):
         gate.app(AIWIKI_LLM="claude")
     gate.app()  # leave a loadable service for the fixture's teardown
+
+
+def test_off_refuses_to_start_without_the_external_audit(tmp_path, monkeypatch) -> None:
+    """No Codex audit runs under AIWIKI_LLM=off, so with AIWIKI_AUDIT=codex (a partial rollback of
+    the cut-over's drop-in) nothing would ever verify, and no alert would say so."""
+    gate = Gate(tmp_path, monkeypatch)
+    for env in ({}, {"AIWIKI_AUDIT": "codex", "AIWIKI_BACKLOG_EPOCH": EPOCH}):
+        with pytest.raises(RuntimeError, match="AIWIKI_LLM=off runs no Codex audit: it needs AIWIKI_AUDIT=external"):
+            gate.app(AIWIKI_LLM="off", **env)
+    modes = gate.app(AIWIKI_LLM="off", AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=EPOCH).MODES
+    assert (modes["llm"], modes["audit"]) == ("off", "external")
+    gate.app()
 
 
 def test_the_agent_config_is_never_read(tmp_path: Path) -> None:
