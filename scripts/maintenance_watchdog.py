@@ -12,7 +12,9 @@ Each check group is opt-in:
                    <bundle>/.okf/jobs (unresolved failures, queue depth, stuck jobs), and the
                    maintainer queue in <bundle>/.okf/maint (needs_human and corrupt items, stale
                    ready items, collector cursors that stopped advancing once they exist, stuck
-                   run leases).
+                   run leases). With --writer-url, also the external audit backlog each bundle's
+                   writer reports on GET /maint/status (AIWIKI_AUDIT=external; token in
+                   $AIWIKI_WATCHDOG_TOKEN): an alert when its oldest entry waits past 72h.
 
 Prints one JSON document. Exit 0 = ok, 1 = alert, 2 = error (a check or the notification
 failed, or bad usage). With --feishu-webhook, a Feishu card (red alert, grouped by check, with
@@ -42,6 +44,7 @@ import sys
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,6 +80,9 @@ CARD_GROUPS = (
     (("job_",), "✍️ Writer 任务",
      "maintain 管理的来源会自动重试；成员手动 ingest 的失败需要重新提交"),
     (("bundle_commit_",), "📦 Bundle 提交", "确认 writer 服务和每日维护是否仍在产出提交"),
+    (("audit_",), "🔎 外部审计",
+     "查 auditor agent 最近的运行（`ai-wiki review begin` 预检或 lease 失败会让 issue blocked）和它的 token；"
+     "`GET /audit/backlog` 列出待审概念"),
     (("error:",), "⚠️ 检查本身失败", "watchdog 无法完成这项检查，先修复访问或权限"),
     # Last, so a backlog of per-item maint alerts cannot crowd the older groups off the card.
     (("maint_",), "🧭 Maintainer 队列",
@@ -584,6 +590,39 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
     return facts, alerts
 
 
+# --- external audit backlog ----------------------------------------------------------------
+
+
+def check_audit(name: str, args: argparse.Namespace, now: datetime) -> tuple[dict, list[dict]]:
+    """The writer's external audit backlog (design §5.2: alert past 72h), from GET /maint/status.
+    It is derived from Git and review receipts, never stored, so only the writer can report it.
+    Quiet while the writer runs Codex audits: those are writer jobs, which --bundle checks."""
+    url = f"{args.writer_url.rstrip('/')}/maint/status?{urllib.parse.urlencode({'bundle': name})}"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {args.writer_token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - an operator-set URL
+            status = json.loads(response.read())
+    except (OSError, ValueError) as exc:  # HTTPError and URLError are OSErrors
+        raise CheckError(f"GET /maint/status?bundle={name}: {short(exc, 160)}") from None
+    audit = status.get("audit") if isinstance(status, dict) else None
+    if not isinstance(audit, dict):
+        raise CheckError(f"GET /maint/status?bundle={name} has no audit section")
+    oldest = parse_ts(audit.get("oldest_finished"))
+    facts = {"mode": audit.get("mode"), "pending": audit.get("pending"), "oldest": iso(oldest),
+             "age_hours": age_h(now, oldest), "seed": audit.get("seed")}
+    alerts: list[dict] = []
+    if audit.get("mode") != "external":
+        return facts, alerts
+    if audit.get("error"):
+        alerts.append(alert(f"audit:{name}", f"audit_backlog_error:{name}",
+                            f"audit {name}：writer 推导不出审计 backlog：{short(audit['error'], 80)}"))
+    elif oldest is not None and facts["age_hours"] > args.audit_max_age_hours:
+        alerts.append(alert(f"audit:{name}", f"audit_backlog_stale:{name}",
+                            f"audit {name}：{audit.get('pending')} 个概念待审，最老的自 {iso(oldest)} 起已等 "
+                            f"{facts['age_hours']}h（阈值 {args.audit_max_age_hours:g}h），auditor 可能没在运行"))
+    return facts, alerts
+
+
 # --- notification --------------------------------------------------------------------------
 
 
@@ -753,6 +792,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--multica", action="store_true", help="check the Multica autopilot, issues and checkpoint")
     g.add_argument("--ledger", help="maintain state.json, or the state directory that holds it")
     g.add_argument("--bundle", action="append", default=[], help="writer bundle directory (repeatable)")
+    g.add_argument("--writer-url", help="the writer's base URL, e.g. http://127.0.0.1:8000: check each --bundle's "
+                                        "external audit backlog (a read token in $AIWIKI_WATCHDOG_TOKEN)")
     m = p.add_argument_group("multica")
     m.add_argument("--autopilot-id", default=DEFAULT_AUTOPILOT)
     m.add_argument("--multica-bin", default="multica", help="command prefix, e.g. 'multica --profile prod'")
@@ -766,6 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--pending-max-age-hours", type=float, default=48)
     t.add_argument("--commit-max-age-hours", type=float, default=48)
     t.add_argument("--ready-max-age-hours", type=float, default=72, help="a maint item waiting in ready")
+    t.add_argument("--audit-max-age-hours", type=float, default=72, help="the oldest external audit backlog entry")
     t.add_argument("--cursor-max-age-hours", type=float, default=30,
                    help="a maint collector cursor that exists but has not advanced")
     t.add_argument("--failed-window-hours", type=float, default=24, help="writer failures listed in the output")
@@ -808,6 +850,9 @@ def watch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         parser.error("enable at least one check: --multica, --ledger or --bundle")
     if args.feishu_webhook and not args.state_file:
         parser.error("--feishu-webhook requires --state-file for deduplication")
+    args.writer_token = os.environ.get("AIWIKI_WATCHDOG_TOKEN")
+    if args.writer_url and not (args.bundle and args.writer_token):
+        parser.error("--writer-url checks each --bundle and needs a read token in $AIWIKI_WATCHDOG_TOKEN")
     now = datetime.now(UTC)
     if args.now:
         now = parse_ts(args.now)
@@ -827,6 +872,8 @@ def watch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         path = Path(bundle).expanduser().resolve()
         plan.append((f"writer:{path.name}", lambda path=path: check_bundle(path, args, now)))
         plan.append((f"maint:{path.name}", lambda path=path: check_maint(path, args, now)))
+        if args.writer_url:
+            plan.append((f"audit:{path.name}", lambda path=path: check_audit(path.name, args, now)))
     for name, check in plan:
         try:
             facts, alerts = check()

@@ -21,7 +21,10 @@ Config via env (read at import):
                          queues its Codex audit unless its bundle is listed in
                          AIWIKI_CODEX_AUDIT_MANUAL (a shadow bundle), whose audits run on request only
   AIWIKI_CHANGESET_WAIT_S  seconds POST /changesets waits for its receipt before a 202 (default 60)
-  AIWIKI_CHANGESETS_PER_HOUR, AIWIKI_CHANGESETS_PER_DAY, AIWIKI_DEPRECATIONS_PER_DAY
+  AIWIKI_BACKLOG_EPOCH, AIWIKI_AUDIT_SEED_PER_DAY
+                         the audit backlog's start and how many older concepts it releases a day
+                         (design §5.3); AIWIKI_AUDIT=external refuses to start without an epoch
+  AIWIKI_CHANGESETS_PER_HOUR, AIWIKI_CHANGESETS_PER_DAY, AIWIKI_DEPRECATIONS_PER_DAY, AIWIKI_REVIEWS_PER_DAY
                          default changeset quotas of a principal without its own `limits`
   AIWIKI_SUBMISSIONS_PER_DAY  default member submissions a principal may queue into one bundle a
                          day under inbox intake (30); its own `limits.submissions_per_day` wins
@@ -104,16 +107,25 @@ def _bundles(name: str) -> list[str]:
 
 # Rollout switches; the defaults keep the pre-changeset behaviour. A value is accepted only
 # once the service honours it, so a premature flip fails at startup and /whoami never
-# misreports one: AIWIKI_AUDIT=external waits for the audit changeset gate (phase 4a) and
-# AIWIKI_RESTRUCTURE=on for the restructure intent (phase 4b).
+# misreports one: AIWIKI_RESTRUCTURE=on waits for the restructure intent (phase 4b).
+# AIWIKI_INTAKE=inbox queues member submissions as work items for the committing bundles
+# (phase 3b). AIWIKI_AUDIT=external hands every audit to external auditors (phase 4a): audit
+# changesets commit, and no Codex audit is queued or runs.
 MODES = {
     "intake": _mode("AIWIKI_INTAKE", ("curate", "inbox")),
-    "audit": _mode("AIWIKI_AUDIT", ("codex",)),
+    "audit": _mode("AIWIKI_AUDIT", ("codex", "external")),
     # The bundles that commit, as the worker applies it: none while the route is disabled.
     "changesets_commit": [] if "changesets" in DISABLED else _bundles("AIWIKI_CHANGESETS_COMMIT"),
     "restructure": _mode("AIWIKI_RESTRUCTURE", ("off",)),
     "codex_audit_manual": _bundles("AIWIKI_CODEX_AUDIT_MANUAL"),
 }
+try:  # an unusable epoch or seed rate refuses to start, like an unknown mode
+    _EPOCH = audit_runtime.backlog_settings()[0]
+except ValueError as exc:
+    raise RuntimeError(str(exc)) from None
+if MODES["audit"] == "external" and _EPOCH is None:
+    raise RuntimeError("AIWIKI_AUDIT=external needs AIWIKI_BACKLOG_EPOCH, the time external auditors took over "
+                       "(design §5.3), e.g. 2026-11-03T00:00:00Z")
 API = {"changesets": 1}
 CLIENT_MIN = "0.3.0"
 # A changeset answers synchronously within this, well inside Cloudflare's ~100s origin timeout.
@@ -123,7 +135,9 @@ QUOTAS = {
     "changesets_per_hour": (timedelta(hours=1), "AIWIKI_CHANGESETS_PER_HOUR", 30),
     "changesets_per_day": (timedelta(days=1), "AIWIKI_CHANGESETS_PER_DAY", 150),
     "deprecations_per_day": (timedelta(days=1), "AIWIKI_DEPRECATIONS_PER_DAY", 10),
+    "reviews_per_day": (timedelta(days=1), "AIWIKI_REVIEWS_PER_DAY", 200),
 }
+_COUNTED = {"deprecations_per_day": "deprecations", "reviews_per_day": "reviews_requested"}  # job field
 
 
 @asynccontextmanager
@@ -536,12 +550,12 @@ def audit(ingest_job_id: str, bundle: str | None = None,
 
     The server-side reviewer does the verifying, so the curator may request it too: the
     maintenance loop re-submits Codex audits until the external auditor takes over
-    (AIWIKI_AUDIT=external), after which this route answers 409.
+    (AIWIKI_AUDIT=external), after which this route answers 409 and points at the backlog.
     """
     principal = _auth(authorization, "audit", "curate")
     _enabled("audit")
     if MODES["audit"] == "external":
-        raise HTTPException(status_code=409, detail="audit is external")
+        raise HTTPException(status_code=409, detail=EXTERNAL_AUDIT)
     if not CURATE_ON:
         raise HTTPException(status_code=403, detail="audit requires AIWIKI_CURATE to be enabled")
     with worker.serialized_lifecycle():
@@ -599,15 +613,23 @@ def audit(ingest_job_id: str, bundle: str | None = None,
 # admits a request (G0–G4), queues it on the serial worker and answers with its receipt.
 
 _CHANGESET_SCOPES = {"curate": ("curate", "admin"), "audit": ("audit", "admin")}
+EXTERNAL_AUDIT = ("audit is external: an auditor reviews what GET /audit/backlog lists "
+                  "(ai-wiki review next) and proposes an audit changeset")
 
 
-def _actor_of(principal_id: str, bundle: str) -> str | None:
-    """The actor a principal now in force (a SIGHUP may have removed it) stamps on a curate
+def _actor_of(principal_id: str, bundle: str, kind: str = "curate") -> str | None:
+    """The actor a principal now in force (a SIGHUP may have removed it) stamps on a ``kind``
     changeset to ``bundle``, or None when it may no longer propose one."""
     today = datetime.now(UTC).date()
     return next((p.actor for p in AUTH.principals
-                 if p.id == principal_id and p.allows(bundle) and not p.scopes.isdisjoint(_CHANGESET_SCOPES["curate"])
+                 if p.id == principal_id and p.allows(bundle) and not p.scopes.isdisjoint(_CHANGESET_SCOPES[kind])
                  and (p.expires is None or today <= p.expires)), None)
+
+
+def _auditors() -> frozenset[str]:
+    """Auditor-class actors (design §5.3): the known ids and every process now holding audit."""
+    return audit_runtime.AUDITOR_ACTORS | {p.id for p in AUTH.principals
+                                           if p.id.startswith("process:") and "audit" in p.scopes}
 
 
 # The worker admits a queued changeset again as it runs (design §2.11 rollback, §8.5 revocation).
@@ -617,6 +639,7 @@ worker.INTAKE = MODES["intake"]
 # they neither queue by themselves nor jump ahead of production's Codex work.
 worker.AUDIT_BUNDLES = worker.COMMIT_BUNDLES - set(MODES["codex_audit_manual"])
 worker.actor_of = _actor_of
+worker.auditors = _auditors
 
 
 class _Rejected(Exception):
@@ -731,7 +754,8 @@ def _throttle(principal: auth.Principal, request: dict) -> None:
     jobs = [job for name, path in _registry().items() if principal.allows(name)
             for job in I.changeset_jobs(path, principal.id)]
     wanted = {"changesets_per_hour": 1, "changesets_per_day": 1,
-              "deprecations_per_day": sum(entry.get("op") == "deprecate" for entry in request["files"])}
+              "deprecations_per_day": sum(entry.get("op") == "deprecate" for entry in request.get("files") or []),
+              "reviews_per_day": len(request.get("reviews") or [])}
     for name, (window, env, default) in QUOTAS.items():
         if not wanted[name]:
             continue
@@ -741,10 +765,10 @@ def _throttle(principal: auth.Principal, request: dict) -> None:
             created = _instant(job.get("created"))
             if created is None or created <= now - window:
                 continue
-            if name != "deprecations_per_day":
+            if name not in _COUNTED:
                 used.append((created, 1))
-            elif job.get("status") not in ("rejected", "failed") and job.get("deprecations"):
-                used.append((created, int(job["deprecations"])))  # rejected and failed deprecated nothing
+            elif job.get("status") not in ("rejected", "failed") and job.get(_COUNTED[name]):
+                used.append((created, int(job[_COUNTED[name]])))  # rejected and failed changed nothing
         excess = sum(count for _created, count in used) + wanted[name] - limit
         if excess > 0:
             # Retry once enough of the oldest uses have aged out of the window for this one to fit.
@@ -763,8 +787,16 @@ def _throttle(principal: auth.Principal, request: dict) -> None:
 
 
 def _check_items(path: Path, request: dict, principal: str, run: str | None) -> None:
-    """G3b: every work item exists and is open, and the caller's run holds the maintainer lease.
-    Like every write call of a run, the changeset renews the leases that run holds."""
+    """G3b: every work item exists and is open, and the caller's run holds the maintainer lease;
+    an audit changeset's run holds the auditor lease, which serializes reviewers. Like every
+    write call of a run, the changeset renews the leases that run holds."""
+    if request["kind"] == "audit":
+        try:
+            M.require_lease(path, "auditor", principal=principal, run=run)
+        except M.MaintError as exc:
+            raise _Rejected(changeset._rejected({}, [changeset._error("lease_required", str(exc), **exc.extra)])) \
+                from None
+        return
     items = []
     for item_id in request.get("work_items") or []:
         try:
@@ -787,24 +819,44 @@ def _check_items(path: Path, request: dict, principal: str, run: str | None) -> 
         M.renew(path, principal=principal, run=run)
 
 
+def _unpack(archive: bytes, tree: Path) -> None:
+    """The published bundle of ``_published`` as files, as a workspace pull sees them."""
+    with _tree(archive) as source:
+        for member in source:
+            if not _unpublished(member):
+                try:
+                    source.extract(member, tree, filter="data")
+                except tarfile.FilterError:
+                    continue  # a link out of the tree: never follow it
+
+
+def _scope(path: Path, actor: str, **backlog) -> dict | None:
+    """The audit backlog by path (design §5.4 A2), or None for a human, whom it does not limit."""
+    if actor.startswith("human:"):
+        return None
+    try:
+        found = audit_runtime.backlog(path, auditors=_auditors(), now=datetime.now(UTC), **backlog)
+    except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        raise HTTPException(status_code=503, detail=f"the audit backlog cannot be derived: {exc}") from None
+    return {entry["path"]: entry for entry in found["concepts"]}
+
+
 def _dry_run(path: Path, request: dict, actor: str, evidence: list[changeset.EvidenceFile]) -> JSONResponse:
     """Judge the request against the published revision in a scratch copy; write nothing."""
     root, revision, archive = _published(path)
     with tempfile.TemporaryDirectory(prefix="aiwiki-dry-run-") as scratch:
         tree = Path(scratch) / "bundle"
-        with _tree(archive) as source:
-            for member in source:
-                if not _unpublished(member):
-                    try:
-                        source.extract(member, tree, filter="data")
-                    except tarfile.FilterError:
-                        continue  # a link out of the tree: never follow it
+        _unpack(archive, tree)
+        now = datetime.now(UTC)
         if curate_runtime._git(root, "merge-base", "--is-ancestor", request["base_revision"], revision).returncode:
             result = changeset._rejected({"warnings": [], "validation": {"status": "not_run"}}, [changeset._error(
                 "unknown_base", "base_revision is not an ancestor of the published branch",
                 hint="workspace pull, then propose again from the published revision")])
+        elif request["kind"] == "audit":
+            result = audit_runtime.evaluate_review(tree, request, actor=actor, now=now, auditors=_auditors(),
+                                                   scope=_scope(path, actor, tree=tree, revision=revision))
         else:
-            result = changeset.evaluate(tree, request, actor=actor, now=datetime.now(UTC), evidence_files=evidence)
+            result = changeset.evaluate(tree, request, actor=actor, now=now, evidence_files=evidence)
         diffs = {}
         for rel, after in (result.pop("files", None) or {}).items():
             before = (tree / rel).read_text(encoding="utf-8") if (tree / rel).is_file() else ""
@@ -840,11 +892,13 @@ async def _raw_body(request: Request) -> bytes:
 @app.post("/changesets")
 def changesets(raw: bytes = Depends(_raw_body), bundle: str | None = None, dry_run: bool = False,
                x_aiwiki_run: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    """Propose a curate changeset: G0–G4 here, G5–G15 on the serial worker (design §2.5).
+    """Propose a curate or audit changeset: G0–G4 here, G5–G15 on the serial worker (design §2.5).
 
     Answers with the receipt once it is final, or 202 with ``Location`` after
     AIWIKI_CHANGESET_WAIT_S. ``dry_run`` judges the published revision and writes nothing.
-    Only bundles in AIWIKI_CHANGESETS_COMMIT commit; every bundle may dry-run.
+    Only bundles in AIWIKI_CHANGESETS_COMMIT commit; every bundle may dry-run. An audit
+    changeset (design §2.3, §5.4) commits only once AIWIKI_AUDIT=external, from the run that
+    holds the auditor lease.
     """
     try:
         body = json.loads(raw) if raw else None
@@ -869,6 +923,10 @@ def changesets(raw: bytes = Depends(_raw_body), bundle: str | None = None, dry_r
             if name not in MODES["changesets_commit"]:
                 raise HTTPException(status_code=403, detail=f"bundle '{name}' takes dry-run changesets only "
                                                             "(AIWIKI_CHANGESETS_COMMIT)")
+            if kind == "audit" and MODES["audit"] != "external":
+                raise HTTPException(status_code=403, detail="audit changesets commit once AIWIKI_AUDIT=external; "
+                                                            "until then the writer's Codex audits and a review may "
+                                                            "only dry-run")
             body, evidence = _intake(path, body, x_aiwiki_run, principal)
             digest = changeset.changeset_sha256(body, {item.name: hashlib.sha256(item.data).hexdigest()
                                                        for item in evidence})
@@ -882,11 +940,12 @@ def changesets(raw: bytes = Depends(_raw_body), bundle: str | None = None, dry_r
                     for item in evidence]}
                 # base_revision becomes the head the writer applies it on (what recovery resets
                 # to); the authored base is kept apart, so a file-level rebase shows (§2.6).
+                fields = {"kind": "audit", "reviews_requested": len(body["reviews"])} if kind == "audit" else {
+                    "work_items": list(body.get("work_items") or []), "close_items": body.get("close_items", True),
+                    "deprecations": sum(file.get("op") == "deprecate" for file in body["files"])}
                 job = I.new_changeset_job(
                     path, record, principal=principal.id, actor=principal.actor, run=body.get("run"),
-                    request_base_revision=body["base_revision"],
-                    work_items=list(body.get("work_items") or []), close_items=body.get("close_items", True),
-                    changeset_sha256=digest, deprecations=sum(file.get("op") == "deprecate" for file in body["files"]),
+                    request_base_revision=body["base_revision"], changeset_sha256=digest, **fields,
                 )
                 worker.ensure_started()
                 worker.submit_changeset(path, I.job_path(path, job["id"]), principal=principal.id, digest=digest)
@@ -911,10 +970,11 @@ def _intake(path: Path, request: object, header_run: str | None,
     errors = changeset.check_request(request)
     if errors:
         raise _Rejected(changeset._rejected({}, errors))
-    if request["kind"] != "curate":
-        raise _Rejected(changeset._rejected({}, [changeset._error(
-            "input", "audit changesets are not accepted until the audit gate is enabled")]))
-    if request["evidence"].get("upload") is not None and not principal.id.startswith("human:"):
+    human = principal.id.startswith("human:")
+    if request["kind"] == "audit" and human and "human_verify" not in principal.scopes:
+        raise HTTPException(status_code=403, detail=f"{principal.id} lacks scope human_verify: a person's review "
+                                                    "makes a concept human-reviewed (design §5.5)")
+    if request["kind"] == "curate" and request["evidence"].get("upload") is not None and not human:
         raise HTTPException(status_code=403, detail=f"{principal.id} may not upload evidence; cite the frozen "
                                                     "files of a work item (evidence.item_files)")
     run = header_run or request.get("run")
@@ -923,6 +983,8 @@ def _intake(path: Path, request: object, header_run: str | None,
             "input", "X-AIWiki-Run and run must name the same run (1-128 of A-Z a-z 0-9 _ . : @ / -)")]))
     if run is not None and secrets.scan(run):  # the receipt shows the run to every reader
         raise _Rejected(changeset._rejected({}, [changeset._error("secret_detected", "run carries a secret")]))
+    if request["kind"] == "audit":
+        return ({**request, "run": run} if run else request), []
     evidence = _evidence(path, request)
     _packet, errors = changeset.build_packet(request["evidence"], evidence)
     if errors:
@@ -1064,7 +1126,48 @@ def maint_item_resolve(item_id: str, body: dict, bundle: str | None = None,
 def maint_status(bundle: str | None = None, authorization: str | None = Header(default=None)):
     """SLO snapshot: cursor ages, item counts and oldest ages, needs_human, leases, audit backlog."""
     with _maint(bundle, authorization, "read") as (path, _principal_id):
-        return M.status(path)
+        status = M.status(path)
+    if status["audit"]["mode"] == "external":  # the backlog, not Codex jobs, is what waits
+        try:
+            found = audit_runtime.backlog(path, auditors=_auditors(), now=datetime.now(UTC))
+        except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            status["audit"]["error"] = str(exc)[:300]
+        else:
+            # Age from when each version became due: a push to an old concept waits since the push.
+            due = [entry["since"] for entry in found["concepts"]
+                   if entry["reason"] != "seed" and audit_runtime._instant(entry["since"])]
+            status["audit"].update(pending=len(found["concepts"]), seed=found["seed"], epoch=found["epoch"],
+                                   oldest_finished=min(due, key=audit_runtime._instant, default=None))
+    return status
+
+
+@app.get("/audit/backlog")
+def audit_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | None = None,
+                  authorization: str | None = Header(default=None)):
+    """The concepts due for an external review (design §5.3), derived from the published revision.
+
+    Each names its path, the ``base`` content hash a review cites, its generation, why it is due
+    (``generation``, ``external`` or ``seed``) and the frozen sources it cites; never a curator's
+    changeset message or hand-off text. New work comes first, oldest first.
+    """
+    principal = _auth(authorization, "read")
+    _enabled("audit")
+    if not CURATE_ON:  # the review receipts live on the writer
+        raise HTTPException(status_code=403, detail="/audit/backlog requires the writer (AIWIKI_CURATE enabled)")
+    _name, path = _resolve(bundle, principal)
+    _root, revision, archive = _published(path)
+    with tempfile.TemporaryDirectory(prefix="aiwiki-backlog-") as scratch:
+        tree = Path(scratch) / "bundle"
+        _unpack(archive, tree)
+        try:
+            found = audit_runtime.backlog(path, tree=tree, revision=revision, auditors=_auditors(),
+                                          now=datetime.now(UTC))
+        except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            raise HTTPException(status_code=503, detail=f"the audit backlog cannot be derived: {exc}") from None
+    concepts = found["concepts"]
+    return {"revision": revision, "mode": MODES["audit"], "epoch": found["epoch"], "seed": found["seed"],
+            "concepts": concepts[:limit], "shown": min(limit, len(concepts)), "total": len(concepts),
+            "truncated": len(concepts) > limit}
 
 
 @app.post("/admin/items/{item_id}/retry")

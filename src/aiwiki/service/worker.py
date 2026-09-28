@@ -53,10 +53,19 @@ def inbox_intake(bundle: Path) -> bool:
     return INTAKE == "inbox" and bundle.name in COMMIT_BUNDLES
 
 
-def actor_of(principal: str, bundle: str) -> str | None:
-    """The actor a principal now in force stamps on a changeset to ``bundle``, or None when it
-    may no longer propose one there."""
+def actor_of(principal: str, bundle: str, kind: str = "curate") -> str | None:
+    """The actor a principal now in force stamps on a ``kind`` changeset to ``bundle``, or None
+    when it may no longer propose one there."""
     return None  # until the app installs its principals
+
+
+def auditors() -> frozenset[str]:
+    """Auditor-class actors (design §5.3); the app adds its principals holding the audit scope."""
+    return audit.AUDITOR_ACTORS
+
+
+def _audit_mode() -> str:
+    return os.environ.get("AIWIKI_AUDIT", "").strip() or "codex"  # as app.MODES reads it
 
 
 _q: queue.PriorityQueue = queue.PriorityQueue()
@@ -384,7 +393,9 @@ def _run() -> None:
         try:
             with serialized_mutation():
                 try:
-                    if kind == "audit" and subject in I.reverted_by(bundle):
+                    if kind == "audit" and _audit_mode() != "codex":
+                        _cancel_codex_audit(job_path)
+                    elif kind == "audit" and subject in I.reverted_by(bundle):
                         _skip_reverted(job_path)
                     elif kind == "audit":
                         audit.run(bundle, subject, job_path)
@@ -412,6 +423,14 @@ def _skip_reverted(job_path: Path) -> None:
     job.update(status="failed", error=detail, finished=curate._now(),
                failure=failure("input", stage="intake", detail=detail, retryable=False))
     _save_job(job_path, job)
+
+
+def _cancel_codex_audit(job_path: Path) -> None:
+    """AIWIKI_AUDIT=external: a Codex audit queued before the switch never runs (design §5.1)."""
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    if job.get("status") == "queued":
+        job.update(status="cancelled", reason="audit_external", finished=curate._now())
+        _save_job(job_path, job)
 
 
 def closed_rejection(items: list[dict]) -> dict:
@@ -447,9 +466,10 @@ def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, st
     job or request that no longer matches what intake admitted fails without running.
     """
     principal, digest = admitted or (str(job.get("principal")), job.get("changeset_sha256"))
-    actor = actor_of(principal, bundle.name)
-    if bundle.name not in COMMIT_BUNDLES or actor is None:
-        detail = f"{principal} may no longer commit changesets to '{bundle.name}'"
+    review = job.get("kind") == "audit"
+    actor = actor_of(principal, bundle.name, "audit" if review else "curate")
+    if bundle.name not in COMMIT_BUNDLES or actor is None or (review and _audit_mode() != "external"):
+        detail = f"{principal} may no longer commit {job.get('kind')} changesets to '{bundle.name}'"
         job.update(status="rejected", http_status=403, errors=[changeset._error("forbidden", detail)],
                    failure=failure("auth", stage="intake", detail=detail), finished=curate._now())
         _save_job(job_path, job)
@@ -464,6 +484,8 @@ def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, st
             changeset.changeset_sha256(request, {item.name: hashlib.sha256(item.data).hexdigest() for item in evidence})
         items = [M.get_item(bundle, item_id) for item_id in job.get("work_items") or []]
         closed = [item for item in items if item["status"] in M.TERMINAL]
+        if review != (request.get("kind") == "audit"):
+            raise ValueError("the job's kind and its request's differ")
     except (OSError, ValueError, KeyError, TypeError, AttributeError, M.MaintError) as exc:
         job.update(status="failed", error=f"changeset request or evidence unusable: {exc}", finished=curate._now(),
                    failure=failure("internal", stage="intake", detail=exc, retryable=False))
@@ -479,6 +501,9 @@ def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, st
         # G3b again: an item another changeset closed while this one waited in the queue.
         job.update(closed_rejection(closed), finished=curate._now())
         _save_job(job_path, job)
+        return
+    if review:  # intake checked the lease; the gate derives the backlog again on the synced tree
+        audit.run_changeset(bundle, job_path, request, actor=actor, auditors=auditors())
         return
     curate.run_changeset(bundle, job_path, request, actor=actor, evidence_files=evidence,
                          on_done=lambda done: _closeout(bundle, done))
@@ -626,7 +651,7 @@ def recover(bundles: list[Path]) -> bool:
                                finished=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                failure=failure("interrupted", stage="startup", detail="changeset request lost"))
                     _save_job(jf, job)
-            elif status == "done" and job.get("mode") == "changeset" and "closed_items" not in job:
+            elif status == "done" and job.get("mode") == "changeset" and kind != "audit" and "closed_items" not in job:
                 closeouts.append((b, jf))  # G15 interrupted after the receipt read done
             elif status == "queued" and job.get("source") and job.get("mode") != "changeset":
                 # A changeset stages its packet as ``source``; the Codex curator never takes it.
@@ -651,7 +676,7 @@ def recover(bundles: list[Path]) -> bool:
                 job["finished"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 _save_job(jf, job)
                 curate._cleanup_recovery_source(b, job)
-                if job.get("status") == "done" and job.get("mode") == "changeset":
+                if job.get("status") == "done" and job.get("mode") == "changeset" and kind != "audit":
                     closeouts.append((b, jf))  # the remote holds the commit: finish G15
     # Never build new work on an unresolved local commit. A failed fetch is retried
     # on the next service startup rather than being mistaken for a rejected push.

@@ -198,7 +198,7 @@ def test_sighup_handler_needs_a_principals_file() -> None:
 # --- through the service ---------------------------------------------------------------
 
 MODE_ENV = ("AIWIKI_INTAKE", "AIWIKI_AUDIT", "AIWIKI_CHANGESETS_COMMIT", "AIWIKI_RESTRUCTURE",
-            "AIWIKI_CODEX_AUDIT_MANUAL")
+            "AIWIKI_CODEX_AUDIT_MANUAL", "AIWIKI_BACKLOG_EPOCH", "AIWIKI_AUDIT_SEED_PER_DAY")
 # (method, path, query, body, scopes of which any one passes; None = any valid token).
 # Bodies/ids are chosen so an authorized call stops at a harmless 4xx/200 without side effects.
 ROUTES = [
@@ -237,6 +237,7 @@ ROUTES = [
     ("GET", "/maint/items/it_000000000000/files/a.md", {"bundle": "kb-a"}, None, {"read"}),
     ("POST", "/maint/items/it_000000000000/resolve", {"bundle": "kb-a"}, {}, {"curate"}),
     ("GET", "/maint/status", {"bundle": "kb-a"}, None, {"read"}),
+    ("GET", "/audit/backlog", {"bundle": "kb-a"}, None, {"read"}),
     ("POST", "/admin/items/it_000000000000/retry", {"bundle": "kb-a"}, {}, {"admin"}),
     ("POST", "/admin/items/it_000000000000/resolve", {"bundle": "kb-a"}, {}, {"admin"}),
     ("POST", "/admin/inbox/requeue", {"bundle": "kb-a"}, {}, {"admin"}),
@@ -426,11 +427,17 @@ def test_whoami_modes_follow_env_and_bad_values_refuse_start(monkeypatch, root: 
     appmod = _app(monkeypatch, root, principals=principals, AIWIKI_INTAKE="inbox")
     assert TestClient(appmod.app).get("/whoami", headers=_bearer(TOKENS["owner"])).json()["modes"]["intake"] == "inbox"
     assert appmod.worker.INTAKE == "inbox"
-    # Not honoured yet (the audit gate, the restructure intent), so a premature flip refuses
-    # to start rather than stop every audit while /whoami says fine.
-    for name, value in (("AIWIKI_AUDIT", "external"), ("AIWIKI_RESTRUCTURE", "on")):
+    # Not honoured yet (the restructure intent), so a premature flip refuses to start rather
+    # than misreport it on /whoami; an unknown intake or audit mode too.
+    for name, value in (("AIWIKI_AUDIT", "claude"), ("AIWIKI_RESTRUCTURE", "on")):
         with pytest.raises(RuntimeError, match=f"{name} must be one of .*; got '{value}'"):
             _app(monkeypatch, root, principals=principals, **{name: value})
+    # External audit is honoured, from the epoch its backlog starts at (design §5.3).
+    with pytest.raises(RuntimeError, match="AIWIKI_AUDIT=external needs AIWIKI_BACKLOG_EPOCH"):
+        _app(monkeypatch, root, principals=principals, AIWIKI_AUDIT="external")
+    appmod = _app(monkeypatch, root, principals=principals, AIWIKI_AUDIT="external",
+                  AIWIKI_BACKLOG_EPOCH="2026-11-03T00:00:00Z")
+    assert appmod.MODES["audit"] == "external"
 
 
 def test_external_audit_mode_closes_the_codex_audit_route(monkeypatch, root: Path, principals: Path) -> None:
@@ -439,7 +446,9 @@ def test_external_audit_mode_closes_the_codex_audit_route(monkeypatch, root: Pat
     client = TestClient(appmod.app)
     for role in ("curator", "auditor", "owner"):
         response = client.post("/jobs/no-such-job/audit", params={"bundle": "kb-a"}, headers=_bearer(TOKENS[role]))
-        assert response.status_code == 409 and response.json()["detail"] == "audit is external", role
+        detail = response.json()["detail"]
+        assert response.status_code == 409 and detail.startswith("audit is external"), role
+        assert "GET /audit/backlog" in detail, role  # where the audit went
     watchdog = client.post("/jobs/no-such-job/audit", params={"bundle": "kb-a"}, headers=_bearer(TOKENS["watchdog"]))
     assert _denied(watchdog)
 
