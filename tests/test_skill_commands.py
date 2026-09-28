@@ -19,7 +19,8 @@ from aiwiki.maint import issue_delta
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "ai-wiki-curating-maintainer" / "SKILL.md"
 PROMPT = ROOT / "docs" / "prompts" / "shadow-autopilot-prompt.md"
-TEXTS = (SKILL, ROOT / "skills" / "okf-knowledge-curator" / "SKILL.md", *sorted(PROMPT.parent.glob("*.md")))
+TEXTS = (SKILL, ROOT / "skills" / "okf-knowledge-curator" / "SKILL.md", *sorted(PROMPT.parent.glob("*.md")),
+         ROOT / "docs" / "external-agents.md")
 SPAN = re.compile(r"`(ai-wiki [^`]+)`")
 END = re.compile(r"\s(?:[|;>]|&&|2>)\s|\s#\s")  # a pipe, chain, redirect or shell comment ends a command
 
