@@ -44,10 +44,11 @@ ai-wiki -b "$bundle" maint begin --run "$run" --max-items "$max_items" --config 
 
 `begin` reruns doctor, takes the maintainer lease (3 h, renewed by every call of the run),
 sweeps the last run's leftovers (its in-progress items return as `interrupted`, parked items
-become ready), resubmits failed Codex audits unless the config says `audits.resubmit: false`,
-pulls the workspace, runs the repos and issues collectors, freezes their evidence on the
-writer and only then moves the cursors. Cursors never wait for audits. You judge none of this.
-Run `begin` and `propose` with a 600 s tool timeout; a `begin` cut off is safe to rerun.
+become ready), resubmits failed Codex audits only while the writer still runs them and the
+config allows it (`audits.resubmit`), pulls the workspace, runs the repos and issues collectors,
+freezes their evidence on the writer and only then moves the cursors. Cursors never wait for
+audits. You judge none of this. Run `begin` and `propose` with a 600 s tool timeout; a `begin`
+cut off is safe to rerun.
 
 - Exit `0`: go to §3. Exit `5`: a collector was partial or failed and kept what it could not
   collect; still run §3 (the report decides whether that blocks the issue).
@@ -178,30 +179,29 @@ current item and go to §5.
   jobs or resubmit by hand.
 - A run that dies needs no cleanup: the lease expires within 3 h and the next `begin` returns
   its item uncounted (`interrupted`) and resets the workspace.
-- Parked and needs_human items are the watchdog's to alert on: report them, never retry them
-  outside §3.4.
+- Parked and needs_human items are the watchdog's to alert on: report them, never retry them.
 
 ## 5. End and report
 
+**The run's comment opens with the deterministic report, byte for byte.** `end` prints it; send
+it straight into the comment file, never retyped, translated, summarised or reordered:
+
 ```sh
-ai-wiki -b "$bundle" maint end --run "$run" --json > "${TMPDIR:-/tmp}/ai-wiki-end-$run.json"
+ai-wiki -b "$bundle" maint end --run "$run" --format md > "${TMPDIR:-/tmp}/ai-wiki-comment-$run.md"
 ```
 
-`end` releases the lease and renders the report from the writer's receipts: `report` (Markdown),
-`issue_status` (`done` or `blocked`) and `blocked_by`. Exit `0`; `3` means new needs_human items
-(the issue is still done); `4` means the run never collected (blocked).
-
-Write `report` verbatim plus at most 5 lines on notable knowledge changes (concept paths and
-what changed; never claim anything is verified) to a file, post it, then set the status
-`issue_status` names:
+`end` releases the lease and renders the report from the writer's receipts (exit `0`; `3` new
+needs_human items, still done; `4` never collected). Its first line ends `status=done` or
+`status=blocked`: the issue status. Only append to that file (`cat >> … <<'EOF'`), at most 5
+lines on notable knowledge changes (concept paths, what changed; never claim verification). Then:
 
 ```sh
 multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin < "${TMPDIR:-/tmp}/ai-wiki-comment-$run.md"
-multica issue status "$MULTICA_ISSUE_ID" <issue_status> --no-start   # done or blocked
+multica issue status "$MULTICA_ISSUE_ID" <done|blocked> --no-start   # the report's status=
 ```
 
-The status is `blocked` only when `issue_status` says so or preflight or `begin` failed closed;
-then post that output with the failed check instead of a report. Parked, rejected and
+A comment not opening with the report's first line is a defect: post the file again. No report
+(preflight or `begin` failed closed): post that output, set blocked. Parked, rejected and
 needs_human items never block the issue.
 
 ## 6. Hard prohibitions
