@@ -3,8 +3,8 @@
 This runbook takes production from today's legacy path (ingest, Codex curation on the
 writer, Codex audit on the writer, a ledger checkpoint) straight to the final state: every
 model-driven step runs in an external agent that holds a credential, and the writer is only
-the deterministic gate. It needs no Codex, no 9Router and no model on the server, and any
-agent with a principal of the right role can maintain, audit or submit
+the deterministic gate. It needs no Codex, no model gateway and no Feishu login on the
+server, and any agent with a principal of the right role can maintain, audit or submit
 ([docs/external-agents.md](external-agents.md)).
 
 The final state is these writer flags, and nothing else changes on the server:
@@ -18,15 +18,19 @@ The final state is these writer flags, and nothing else changes on the server:
 | `AIWIKI_BACKLOG_EPOCH` | the moment of step 6 | unset |
 | `AIWIKI_CODEX_AUDIT_MANUAL` | empty | `solvely-wiki-shadow` |
 
+Step 6 sets them all in one drop-in. Step 11 then takes the Codex configuration, the model
+gateway credential and admin's lark-cli login off the writer host, with backups.
+
 Every step below has its verification and its rollback; §13 rolls back to the legacy path
-from any point. Until step 11 removes the Codex configuration from the writer host, rolling
-back is removing drop-ins and restoring Multica settings from the archive step 1 makes.
+from any point. Until step 11, rolling back is removing the step 6 drop-in and restoring
+Multica settings from the archive step 1 makes; after it, restore step 11's backup first.
 
 Requires the merged build of the three final-state units: W14 (inbox intake,
 `/admin/inbox/requeue`), W16/W17 (audit changesets, `/audit/backlog`,
 `AIWIKI_BACKLOG_EPOCH`, the `review` verbs, `skills/ai-wiki-auditor`,
 `docs/prompts/auditor-*.md`) and this package (`AIWIKI_LLM`, the production prompts,
-this runbook). Step 0's checks refuse a build without them.
+the watchdog's `--no-checkpoint` and member check, this runbook). Step 0's checks refuse a
+build without them.
 
 ## Where and when
 
@@ -37,38 +41,47 @@ this runbook). Step 0's checks refuse a build without them.
 - **runtime**: ip-10-2-192-225, runtime `df0fb673`, reachable only through one-time Multica
   issues. Each such issue below is assigned to the production agent `1dcccd34` (its custom
   env holds the `process:ai-wiki-maintainer` token those steps need) and its exact text is
-  given. Create it from `$FL` on the laptop:
-  `multica issue create --title "<title>" --assignee-id $PROD_AGENT --description-file <file>`,
-  then read the agent's comment with `multica issue comment list <issue-id> --output json`.
-- **auditor host**: the host of the Auditor agent's runtime. Recommended: `Codex
-  (macminim4.local)`, runtime `1ae1dfab`, which the owner manages: another host and another
-  model family than the maintainer (§5). The Auditor must never share the maintainer's OS
-  user (docs/external-agents.md §1).
+  given. Create it from `$FL` on the laptop, and mark it at once:
 
-Day −1 (owner online): steps 0 to 2 at any time, then 3a after the shadow's 13:30 CST run;
-none of them changes production's behaviour. Day 0: 3b right after the 04:00 CST legacy run
-finishes, then 4 to 7 in one sitting (about three hours, step 6 not before 06:30, all before
-12:00 CST). Step 8 on day 0 evening or day 1, after two clean
-scheduled runs; step 9 with step 8; step 10 on day 0; step 11 after 14 clean days. Never
-restart the writer between 03:30 and 06:30 CST, nor while a job or lease is live
-(`restart_idle` refuses those).
+  ```bash
+  cd $FL && multica issue create --title "<title>" --assignee-id $PROD_AGENT --description-file <file> \
+    --output json | jq -r '.id // .issue.id'                                   # the issue id
+  multica issue metadata set <issue-id> --key ai_wiki_ops --value true
+  ```
+
+  Every one-time issue of this runbook, the canary included, carries `ai_wiki_ops`: the
+  legacy issue delta and the new issues collector both skip issues with `ai_wiki_*`
+  metadata, so cut-over commands and their output never become wiki sources. Read the
+  agent's comment with `multica issue comment list <issue-id> --output json`.
+- **auditor host**: the host of the Auditor agent's runtime, `AUDITOR_RUNTIME`. The owner's
+  default is Codex (GPT) on the Codex Gateway runtime; it qualifies only if step 2's
+  isolation gate passes, which a runtime under the maintainer's OS user on the maintainer's
+  host never does (docs/external-agents.md §1). Then take `Codex (macminim4.local)`
+  (`1ae1dfab`, owner-managed; confirm it is always on) or run the gateway's daemon under
+  another OS user.
+
+Day −1 (owner online): steps 0 to 2, none of which changes production's behaviour. Day 0:
+step 3 right after the 04:00 CST legacy run finishes, then 4 to 11 in one sitting (about four
+hours, step 6 not before 06:30 CST). There is no waiting period: the canary (step 8) is the
+gate, and step 11's backups stay 30 days for a rollback. Never restart the writer between
+03:30 and 06:30 CST, nor while a job or lease is live (`restart_idle` refuses those).
 
 ## Plan
 
 | # | Step | Where | Changes production | Rollback |
 |---|---|---|---|---|
 | 0 | Merge, deploy procedure, deploy the build | laptop, host | no: every new flag defaults to today | redeploy `9d62536` |
-| 1 | Pre-flight, archive, runtime CLI (issue R1), member notice | all | no | reinstall `PREV_CLI` |
-| 2 | Auditor: principal, skill, agent, autopilot without schedule, preflight (issue A1) | host, laptop, auditor host | no | §2 |
-| 3 | 3a retire the shadow agent (day −1); 3b stop the legacy run (day 0) | laptop, host | legacy schedule paused | §3 |
+| 1 | Pre-flight, archive, member notice | host, laptop | no | none |
+| 2 | Auditor (principal, skill, agent, autopilot without schedule); runtime CLI and isolation gate (issues R1, A1) | host, laptop, both runtimes | no | §2 |
+| 3 | Pause the legacy and shadow runs, stop the shadow's Codex audit timer | laptop, host | schedules paused | §3 |
 | 4 | Import the cursors and the ledger (issue R2) | runtime | writer queue seeded | §4 |
-| 5 | Switch the production agent: skills, instructions, prompt, schedule (still paused) | laptop | agent config | §5 |
-| 6 | Writer drop-in: the final flags except `AIWIKI_LLM` | host | yes | §6 |
-| 7 | Canary: 1 item, one auditor run, then full schedules | laptop, host | yes | §13 |
-| 8 | The writer's Codex off: `AIWIKI_LLM=off` | host | guarantee only | §8 |
-| 9 | Members: the legacy token to read and submit | host | yes | §9 |
-| 10 | Watchdog | host | alerts | §10 |
-| 11 | Remove the Codex agent config and 9Router credentials, with backups | host | host cleanup | §11 |
+| 5 | Switch the production agent: skills, instructions, prompt (still paused) | laptop | agent config | §5 |
+| 6 | Writer drop-in: every final flag, `AIWIKI_LLM=off` included | host | yes | §6 |
+| 7 | Members: the legacy token to read and submit | host | yes | §7 |
+| 8 | Canary: 1 item, one auditor run, then the schedules | laptop, host | yes | §13 |
+| 9 | Retire the shadow agent | laptop, host | no | §9 |
+| 10 | Watchdog once a day at 07:00: writer side, Multica side (issue R3); deploy procedure | host, runtime, laptop | alerts | §10 |
+| 11 | Remove the Codex config, the gateway credential and the lark-cli login, with backups | host | host cleanup | §11 |
 
 ## 0. Merge, deploy procedure, deploy
 
@@ -77,6 +90,7 @@ On the laptop, in the merged checkout (`git -C <checkout> pull`):
 ```bash
 MERGE_SHA=$(git rev-parse origin/main); echo "$MERGE_SHA"
 grep -q '"llm": _mode("AIWIKI_LLM"' src/aiwiki/service/app.py && echo llm-switch
+grep -q -- '--no-checkpoint' scripts/maintenance_watchdog.py && echo watchdog-final
 test -f skills/ai-wiki-auditor/SKILL.md && test -f docs/prompts/auditor-autopilot-prompt.md \
   && test -f docs/prompts/auditor-agent-instructions.md && echo auditor-package
 AIWIKI_BUNDLES=$(mktemp -d) AIWIKI_TOKEN=probe AIWIKI_CURATE=off AIWIKI_INTAKE=inbox AIWIKI_AUDIT=external \
@@ -86,9 +100,9 @@ AIWIKI_BUNDLES=$(mktemp -d) AIWIKI_TOKEN=probe AIWIKI_CURATE=off AIWIKI_INTAKE=i
 gh run list --branch main --limit 1 --json conclusion,headSha | jq -c '.[0]'   # success, headSha $MERGE_SHA
 ```
 
-The checks print `llm-switch`, `auditor-package` and `inbox external off`; CI is green on
-`$MERGE_SHA`. Then apply §10.2 (the deploy
-procedure's lease guard and run windows) to `deploy_aliyun.sh`, and deploy:
+The checks print `llm-switch`, `watchdog-final`, `auditor-package` and `inbox external off`;
+CI is green on `$MERGE_SHA`. Then apply §10.3 (the deploy procedure's lease guard, run
+windows and modes check) to `deploy_aliyun.sh`, and deploy:
 
 ```bash
 cp deploy_aliyun.sh deploy_aliyun.sh.pre-final
@@ -151,6 +165,9 @@ restart_idle() {
 }
 ```
 
+If the shadow bundle is ever removed, drop `solvely-wiki-shadow` from `idle` and `$SHADOW`
+from `codex_jobs`.
+
 Once, the header files (the owner token comes from the password manager; a header file keeps
 tokens out of `ps`):
 
@@ -160,7 +177,8 @@ install -d -m 0700 $FS
   printf 'Authorization: Bearer %s\n' "$(legacy_token)" > $FS/legacy.h )
 ```
 
-Checks, each printing what its comment says:
+Checks, each printing what its comment says. Never print `/etc/environment` itself: a
+commented line in it holds a model gateway token.
 
 ```bash
 # H1. The merged build on both services.
@@ -194,6 +212,12 @@ idle && echo idle; codex_jobs                                               # id
 curl -s -H @$FS/legacy.h 'http://127.0.0.1:8788/jobs/pending-audit?bundle=solvely-wiki&older_than_hours=0' \
   | jq -c '{total, unscoped}'                                              # record it; step 6 hands these to the backlog
 df -BG --output=avail /var/lib | tail -1                                    # >= 2G
+# H9. The watchdog has somewhere to page (step 10).
+grep -c '^AIWIKI_WATCHDOG_FEISHU_WEBHOOK=.' /etc/ai-wiki-watchdog.env        # 1, else add the webhook first
+# H10. The rest of what step 11 removes (names only).
+grep -oE '^[# ]*[A-Za-z_]+=' /etc/environment         # PATH= and the commented #ANTHROPIC_BASE_URL= #ANTHROPIC_AUTH_TOKEN=
+systemctl cat ai-wiki-worker.service | grep -E '^(# /|EnvironmentFile=)'   # record where each EnvironmentFile= comes from
+ls -d /home/admin/.lark*                             # admin's lark-cli login directory: record it as LARK for step 11
 ```
 
 If any check fails, stop. Then back up what later steps change:
@@ -201,6 +225,7 @@ If any check fails, stop. Then back up what later steps change:
 ```bash
 cp -a $DROPIN $FS/worker.service.d.before
 cp -a /etc/systemd/system/ai-wiki-watchdog.service /etc/systemd/system/ai-wiki-watchdog.service.d $FS/
+cp -a /etc/systemd/system/ai-wiki-watchdog.timer $FS/
 cp -a /etc/ai-wiki/principals.json $FS/principals.json.before
 cp -a /etc/systemd/system/ai-wiki-shadow-audit.service /etc/systemd/system/ai-wiki-shadow-audit.timer \
       /usr/local/sbin/ai-wiki-shadow-audit /etc/ai-wiki-shadow-audit.env /var/lib/ai-wiki/shadow-audit $FS/
@@ -218,7 +243,6 @@ Rollback: none; it only reads and copies.
 ```bash
 export FL=~/ai-wiki-final; mkdir -p $FL && cd $FL
 export PROD_AGENT=1dcccd34-e9e4-48c7-a0a3-32c061d4c284 PROD_AP=5c80732b-67a6-4e33-ba22-c620a94e27c1
-export PROD_TRIGGER=d4fb8f06-6a19-461c-a31d-464c01212393
 export SHADOW_AGENT=c10a1e06-8255-42ce-9b52-266aef42f2a6 SHADOW_AP=d455adf9-24d4-46c0-9da5-a7b8896faa4f
 export CURATING_SKILL=9ee08f00-0300-4962-b6e0-7ab55a9d9066 OKF_SKILL=356d20e4-07cc-4f15-91b7-6d081dc43625
 export AIWIKI_SKILL=e49bcda9-468c-4d89-a33c-4fcd356ac137 LEGACY_SKILL=bedcd57e-4d4b-48cc-be92-1be9da9facfa
@@ -240,40 +264,18 @@ multica runtime list --output json | jq -c '.[] | select(.id | startswith("df0fb
   | {id, name, status}'                                                      # both online
 ```
 
-These files are the rollback of steps 3 and 5 (§13); keep them until step 11 is done.
-
-### Runtime: issue R1, pin the CLI
-
-Title `[OPS] AI Wiki final cut-over R1: pin the CLI`. Text (`$FL/issue-R1.md`, with
-`<MERGE_SHA>` filled in):
-
-```text
-One-time operations task from the owner, not a maintenance run. In one bash shell on this host,
-run exactly the commands below, in order, and nothing else: no maintain, ingest or audit, no
-other installs, no edits to any file. Post one comment with every command and its complete
-output verbatim, then set this issue to done with --no-start, or to blocked if a command failed.
-
-find "$(uv tool dir)/ai-wiki" -path '*ai_wiki-*.dist-info/direct_url.json' -exec cat {} \;
-uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<MERGE_SHA>" && hash -r
-ai-wiki -b solvely-wiki health --json
-ai-wiki -b solvely-wiki doctor --role curator --json
-ai-wiki maint end --help
-```
-
-Verify: the first line's `commit_id` is `PREV_CLI` (write it down); `health` shows
-`compatible: true` and the merged `client_version`; `doctor` shows `"ok": true`; `maint end
---help` lists `--format`. Every agent on `df0fb673` shares this CLI; the legacy flow keeps
-working with it (its `maintain`, `audit` and `jobs` verbs are unchanged), so the 04:00 run
-before step 3 is the check. Rollback: the same issue with
-`uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<PREV_CLI>" && hash -r`.
+These files are the only copy of the legacy agent instructions, autopilot prompt and skill
+contents, and §13 needs them even after step 11. Keep them, plus a copy in the password
+manager's secure notes or another private store, until the Codex code is deleted (design
+W19, §12).
 
 ### Members
 
 Send the members the change for day 0: `ai-wiki ingest` works as before, but a submission is
-curated by the maintainer's next run (04:00, 12:00 or 20:00 CST) instead of within minutes;
-`ai-wiki jobs <id>` follows it. Nothing to reinstall.
+curated by the maintainer's next daily run (04:00 CST), so within about a day, instead of
+within minutes; `ai-wiki jobs <id>` follows it. Nothing to reinstall.
 
-## 2. The Auditor (day −1, no schedule)
+## 2. The Auditor and the isolation gate (day −1, no schedule)
 
 **Principal** (host):
 
@@ -298,8 +300,9 @@ multica skill create --name ai-wiki-auditor --description "<description from its
 
 **Agent and autopilot** (laptop). Take the skills, model and settings the header table of
 `docs/prompts/auditor-agent-instructions.md` names; the model must be of another family than
-the maintainer's (`claude-opus-5-5-combos`). `AUDITOR_RUNTIME` is the full id of the chosen
-runtime (`multica runtime list --output json | jq -r '.[] | select(.id | startswith("1ae1dfab")) | .id'`).
+the maintainer's (`claude-opus-5-5-combos`). `AUDITOR_RUNTIME` is the full id of the runtime
+chosen under "Where and when" (`multica runtime list --output json | jq -r '.[] | select(.id |
+startswith("<its prefix>")) | .id'`).
 
 ```bash
 awk 'f;/^---$/{f=1}' docs/prompts/auditor-agent-instructions.md > $FL/auditor-instructions.md
@@ -319,75 +322,105 @@ multica autopilot create --title "AI Wiki audit" --agent "$AUDITOR_AGENT" --mode
 **Auditor host.** The owner installs the CLI there once, as the runtime's OS user:
 `uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@$MERGE_SHA" && hash -r`
 and `ai-wiki config set --endpoint https://ai-wiki.yqbqnn.com/` (no token: the agent's env
-brings it). Then issue A1, assigned to `$AUDITOR_AGENT`, title `[OPS] AI Wiki final cut-over
-A1: auditor preflight`:
+brings it). `config set --endpoint` keeps a token saved earlier, so check that user's saved
+token next (issue A1 shows it too); remove any but a `member:` one with
+`( umask 077; jq 'del(.token)' ~/.ai-wiki/config.json > ~/.ai-wiki/config.json.new && mv ~/.ai-wiki/config.json.new ~/.ai-wiki/config.json )`.
+
+**Issue R1** (runtime, `$PROD_AGENT`), title `[OPS] AI Wiki final cut-over R1: pin the CLI,
+isolation`. Text (`$FL/issue-R1.md`, with `<MERGE_SHA>` and `<AUDITOR_AGENT>` filled in):
 
 ```text
-One-time operations task from the owner, not an audit run. Run exactly these two commands and
-nothing else; post one comment with both outputs verbatim; set this issue to done with
---no-start, or to blocked if a command failed.
+One-time operations task from the owner, not a maintenance run. In one bash shell on this host,
+run exactly the commands below, in order, and nothing else: no maintain, ingest or audit, no
+other installs, no edits to any file. Post one comment with every command and its complete
+output verbatim, then set this issue to done with --no-start, or to blocked if one of the first
+six commands failed (the last two report; a nonzero exit there is expected and not a failure).
 
+id -un; hostname
+find "$(uv tool dir)/ai-wiki" -path '*ai_wiki-*.dist-info/direct_url.json' -exec cat {} \;
+uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<MERGE_SHA>" && hash -r
+ai-wiki -b solvely-wiki health --json
+ai-wiki -b solvely-wiki doctor --role curator --json
+ai-wiki maint end --help
+env -u AIWIKI_TOKEN ai-wiki -b solvely-wiki doctor --role member --json
+multica agent env get <AUDITOR_AGENT> >/dev/null 2>"${TMPDIR:-/tmp}/env-get.err"; echo "env get exit $?"; head -c 300 "${TMPDIR:-/tmp}/env-get.err"
+```
+
+**Issue A1** (auditor host, `$AUDITOR_AGENT`), title `[OPS] AI Wiki final cut-over A1:
+auditor preflight, isolation`:
+
+```text
+One-time operations task from the owner, not an audit run. Run exactly the commands below and
+nothing else; post one comment with every output verbatim; set this issue to done with
+--no-start, or to blocked if one of the first three commands failed (the last two report; a
+nonzero exit there is expected and not a failure).
+
+id -un; hostname
 ai-wiki -b solvely-wiki doctor --role auditor --json
 ai-wiki -b solvely-wiki health --json
+env -u AIWIKI_TOKEN ai-wiki -b solvely-wiki doctor --role member --json
+multica agent env get 1dcccd34-e9e4-48c7-a0a3-32c061d4c284 >/dev/null 2>"${TMPDIR:-/tmp}/env-get.err"; echo "env get exit $?"; head -c 300 "${TMPDIR:-/tmp}/env-get.err"
 ```
 
-Verify: `doctor` `"ok": true` (scopes exactly read and audit; `git`, `uv` present), `health`
-`compatible: true`. Until step 6 audit changesets are refused (`AIWIKI_AUDIT=codex`), so the
-agent can do nothing else yet. Rollback: `multica autopilot delete $AUDITOR_AP`,
-`multica agent archive $AUDITOR_AGENT`, `multica skill delete $AUDITOR_SKILL`, and on the host
-`pp remove process:ai-wiki-auditor; pp check; hup`.
+Neither issue prints a token: `env get` discards its output, and `doctor` shows principals and
+scopes only.
 
-## 3. Retire the shadow agent, then stop the legacy run
+Verify from R1: the first `find` line's `commit_id` is `PREV_CLI` (write it down); `health`
+shows `compatible: true` and the merged `client_version`; `doctor --role curator` shows `"ok":
+true`; `maint end --help` lists `--format`. Every agent on `df0fb673` shares this CLI; the
+legacy flow keeps working with it (its `maintain`, `audit` and `jobs` verbs are unchanged), so
+the 04:00 run before step 3 is the check. From A1: `doctor --role auditor` `"ok": true`
+(scopes exactly read and audit; `git`, `uv` present), `health` `compatible: true`. Until step
+6 audit changesets are refused (`AIWIKI_AUDIT=codex`), so the agent can do nothing else yet.
 
-### 3a. The shadow agent (day −1, after the shadow's 13:30 run)
+**The isolation gate** (docs/external-agents.md §1 and §3), from both comments:
 
-Laptop, once the shadow's 13:30 CST issue is done:
+1. The `id -un` and `hostname` pairs differ: the same host is acceptable under another user,
+   the same user on the same host is not.
+2. Both `env get` lines exit nonzero with a permission error (not `command not found` or a
+   network error): neither host's Multica account can read the other role's token.
+3. Each `doctor --role member` without `AIWIKI_TOKEN` fails its `config` check (no token
+   saved) or names a `member:` principal in its `scopes` detail. On the runtime host that is
+   `member:legacy-token`, which holds every scope until step 7 narrows it; step 7 runs before
+   the maintainer's first run. A `human:` or `process:` principal saved there must go before
+   step 8: a one-time issue runs the `jq 'del(.token)'` line above on that host (agents there
+   that read the wiki then need a member token of their own).
 
-```bash
-multica autopilot update $SHADOW_AP --status paused --output json | jq -r '.status // .autopilot.status'   # paused
-multica agent archive $SHADOW_AGENT --output json | jq -r '.archived_at // .agent.archived_at'              # a timestamp
-```
+If 1 or 2 fails, stop: the server cannot tell a stolen token from its owner, so a maintainer
+that reaches the auditor's token (or the reverse) audits its own work. Fix it as
+docs/external-agents.md §3 says (another OS user or host; a Multica member account that is
+not a workspace owner or admin for the runtime's daemon; or the token outside Multica), or go
+on only with the owner's written acceptance of that risk, recorded with this runbook's copy.
 
-Host: the shadow's Codex audit timer, its principal, and the watchdog's shadow bundle go
-(the shadow's cursors and commits stop moving, so its checks would page):
+Rollback: `multica autopilot delete $AUDITOR_AP`, `multica agent archive $AUDITOR_AGENT`,
+`multica skill delete $AUDITOR_SKILL`, and on the host `pp remove process:ai-wiki-auditor;
+pp check; hup`. R1's CLI: the same issue with
+`uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<PREV_CLI>" && hash -r`.
 
-```bash
-systemctl disable --now ai-wiki-shadow-audit.timer
-rm /etc/systemd/system/ai-wiki-shadow-audit.{service,timer} /usr/local/sbin/ai-wiki-shadow-audit /etc/ai-wiki-shadow-audit.env
-rm -rf /var/lib/ai-wiki/shadow-audit
-mv /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf $FS/watchdog-phase2-shadow.conf
-systemctl daemon-reload
-pp remove process:ai-wiki-shadow-audit && pp check && hup
-systemctl show ai-wiki-watchdog -p ExecStart --value | grep -c solvely-wiki-shadow        # 0
-systemctl list-timers --all --no-pager 'ai-wiki*' | grep -c shadow-audit                  # 0
-```
-
-**The shadow bundle stays** (recommendation). Keep `solvely-wiki-shadow`, its read clone and
-pull timer, and `process:ai-wiki-maintainer-shadow` (its token stays in the archived agent's
-env). It is the canary bundle: before a model, runtime or effort change the maintainer runs
-there first (docs/external-agents.md §6), and `admin compare` keeps its history. It costs a
-5-minute pull and about 10 MB, and nothing alerts on it once the watchdog stops watching it.
-To remove it instead, run the Phase 2 runbook's §12 R2 and R4 blocks after step 6, with
-`solvely-wiki` alone in `AIWIKI_CHANGESETS_COMMIT`.
-
-Rollback: `multica agent restore $SHADOW_AGENT`, `multica autopilot update $SHADOW_AP --status
-active`, `mv $FS/watchdog-phase2-shadow.conf /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf`
-and `systemctl daemon-reload`, and the audit timer as the Phase 2 runbook §9 installs it, from
-the files in `$FS` with a new token (`pp add auditor --id process:ai-wiki-shadow-audit --bundle
-solvely-wiki-shadow`); until step 6 only (an external audit mode refuses its requests).
-
-### 3b. The legacy run (day 0, after the 04:00 run)
+## 3. Pause the legacy and shadow runs (day 0, after the 04:00 run)
 
 Laptop, once the 04:00 CST run's issue is done:
 
 ```bash
 multica autopilot runs $PROD_AP --limit 1 --output json | jq -c '.runs[0] | {status, issue_id, created_at}'   # completed
 multica autopilot update $PROD_AP --status paused --output json | jq -r '.status // .autopilot.status'     # paused
+multica autopilot update $SHADOW_AP --status paused --output json | jq -r '.status // .autopilot.status'   # paused
+```
+
+The shadow stops so that no shadow run holds a lease during this sitting's restarts; step 9
+retires it after the canary. If its 05:30 run already started, wait until its issue is done.
+Host: the shadow's Codex audit timer stops too (from step 6 on, an external audit mode refuses
+its requests):
+
+```bash
+systemctl disable --now ai-wiki-shadow-audit.timer
+systemctl is-active ai-wiki-shadow-audit.timer                                # inactive
 ```
 
 The legacy run may leave a background `ai-wiki maintain` and queued Codex jobs behind: on the
 host, wait until `codex_jobs` prints 0 and `idle && echo idle` prints `idle` (issue R2 also
-refuses while a `maintain` still runs). Rollback: `multica autopilot update $PROD_AP --status active`.
+refuses while a `maintain` still runs). Rollback: `multica autopilot update $PROD_AP --status
+active`, the same for `$SHADOW_AP`, and `systemctl enable --now ai-wiki-shadow-audit.timer`.
 
 ## 4. Import the cursors and the ledger (issue R2)
 
@@ -440,7 +473,8 @@ multica skill update $OKF_SKILL --content-file ~/.agents/skills/okf-knowledge-cu
 multica skill update $AIWIKI_SKILL --content-file ~/.agents/skills/ai-wiki/SKILL.md
 ```
 
-Then the agent and its autopilot. `AUDITOR_AGENT` comes from step 2:
+Then the agent and its autopilot. `AUDITOR_AGENT` comes from step 2. The schedule stays the
+daily `0 4 * * *` trigger (`d4fb8f06`), unchanged:
 
 ```bash
 awk 'f;/^---$/{f=1}' docs/prompts/production-agent-instructions.md > $FL/prod-instructions.md
@@ -450,8 +484,6 @@ multica agent skills set $PROD_AGENT --skill-ids $CURATING_SKILL,$OKF_SKILL
 multica agent update $PROD_AGENT --instructions "$(cat $FL/prod-instructions.md)" --max-concurrent-tasks 1
 multica autopilot update $PROD_AP --title "AI Wiki maintainer" \
   --issue-title-template "[AUTO] AI Wiki sync {{date}}" --description "$(cat $FL/prod-prompt.md)"
-multica autopilot trigger-update $PROD_AP $PROD_TRIGGER --cron "0 4,12,20 * * *" \
-  --timezone Asia/Shanghai --label "04:00/12:00/20:00 Asia/Shanghai"
 ```
 
 Set `max_attempts=2` and a 3 h task timeout in the UI or runtime config, if exposed. The
@@ -466,7 +498,7 @@ multica agent get $PROD_AGENT --output json | jq -c '{skills: [.skills[].name], 
 #   ["ai-wiki-curating-maintainer","okf-knowledge-curator"], 1, true
 multica autopilot get $PROD_AP --output json | jq -c '{status: .autopilot.status,
   prompt: (.autopilot.description | contains("ai-wiki-curating-maintainer")), cron: [.triggers[].cron_expression]}'
-#   paused, true, ["0 4,12,20 * * *"]
+#   paused, true, ["0 4 * * *"]
 ```
 
 Rollback (the archive of step 1):
@@ -477,19 +509,18 @@ multica agent skills set $PROD_AGENT --skill-ids $AIWIKI_SKILL,$LEGACY_SKILL
 multica agent update $PROD_AGENT --instructions "$(cat prod-instructions.legacy.md)" --max-concurrent-tasks 2
 multica autopilot update $PROD_AP --title "AI Wiki daily incremental sync" \
   --issue-title-template "[AUTO] AI Wiki daily sync {{date}}" --description "$(cat autopilot-prompt.legacy.md)"
-multica autopilot trigger-update $PROD_AP $PROD_TRIGGER --cron "0 4 * * *" --timezone Asia/Shanghai \
-  --label "Daily 04:00 Asia/Shanghai"
 ```
 
 The skill contents roll back from `skill-<id>.before.json` as in the Phase 2 runbook §11.3.
 
 ## 6. Writer drop-in: the final flags (host)
 
-`AIWIKI_LLM` stays `codex` here: step 8 flips it once the canary has passed, so until then a
-rollback can still hand member items back to Codex. The drop-in sorts after
-`phase2-shadow.conf`, which it overrides:
+One drop-in holds every final flag, `AIWIKI_LLM=off` included, so the canary runs the final
+state and a rollback removes one file. Under `off` a queued Codex job would stay queued, hence
+the `codex_jobs` guard. The drop-in sorts after `phase2-shadow.conf`, which it overrides:
 
 ```bash
+[ "$(codex_jobs)" = 0 ] || echo 'STOP: a Codex job is queued or running; wait (step 3)'
 EPOCH=$(date -u +%Y-%m-%dT%H:%M:%SZ); echo "$EPOCH" > $FS/backlog-epoch
 cat > $DROPIN/phase3-final.conf <<EOF
 # Final state (docs/final-cutover-runbook.md step 6). Sorts after phase2-shadow.conf.
@@ -497,6 +528,7 @@ cat > $DROPIN/phase3-final.conf <<EOF
 Environment=AIWIKI_CHANGESETS_COMMIT=solvely-wiki,solvely-wiki-shadow
 Environment=AIWIKI_INTAKE=inbox
 Environment=AIWIKI_AUDIT=external
+Environment=AIWIKI_LLM=off
 Environment=AIWIKI_BACKLOG_EPOCH=$EPOCH
 Environment=AIWIKI_CODEX_AUDIT_MANUAL=
 EOF
@@ -512,22 +544,46 @@ Verify:
 systemctl is-active ai-wiki-worker                                                   # active
 whoami_w | jq -c '.modes | {intake, audit, changesets_commit, codex_audit_manual, llm}'
 #   {"intake":"inbox","audit":"external","changesets_commit":["solvely-wiki","solvely-wiki-shadow"],
-#    "codex_audit_manual":[],"llm":"codex"}
+#    "codex_audit_manual":[],"llm":"off"}
+curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/health?bundle=solvely-wiki' | jq -c '{bundle, concepts, build, writer_agent}'
+#   writer_agent {"runtime":"off"}
 curl -s -o /dev/null -w '%{http_code}\n' -X POST -H @$FS/owner.h \
   'http://127.0.0.1:8788/jobs/no-such-job/audit?bundle=solvely-wiki'                # 409: audit is external
 curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/audit/backlog?bundle=solvely-wiki&limit=5' | jq -c 'keys'   # the backlog answers
-curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/health?bundle=solvely-wiki' | jq -c '{bundle, concepts, build}'
+systemd-cgls --no-pager -u ai-wiki-worker.service | grep -c codex                    # 0: nothing but uv and python
 journalctl -u ai-wiki-worker --since -10min --no-pager | grep -iE 'traceback|error' || echo clean
 ```
 
-Rollback, when idle: `rm $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`;
+Rollback, when idle, and only while the Codex configuration is on the host (after step 11,
+first its rollback): `rm $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`;
 `/whoami` shows today's modes again (compare with `$FS/modes.before.json`). Member items that
 arrived meanwhile go back to Codex with W14's `POST /admin/inbox/requeue` (owner token, see
 its route docstring for the body); changesets already committed are valid OKF content and stay.
 
-## 7. Canary: one item, one auditor run, then full
+## 7. Members: the legacy token to read and submit (host)
 
-**7a. The maintainer, one item** (laptop). The production prompt with `max_items=1`, as a
+`member:legacy-token` (the shared `eb17…`) still holds every scope on `solvely-wiki`. In the
+final state members only read and submit, and before the maintainer's first run: a runtime
+host may keep this token saved (step 2), where an agent that unsets its own `AIWIKI_TOKEN`
+would reach it.
+
+```bash
+jq '(.principals[] | select(.id == "member:legacy-token")) .scopes = ["read", "submit"]' \
+   /etc/ai-wiki/principals.json > /etc/ai-wiki/.principals.json.new
+chown root:admin /etc/ai-wiki/.principals.json.new && chmod 0640 /etc/ai-wiki/.principals.json.new
+mv /etc/ai-wiki/.principals.json.new /etc/ai-wiki/principals.json
+AIWIKI_TOKEN="$(legacy_token)" pp check && hup
+curl -s -H @$FS/legacy.h http://127.0.0.1:8788/whoami | jq -c '{principal, scopes, role}'
+#   member:legacy-token, ["read","submit"], member
+```
+
+Rollback: the same `jq` with `.scopes = ["admin","audit","curate","human_verify","read","submit"]`,
+then `pp check` and `hup`. Per-member `aiw_m_` tokens (`pp add member --id member:<name>`)
+replace the shared one later; that rotation is not part of this cut-over.
+
+## 8. Canary: one item, one auditor run, then the schedules
+
+**8a. The maintainer, one item** (laptop). The production prompt with `max_items=1`, as a
 one-time issue for the production agent:
 
 ```bash
@@ -535,6 +591,7 @@ cd $FL && sed 's/^max_items=6 /max_items=1 /' prod-prompt.md > canary-prompt.md
 grep -c '^max_items=1 ' canary-prompt.md                                                # 1
 multica issue create --title "[CANARY] AI Wiki sync, 1 item" --assignee-id $PROD_AGENT \
   --description-file canary-prompt.md --output json | jq -r '.id // .issue.id'          # CANARY_ISSUE
+multica issue metadata set $CANARY_ISSUE --key ai_wiki_ops --value true
 ```
 
 When it is done, on the laptop with the owner token and a throwaway CLI config:
@@ -559,10 +616,10 @@ uv run ai-wiki -b solvely-wiki log --tail 5                                     
 ```
 
 If the item was skipped (no durable knowledge), the report says so and there is no
-changeset: run 7a once more. On the host, a replay of the watchdog shows no alert:
+changeset: run 8a once more. On the host, a replay of the watchdog shows no alert:
 `as_admin /home/admin/app/.venv/bin/python /usr/local/bin/ai-wiki-watchdog --bundle $PROD --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | jq -c '{status, alerts: [.alerts[].key]}'`.
 
-**7b. One auditor run** (laptop): `multica autopilot trigger $AUDITOR_AP`. When its issue is
+**8b. One auditor run** (laptop): `multica autopilot trigger $AUDITOR_AP`. When its issue is
 done, the canary's concept was reviewed:
 
 ```bash
@@ -572,7 +629,9 @@ git -C $ws/clone pull -q && git -C $ws/clone log -3 --format='%h %s'            
 grep -A3 '^verified:' $ws/clone/<the concept_file>                                      # by: process:ai-wiki-auditor, never the maintainer
 ```
 
-**7c. Full** (laptop):
+**8c. The schedules** (laptop). The maintainer's daily 04:00 trigger resumes; the Auditor
+takes the cron the header table of `docs/prompts/auditor-agent-instructions.md` names (today
+`0 7,15 * * *`):
 
 ```bash
 multica autopilot update $PROD_AP --status active --output json | jq -r '.status // .autopilot.status'   # active
@@ -584,85 +643,136 @@ multica autopilot get $PROD_AP --output json | jq -c '[.triggers[] | {cron_expre
 Stop and roll back (§13) at once if the gate is bypassed (a curator's changeset carries a
 `verified` event), a receipt disagrees with origin, the fresh clone fails `okf-validate`, two
 scheduled runs in a row leave the cursors where they were, or the owner finds two serious
-errors in one run. After each scheduled run for the first days: the issue's first comment
-line, `ai-wiki -b solvely-wiki maint status --json`, and the watchdog's hourly result.
+errors in one run. After each daily run of the first week: the issue's first comment line,
+`ai-wiki -b solvely-wiki maint status --json`, and the watchdog's 07:00 result.
 
-## 8. The writer's Codex off (host)
+## 9. Retire the shadow agent (after the canary)
 
-After step 7c and two clean scheduled maintainer runs. Nothing in the final flags starts
-Codex any more; this makes it impossible:
-
-```bash
-codex_jobs                                                                    # 0, else wait or clear them first
-cat > $DROPIN/phase3-llm-off.conf <<'EOF'
-# The writer never starts an agent process (docs/final-cutover-runbook.md step 8).
-[Service]
-Environment=AIWIKI_LLM=off
-EOF
-systemctl daemon-reload && restart_idle
-```
-
-Verify:
+Laptop (its autopilot has been paused since step 3):
 
 ```bash
-whoami_w | jq -r .modes.llm                                                              # off
-curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/health?bundle=solvely-wiki' | jq -c .writer_agent   # {"runtime":"off"}
-systemd-cgls --no-pager -u ai-wiki-worker.service | grep -c codex                        # 0: nothing but uv and python
+multica agent archive $SHADOW_AGENT --output json | jq -r '.archived_at // .agent.archived_at'   # a timestamp
 ```
 
-Rollback: `rm $DROPIN/phase3-llm-off.conf && systemctl daemon-reload && restart_idle`, and
-`.modes.llm` reads `codex` again. The Codex configuration is still on the host until step 11.
-
-## 9. Members: the legacy token to read and submit (host)
-
-`member:legacy-token` (the shared `eb17…`) still holds every scope on `solvely-wiki`. In the
-final state members only read and submit:
+Host: the shadow's Codex audit timer, its principal, and the watchdog's shadow bundle go (the
+shadow's cursors and commits stop moving, so its checks would page):
 
 ```bash
-jq '(.principals[] | select(.id == "member:legacy-token")) .scopes = ["read", "submit"]' \
-   /etc/ai-wiki/principals.json > /etc/ai-wiki/.principals.json.new
-chown root:admin /etc/ai-wiki/.principals.json.new && chmod 0640 /etc/ai-wiki/.principals.json.new
-mv /etc/ai-wiki/.principals.json.new /etc/ai-wiki/principals.json
-AIWIKI_TOKEN="$(legacy_token)" pp check && hup
-curl -s -H @$FS/legacy.h http://127.0.0.1:8788/whoami | jq -c '{principal, scopes, role}'
-#   member:legacy-token, ["read","submit"], member
+rm /etc/systemd/system/ai-wiki-shadow-audit.{service,timer} /usr/local/sbin/ai-wiki-shadow-audit /etc/ai-wiki-shadow-audit.env
+rm -rf /var/lib/ai-wiki/shadow-audit
+mv /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf $FS/watchdog-phase2-shadow.conf
+systemctl daemon-reload
+pp remove process:ai-wiki-shadow-audit && pp check && hup
+systemctl show ai-wiki-watchdog -p ExecStart --value | grep -c solvely-wiki-shadow        # 0
+systemctl list-timers --all --no-pager 'ai-wiki*' | grep -c shadow-audit                  # 0
 ```
 
-Rollback: the same `jq` with `.scopes = ["admin","audit","curate","human_verify","read","submit"]`,
-then `pp check` and `hup`. Per-member `aiw_m_` tokens (`pp add member --id member:<name>`)
-replace the shared one later; that rotation is not part of this cut-over.
+**The shadow bundle stays** (recommendation). Keep `solvely-wiki-shadow`, its read clone and
+pull timer, and `process:ai-wiki-maintainer-shadow` (its token stays in the archived agent's
+env). It is the canary bundle: before a model, runtime or effort change the maintainer runs
+there first (docs/external-agents.md §6), and `admin compare` keeps its history. It costs a
+5-minute pull and about 10 MB, and nothing alerts on it once the watchdog stops watching it.
+To remove it instead, run the Phase 2 runbook's §12 R2 and R4 blocks, with `solvely-wiki`
+alone in `AIWIKI_CHANGESETS_COMMIT` (edit `phase3-final.conf`, then `restart_idle`).
+
+Rollback: `multica agent restore $SHADOW_AGENT`, and `mv $FS/watchdog-phase2-shadow.conf
+/etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf` and `systemctl
+daemon-reload`. The Codex audit timer and its principal come back only with §13 (an external
+audit mode refuses their requests): as the Phase 2 runbook §9 installs them, from the files in
+`$FS`, with a new token (`pp add auditor --id process:ai-wiki-shadow-audit --bundle
+solvely-wiki-shadow`).
 
 ## 10. Watchdog and deploy procedure
 
-### 10.1 Watchdog (host)
+The watchdog runs once a day, at 07:00 CST after the 04:00 maintainer run, on the writer
+(`--bundle`) and on the runtime host (`--multica --no-checkpoint`), as
+docs/maintenance-watchdog.md "Final state" describes.
 
-The writer-host unit is the whole final-state watchdog: `--bundle $PROD` now reads the
-production cursors and queue. Install the merged script if it changed, and replay:
+### 10.1 Writer side (host)
+
+The deploy put the merged tree in `/home/admin/app`. If the script changed, back up
+`/usr/local/bin/ai-wiki-watchdog` and install the merged one, as in the Phase 2 runbook plan
+step 4; then move the timer to once a day:
 
 ```bash
 cmp -s /home/admin/app/scripts/maintenance_watchdog.py /usr/local/bin/ai-wiki-watchdog || echo changed
-```
-
-The deploy puts the merged tree in `/home/admin/app`. If it changed, as in the Phase 2
-runbook plan step 4: back up `/usr/local/bin/ai-wiki-watchdog`,
-`install -m 0755 -o root -g root /home/admin/app/scripts/maintenance_watchdog.py /usr/local/bin/ai-wiki-watchdog`,
-then:
-
-```bash
+cp -a /usr/local/bin/ai-wiki-watchdog $FS/ai-wiki-watchdog.before
+install -m 0755 -o root -g root /home/admin/app/scripts/maintenance_watchdog.py /usr/local/bin/ai-wiki-watchdog
+install -d -m 0755 /etc/systemd/system/ai-wiki-watchdog.timer.d
+cat > /etc/systemd/system/ai-wiki-watchdog.timer.d/daily.conf <<'EOF'
+# Final state: once a day, after the 04:00 maintainer run (docs/final-cutover-runbook.md step 10).
+[Timer]
+OnCalendar=
+OnCalendar=*-*-* 07:00:00 Asia/Shanghai
+EOF
+systemctl daemon-reload && systemctl restart ai-wiki-watchdog.timer
+systemctl list-timers --no-pager ai-wiki-watchdog.timer                                    # NEXT: 07:00 CST
 systemctl show ai-wiki-watchdog -p ExecStart --value | grep -o -- '--bundle [^ ]*'       # --bundle /home/admin/solvely-wiki only
 as_admin /home/admin/app/.venv/bin/python /usr/local/bin/ai-wiki-watchdog --bundle $PROD \
   --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | jq -c '{status, cursors: .checks["maint:solvely-wiki"].cursors, alerts: [.alerts[].key]}'
 #   ok; repos and issues with their ages; no alert
 ```
 
-What pages from now on: a cursor that has not advanced for 30 h (the maintainer did not run
-three times), an item waiting over 72 h or needing a human, a run lease stuck over 3 h, no
-commit for 48 h, and writer job failures. `--multica` stays off: its checks read the legacy
-v4 checkpoint, which the curating maintainer does not write. The Auditor's backlog age has no
-watchdog check yet; read `/audit/backlog` in the daily look of step 7 until one exists.
-Rollback: install the backed-up script; the shadow's `--bundle` comes back with §3's rollback.
+What the writer side pages on: a member's submission waiting in ready over 24 h (it missed a
+daily run), any item over 72 h or needing a human, a cursor that has not advanced for 30 h, a
+run lease stuck over 3 h, no commit for 48 h, and writer job failures. A missed or failed
+daily run pages the same morning from the Multica side (10.2). The Auditor's backlog age has
+no check yet; its failed or missing runs page from 10.2.
 
-### 10.2 Deploy procedure (laptop, `deploy_aliyun.sh`)
+Rollback: `rm -r /etc/systemd/system/ai-wiki-watchdog.timer.d && systemctl daemon-reload &&
+systemctl restart ai-wiki-watchdog.timer`, and `install -m 0755 $FS/ai-wiki-watchdog.before
+/usr/local/bin/ai-wiki-watchdog`.
+
+### 10.2 Multica side (runtime host, issue R3)
+
+The Multica side reads the maintainer's and the Auditor's autopilot runs and issues with the
+runtime host's `multica` login, and pages the same Feishu group. Its webhook reaches that host
+through the production agent's custom env for one run (laptop):
+
+```bash
+read -rs HOOK && read -rs HOOK_SECRET && export HOOK HOOK_SECRET   # the webhook, and its signing secret or empty
+multica agent env get $PROD_AGENT | jq -c '.custom_env | map_values("****")
+  + {AIWIKI_WATCHDOG_FEISHU_WEBHOOK: $ENV.HOOK, AIWIKI_WATCHDOG_FEISHU_SECRET: $ENV.HOOK_SECRET}' \
+  | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null
+unset HOOK HOOK_SECRET
+```
+
+Issue R3 (`$PROD_AGENT`), title `[OPS] AI Wiki final cut-over R3: Multica-side watchdog`,
+with `<MERGE_SHA>` and `<AUDITOR_AP>` filled in:
+
+```text
+One-time operations task from the owner, not a maintenance run: install the daily Multica-side
+watchdog for this user. In one bash shell run exactly the commands below, in order, and nothing
+else; stop at the first failure. Never print the webhook. Post one comment with every command
+and its complete output verbatim, then set this issue to done with --no-start, or to blocked if
+you stopped.
+
+case "$(date +%z)" in +0800) H=7 ;; +0000) H=23 ;; *) echo "STOP: zone $(date +%z)"; false ;; esac && echo "hour $H"
+test -n "$AIWIKI_WATCHDOG_FEISHU_WEBHOOK" && echo webhook-present
+PY="$(uv tool dir)/ai-wiki/bin/python"; M="$(command -v multica)"; W="$HOME/.local/bin/ai-wiki-watchdog"; E="$HOME/.config/ai-wiki-watchdog/env"; S="$HOME/.local/state/ai-wiki-watchdog"; echo "$PY $M"
+install -d -m 0700 "$HOME/.config/ai-wiki-watchdog" "$S"
+( umask 077; printf 'AIWIKI_WATCHDOG_FEISHU_WEBHOOK=%s\nAIWIKI_WATCHDOG_FEISHU_SECRET=%s\n' "$AIWIKI_WATCHDOG_FEISHU_WEBHOOK" "$AIWIKI_WATCHDOG_FEISHU_SECRET" > "$E" )
+curl -fsSL "https://raw.githubusercontent.com/Scorpion1221/ai-wiki/<MERGE_SHA>/scripts/maintenance_watchdog.py" -o "$W" && chmod 0755 "$W"
+env -u AIWIKI_WATCHDOG_FEISHU_WEBHOOK -u AIWIKI_WATCHDOG_FEISHU_SECRET "$PY" "$W" --multica --no-checkpoint --multica-bin "$M" --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | head -c 1500
+( crontab -l 2>/dev/null | grep -v ai-wiki-watchdog; echo "0 $H * * * set -a; . $E; set +a; $PY $W --multica --no-checkpoint --multica-bin $M --state-file $S/maintainer.json --label multica-maintainer >> $S/cron.log 2>&1"; echo "5 $H * * * set -a; . $E; set +a; $PY $W --multica --no-checkpoint --multica-bin $M --autopilot-id <AUDITOR_AP> --state-file $S/auditor.json --label multica-auditor >> $S/cron.log 2>&1" ) | crontab -
+crontab -l | grep -c ai-wiki-watchdog
+```
+
+Verify from the comment: `hour 7` (or `hour 23` on a UTC host: 07:00 CST), `webhook-present`,
+the replay's `"status"` is `ok` or names only real alerts with `"checkpoint": null`, and the
+crontab count is `2`. Then take the webhook back out of the agent's env (laptop):
+
+```bash
+multica agent env get $PROD_AGENT | jq -c '.custom_env | del(.AIWIKI_WATCHDOG_FEISHU_WEBHOOK, .AIWIKI_WATCHDOG_FEISHU_SECRET)
+  | map_values("****")' | multica agent env set $PROD_AGENT --custom-env-stdin >/dev/null
+multica agent env get $PROD_AGENT | jq -c '.custom_env | keys'                    # ["AIWIKI_TOKEN"], no webhook keys
+```
+
+The next morning, `$S/cron.log` on that host (a later ops issue can `tail` it) and the Feishu
+group show the first runs. Rollback: an ops issue running `crontab -l | grep -v
+ai-wiki-watchdog | crontab -` and `rm -r ~/.config/ai-wiki-watchdog`.
+
+### 10.3 Deploy procedure (laptop, `deploy_aliyun.sh`)
 
 The deploy script lives outside this repository. Apply before step 0's deploy:
 
@@ -687,63 +797,93 @@ The deploy script lives outside this repository. Apply before step 0's deploy:
    PY
    ```
 
-2. **Run windows**: refuse from 30 minutes before to 2 hours after 04:00, 12:00 and 20:00
-   CST (maintainer) and 30 minutes around 07:00 and 15:00 CST (auditor starts), besides the
-   existing 03:30–06:30 rule.
+2. **Run windows**: besides the existing 03:30–06:30 CST rule (the maintainer's 04:00 run),
+   refuse from 30 minutes before to 30 minutes after each Auditor start (its cron, today
+   07:00 and 15:00 CST).
 3. **After the deploy**, compare the writer's `/whoami` `.modes` with the ones before it,
    read with the token the script already uses for its health checks: the flags live in
-   drop-ins, not the app directory, so a deploy must not change them.
+   drop-ins, not the app directory, so a deploy must not change them. Compare only the keys
+   the old build reported: a key the new build adds is new, not changed (step 0's deploy adds
+   `llm`, whose value step 0's own check reads):
+
+   ```bash
+   jq -n --argjson a "$BEFORE" --argjson b "$AFTER" \
+     '($a | keys) as $k | ($b | with_entries(select(.key as $x | $k | index($x)))) == $a' | grep -qx true \
+     || { echo 'modes changed by the deploy'; exit 1; }
+   ```
+
 4. Mirror: unchanged (it keeps the live container's mounts, Phase 2 runbook §6).
 
 Rollback: `deploy_aliyun.sh.pre-final`.
 
-## 11. Remove the Codex agent config and 9Router credentials (host, after 14 clean days)
+## 11. Remove the Codex config, the gateway credential and the lark-cli login (host)
 
-After two weeks of the final state without a rollback (design §9 phase 5), take the Codex
-configuration off the writer, with a backup. `/home/admin/.codex` stays: it is admin's own
-interactive Codex login (a `codex` session and the `codex-auth` daemon use it), not the
-writer's.
+Right after steps 8 to 10, in the same sitting: with `AIWIKI_LLM=off` the writer reads none of
+this, and the backups below keep a rollback possible for 30 days (design §8.4 and §9 phase 5).
+`/home/admin/.codex` stays: it is admin's own interactive Codex login (a `codex` session and
+the `codex-auth` daemon use it), not the writer's. `LARK` is the directory H10 listed.
 
 ```bash
-whoami_w | jq -r .modes.llm                                                   # off, else stop: step 8 first
-grep -rlsE 'codex-gateway|codex-9router' /home/admin/.bashrc /home/admin/.profile /home/admin/.codex/config.toml \
+whoami_w | jq -r .modes.llm                                                   # off, else stop: step 6 first
+grep -rlsE 'codex-gateway|codex-9router' /home/admin/.bashrc /home/admin/.profile /home/admin/.codex/config.toml /etc/environment \
   && echo 'STOP: something else uses the 9Router wrapper or its secret; keep them' || echo unused-elsewhere
+grep -rlsE 'lark-cli' /etc/cron* /var/spool/cron /etc/systemd/system /home/admin/.bashrc /home/admin/.profile \
+  && echo 'STOP: a job runs lark-cli; keep its login' || echo lark-unused
+LARK=<the directory H10 listed>; test -d "$LARK" && echo "$LARK"
 ```
 
-Only after `off` and `unused-elsewhere`:
+Only after `off`, `unused-elsewhere` and `lark-unused`:
 
 ```bash
 TS=$(date -u +%Y%m%dT%H%M%SZ); BK=$FS/codex-host-$TS; install -d -m 0700 $BK
-cp -a $DROPIN $BK/worker.service.d
-tar -C /home/admin -czpf $BK/admin-codex.tgz .ai-wiki/config.json .local/bin/codex-9router .config/secrets/codex-gateway.env
-chmod 600 $BK/admin-codex.tgz && tar -tzf $BK/admin-codex.tgz          # the three files
-mv $DROPIN/codex-runtime.conf $DROPIN/zz-agent-config.conf $BK/
+cp -a $DROPIN $BK/worker.service.d && cp -a /etc/environment $BK/environment
+tar -C /home/admin -czpf $BK/admin-codex.tgz .ai-wiki/config.json .local/bin/codex-9router \
+    .config/secrets/codex-gateway.env "${LARK#/home/admin/}"
+chmod 600 $BK/admin-codex.tgz $BK/environment && tar -tzf $BK/admin-codex.tgz | head   # the three files and the lark-cli directory
+mv $DROPIN/codex-runtime.conf $DROPIN/zz-agent-config.conf $BK/ && systemctl daemon-reload
+systemctl cat ai-wiki-worker.service | grep -E '^EnvironmentFile='          # EnvironmentFile=/etc/environment only, else STOP
+cat > $DROPIN/zz-no-etc-environment.conf <<'EOF'
+# The writer loads no host-wide environment (docs/final-cutover-runbook.md step 11): /etc/environment
+# held a model gateway credential. The unit sets PATH and HOME itself.
+[Service]
+EnvironmentFile=
+EOF
+sed -i '/^[[:space:]]*#\?[[:space:]]*ANTHROPIC_/d' /etc/environment
 systemctl daemon-reload
 as_admin shred -u /home/admin/.config/secrets/codex-gateway.env
 as_admin rm /home/admin/.local/bin/codex-9router /home/admin/.ai-wiki/config.json
+as_admin rm -r "$LARK"
+as_admin env -i HOME=/home/admin PATH=/usr/local/bin:/usr/bin:/bin git -C $PROD fetch --dry-run origin && echo git-ok
 restart_idle
 ```
 
-Verify:
+`git-ok` shows the writer's Git and SSH work with the unit's own `PATH`, which
+`/etc/environment` no longer overrides. Verify:
 
 ```bash
-ls $DROPIN                                    # okf-v02.conf phase1-principals.conf phase2-shadow.conf phase3-final.conf phase3-llm-off.conf
+ls $DROPIN                  # okf-v02.conf phase1-principals.conf phase2-shadow.conf phase3-final.conf zz-no-etc-environment.conf
+systemctl show ai-wiki-worker -p EnvironmentFiles --value                               # empty
 systemctl show ai-wiki-worker -p Environment --value | tr ' ' '\n' | grep -cE '^AIWIKI_(AGENT_|CONFIG=)'   # 0
-whoami_w | jq -r .modes.llm                   # off
+grep -c ANTHROPIC /etc/environment                                                     # 0
+whoami_w | jq -r .modes.llm                                                            # off
 curl -s -H @$FS/owner.h 'http://127.0.0.1:8788/health?bundle=solvely-wiki' | jq -c .writer_agent   # {"runtime":"off"}
-test ! -e /home/admin/.config/secrets/codex-gateway.env && test ! -e /home/admin/.local/bin/codex-9router && echo removed
+for f in /home/admin/.config/secrets/codex-gateway.env /home/admin/.local/bin/codex-9router "$LARK"; do
+  test ! -e "$f" || echo "still there: $f"; done; echo checked
 ```
 
-The backup holds a live 9Router key: keep `$BK` root-only for 30 days, then `shred -u
-$BK/admin-codex.tgz`. The owner may revoke that key at 9Router; a rollback past step 8 then
-needs a new one. Rollback:
+The gateway token in `/etc/environment` was world-readable (and a review's transcript saw it),
+and the backup holds a live 9Router key: the owner revokes both at their gateways now, and
+the lark-cli app login in the Feishu console. Keep `$BK` root-only for 30 days, then `shred -u
+$BK/admin-codex.tgz $BK/environment`. A rollback after the revocations needs new credentials.
+Rollback:
 
 ```bash
-tar -C /home/admin -xzpf $BK/admin-codex.tgz
+tar -C /home/admin -xzpf $BK/admin-codex.tgz && cp -a $BK/environment /etc/environment
+rm $DROPIN/zz-no-etc-environment.conf
 mv $BK/codex-runtime.conf $BK/zz-agent-config.conf $DROPIN/ && systemctl daemon-reload
 ```
 
-and then step 8's rollback (a writer with `AIWIKI_LLM=off` reads none of it).
+and then step 6's rollback (a writer with `AIWIKI_LLM=off` reads none of it).
 
 Finally, `shred -u $FS/owner.h $FS/legacy.h` on the host, and `unset AIWIKI_TOKEN` on the laptop.
 
@@ -753,9 +893,11 @@ Finally, `shred -u $FS/owner.h $FS/legacy.h` on the host, and `unset AIWIKI_TOKE
   recovery, receipts, the collectors, the shadow bundle as the canary target.
 - Rollback-only until the Codex code is deleted (design W19): the legacy Codex runner, `POST
   /jobs/{id}/audit`, `/jobs/pending-audit`, `ai-wiki maintain` and `audit`, the
-  `ai-wiki-maintainer` skill, the archive in `$FL`, the legacy ledger on the runtime host
-  (`~/.local/state/ai-wiki-maintainer/solvely-wiki`, read-only from step 4 on).
-- Docs: `docs/prompts/shadow-*.md` describe the retired shadow agent and serve its canaries.
+  `ai-wiki-maintainer` skill, the archive in `$FL` (the only copy of the legacy texts), the
+  legacy ledger on the runtime host (`~/.local/state/ai-wiki-maintainer/solvely-wiki`,
+  read-only from step 4 on).
+- Docs: `docs/prompts/shadow-*.md` record the Phase 2 shadow agent; a canary on the shadow runs
+  the production texts instead (docs/external-agents.md §6).
 
 ## 13. Rollback to the legacy path
 
@@ -765,9 +907,10 @@ after step 5, in this order (skip what never ran):
 1. **Stop the new runs** (laptop): `multica autopilot update $PROD_AP --status paused` and
    `multica autopilot update $AUDITOR_AP --status paused`. Wait until the host's `idle` passes.
 2. **The writer back to Codex** (host): step 11's rollback if it ran, then
-   `rm -f $DROPIN/phase3-llm-off.conf $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`.
+   `rm -f $DROPIN/phase3-final.conf && systemctl daemon-reload && restart_idle`.
    `whoami_w | jq -c .modes` equals `$FS/modes.before.json`. Hand member items back to Codex
-   with `POST /admin/inbox/requeue` (step 6's rollback).
+   with `POST /admin/inbox/requeue` (step 6's rollback), and widen the legacy token again
+   (step 7's rollback).
 3. **The agent back to the legacy flow** (laptop): step 5's rollback block.
 4. **The cursors and unfinished items back to the ledger** (issue RB1 below): the writer's
    cursors as a v4 checkpoint on the newest run issue, so the legacy `find` picks them up, and
@@ -777,11 +920,15 @@ after step 5, in this order (skip what never ran):
 6. **Archive the queue** (host, once `status_w solvely-wiki | jq .leases` shows no live
    lease), so the watchdog stops paging on cursors nothing advances:
    `as_admin mv $PROD/.okf/maint $PROD/.okf/maint.rolled-back-$(date +%F)`.
-7. The Auditor stays paused (`multica agent archive $AUDITOR_AGENT` to retire it); committed
+7. **The watchdog**: the writer side stays as it is. On the runtime host R3's rollback removes
+   the Multica side, which pages on the legacy runs only once reinstalled without
+   `--no-checkpoint` (docs/maintenance-watchdog.md, "Multica runtime host").
+8. The Auditor stays paused (`multica agent archive $AUDITOR_AGENT` to retire it); committed
    changesets and audit changesets are valid OKF content and stay.
 
 Issue RB1, title `[OPS] AI Wiki rollback RB1: export cursors to the legacy ledger`, assigned
-to `$PROD_AGENT` after step 3 of this list restored its legacy skills; `<LAST_RUN_ISSUE>` is
+to `$PROD_AGENT` after step 3 of this list restored its legacy skills, and marked
+`ai_wiki_ops` like every one-time issue; `<LAST_RUN_ISSUE>` is
 `multica autopilot runs $PROD_AP --limit 1 --output json | jq -r '.runs[0].issue_id'`:
 
 ```text
@@ -810,11 +957,15 @@ exported item as a frozen source. The next legacy run's `find` reports that chec
 - The runbook names W14's and W16/W17's routes, flags, verbs and files (`/admin/inbox/requeue`,
   `/audit/backlog`, `AIWIKI_BACKLOG_EPOCH`, `ai-wiki-auditor`, `docs/prompts/auditor-*.md`) as
   the design specifies them; check them against the merged build before day −1.
+- Step 2's isolation gate may fail on the Multica check: a runtime whose daemon is logged in
+  as a workspace owner or admin can read every agent's custom env. The fix changes who the
+  daemon runs as, which the owner decides.
+- One maintainer run a day with `max_items=6` curates at most 6 items a day. The import of
+  step 4 and a busy day can queue more; `maint_ready_stale` (72 h) and the member check (24 h)
+  say when to raise `max_items`.
 - The first days of `AIWIKI_AUDIT=external` release the old unverified concepts into the
   backlog a few a day (the seed), so the Auditor's backlog stays long for a while; the
-  maintainer is not affected.
-- `{{date}}` is the UTC date: two of the three daily runs share an issue title. A run still
-  open when the next starts would meet an active issue of the same title.
+  maintainer is not affected. The backlog's age has no watchdog check yet.
 - The writer still runs as `admin`, the user of an interactive Codex login on the same host.
   `AIWIKI_LLM=off` guarantees the service never starts an agent; moving the writer to its own
   user (design §8.4) is the host hardening that remains.
