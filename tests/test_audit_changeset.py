@@ -164,6 +164,36 @@ def test_the_same_verdict_on_a_new_version_is_a_new_review(gate) -> None:
     assert (AIO_AB, "external") not in due(gate)
 
 
+@pytest.mark.parametrize(("pushed", "verdict", "edit", "code"), [
+    (lambda text: text.replace("# Summary", "# Summary\n\nConversion rose 40% in Q3.", 1), "unverified", None, None),
+    (lambda text: text.replace("# Summary", "# Summary\n\nA hand note.", 1), "corrected",
+     lambda text: text.replace("A hand note.", "A hand note. Lift was 12.5%."), "D_NOVEL_TOKEN"),
+    (lambda text: re.sub(r"resource: /sources/\S+", "resource: https://example.com/elsewhere", text), "verified",
+     None, "D_NO_EVIDENCE"),
+])
+def test_an_unverified_outcome_withdraws_the_verification_a_push_kept(gate, pushed, verdict, edit, code) -> None:
+    """A push keeps ``generated`` and ``verified``, so the pushed version reads as verified. A
+    review that does not verify it (by verdict or by downgrade) makes that verification
+    historical: the service dates the generation at its own time, keeping its author."""
+    before = published(gate, METRIC)
+    push(gate, METRIC, pushed(gate.read(METRIC)))
+    assert (METRIC, "external") in due(gate)
+    lease(gate)
+    extra = {"content": edit(git(gate.remote, "show", f"main:{METRIC}") + "\n")} if edit else {}
+
+    job = submit(gate, review(gate, METRIC, verdict, **extra)).json()
+
+    assert job["status"] == "done" and job["reviews"][0]["outcome"] == "unverified", job
+    assert job["reviews"][0].get("downgrade") == code and job["commit"]
+    after = published(gate, METRIC)
+    assert after["verified"] == before["verified"] and after["generated"]["by"] == before["generated"]["by"]
+    assert audit._instant(after["generated"]["at"]) > max(event["at"] for event in after["verified"])
+    metadata = gate.client.get("/cat", params={"bundle": "kb-a", "path": METRIC},
+                               headers=gate.headers("auditor")).json()["metadata"]
+    assert (metadata["trust"], metadata["verification_current"]) == ("machine-confirmed", False)
+    assert (METRIC, "external") not in due(gate)  # reviewed: new evidence brings a new version
+
+
 def test_a_reverted_audit_returns_its_concept_to_the_backlog(gate) -> None:
     lease(gate)
     job = submit(gate, review(gate, AIO_AB)).json()

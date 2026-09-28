@@ -9,7 +9,9 @@ document, then stamps them deterministically with trusted time.
 * ``verified`` history is never edited by the editor; an audit verdict of
   ``verified`` appends one event.
 * audit also freezes ``sources`` and owns ``status`` (``draft`` becomes ``stable``); an
-  audit changeset (stage ``review``) freezes ``type``, ``title`` and ``stale_after`` too.
+  audit changeset (stage ``review``) freezes ``type``, ``title`` and ``stale_after`` too,
+  and its ``unverified`` verdict on a verified version stamps ``generated.at`` anew, so the
+  old verification stops being current.
 * a curate changeset owns ``status`` too: a new concept starts ``draft``, an existing
   one keeps its value, and a deprecate operation sets ``deprecated``.
 
@@ -27,7 +29,7 @@ from typing import Any
 
 import yaml
 
-from .document import OKFDocumentError, _instant, normalize_verified, parse_document
+from .document import OKFDocumentError, _instant, current_verified, normalize_verified, parse_document
 from .scan_sources import _source_resource_rel
 from .validate import SPILL_KEY_RE, split_body_spill
 
@@ -545,13 +547,20 @@ def apply_bookkeeping(
 
     generated = before_doc.get("generated")
     generated_at = _instant(generated.get("at")) if isinstance(generated, dict) else None
+    history = [_instant(event.get("at")) for event in normalize_verified(before_doc)]
     stamp = None
     if substantive:
         # A new generation supersedes every earlier generation and verification event.
-        history = [_instant(event.get("at")) for event in normalize_verified(before_doc)]
         stamp = _not_before(trusted_now, max(filter(None, [generated_at, *history]), default=None), strictly=True)
         template = _lines(before_blocks, "generated") or _lines(after_blocks, "generated")
         blocks = _put(blocks, "generated", _generated_lines(template, actor, _text(stamp)), order)
+    elif stage == "review" and verdict == "unverified" and current_verified(before_doc):
+        # A reviewer found this verified version unsupported (a push kept its old stamps): the
+        # service dates the generation now, so no earlier event confirms it. Its author stays.
+        stamp = _not_before(trusted_now, max(filter(None, [generated_at, *history]), default=None), strictly=True)
+        author = generated.get("by") if isinstance(generated, dict) and generated.get("by") else actor
+        blocks = _put(blocks, "generated", _generated_lines(_lines(blocks, "generated"), str(author), _text(stamp)),
+                      order)
     if status is not None and _value(_lines(blocks, "status")) != status:
         blocks = _put(blocks, "status", [f"status: {status}\n"], order)
     if verdict == "verified":

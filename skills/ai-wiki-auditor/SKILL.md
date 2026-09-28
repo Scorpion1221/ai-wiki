@@ -104,7 +104,8 @@ Hold each to the evidence boundary:
   `stale_after`, `generated`, `verified` and `status` are restored whatever you write.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is
   unreliable, or the concept cites no frozen source (`D_NO_EVIDENCE`: a note is never
-  evidence). The maintainer brings new evidence; never "fix" a concept by writing facts.
+  evidence). An earlier verification of the version then stops being current. The
+  maintainer brings new evidence; never "fix" a concept by writing facts.
 
 ```sh
 ai-wiki -b "$bundle" review verdict <path> verified --note "<which part supports which claims>"
