@@ -941,9 +941,10 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
 # external auditor. The service adds every process principal that holds the audit scope.
 AUDITOR_ACTORS = frozenset({AUDITOR, "process:ai-wiki-auditor"})
 SEED_PER_DAY = 10
-# The service's own commits (§5.3 external attention): a changeset or a revert names itself in
-# a trailer; the Codex path and bundle creation write exactly these subjects.
-_SERVICE_TRAILER = re.compile(r"^(?:Changeset|Revert): \S", re.MULTILINE)
+# The service's own commits (§5.3 external attention): a changeset, a revert or a member
+# submission's intake commit names itself in a trailer; the Codex path and bundle creation
+# write exactly these subjects.
+_SERVICE_TRAILER = re.compile(r"^(?:Changeset|Revert|Intake): \S", re.MULTILINE)
 _SERVICE_SUBJECT = re.compile(r"ingest: sources/\S.*|audit: ingest [0-9a-f]{12}|bundle: create \S+")
 # A6: the URLs, backticked names, numbers (a word that starts with a digit: dates, percentages,
 # versions, 5k) and snake_case or camelCase identifiers a correction writes must already be words

@@ -133,7 +133,7 @@ def scaffold(target: Path, name: str) -> None:
     (target / ".okf" / "jobs").mkdir(parents=True, exist_ok=True)
     (target / "sources" / "inbox").mkdir(parents=True, exist_ok=True)
     # .okf/ and sources/inbox/ are operational state — only curated source snapshots
-    # under sources/ belong in Git.
+    # under sources/ belong in Git, and the redacted copies inbox intake commits by name.
     (target / ".gitignore").write_text(
         ".okf/\nsources/inbox/\nviz.html\n.obsidian/\n.gstack/\n.DS_Store\n",
         encoding="utf-8",

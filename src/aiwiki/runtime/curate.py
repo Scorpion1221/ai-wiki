@@ -617,7 +617,8 @@ def _exclude_inbox(root: Path, bundle: Path) -> None:
 
     Existing/third-party bundles may predate the scaffolded ``.gitignore`` rules.
     Use Git's local exclude file so job sidecars or a failed inbox source cannot leak
-    into a later job's ``git add -A`` without modifying the knowledge bundle itself.
+    into a later job's ``git add -A`` without modifying the knowledge bundle itself. Only an
+    intake commit (``service.inbox``) adds a file there, by name.
     """
     try:
         bundle_rel = bundle.resolve().relative_to(root.resolve()).as_posix()

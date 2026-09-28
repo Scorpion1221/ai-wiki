@@ -5,19 +5,20 @@ time. Serializing curation is what makes many concurrent writers safe: two curat
 passes never touch the bundle or its git tree at once, so the only contention left is
 between this worker and *other* writers' pushes — which curate.py handles by rebasing.
 
-The queue is ordered by kind (design §2.6): changesets and admin reverts, then Codex
-audits, then Codex ingests, first in first out within a kind; a running job is never
-preempted. Until a bundle commits changesets its Codex audits and ingests stay in one FIFO,
-as before. Once it does, a Codex audit of it waits while its maintainer run holds the lease,
-so it never takes the lock for minutes in the middle of a run; a lease on any other bundle
-holds nothing back.
+The queue is ordered by kind (design §2.6): changesets, admin reverts and the intake
+commits of member submissions (``inbox.commit``), then Codex audits, then Codex ingests,
+first in first out within a kind; a running job is never preempted. Until a bundle commits
+changesets its Codex audits and ingests stay in one FIFO, as before. Once it does, a Codex
+audit of it waits while its maintainer run holds the lease, so it never takes the lock for
+minutes in the middle of a run; a lease on any other bundle holds nothing back.
 
 On startup, queued jobs left by a previous run are re-enqueued (a changeset from its
-request in ``.okf/changesets``, a revert from its own job). Interrupted running jobs are
-reconciled from durable Git transaction metadata before being marked failed.
+request in ``.okf/changesets``, a revert from its own job; the sweep queues intake commits).
+Interrupted running jobs are reconciled from durable Git transaction metadata before being
+marked failed.
 
 Under AIWIKI_LLM=off no Codex audit or ingest is ever queued (``_put`` refuses one), so the
-worker runs only changesets and reverts: Git, and never an agent.
+worker runs only changesets, reverts and intake commits: Git, and never an agent.
 """
 from __future__ import annotations
 
@@ -39,7 +40,7 @@ from . import inbox
 from . import ingest as I
 from . import maint_state as M
 
-PRIORITY = {"changeset": 0, "revert": 0, "audit": 1, "ingest": 2}  # lower runs first
+PRIORITY = {"changeset": 0, "revert": 0, "intake": 0, "audit": 1, "ingest": 2}  # lower runs first
 CODEX_KINDS = ("audit", "ingest")  # the kinds a Codex agent runs: never queued under AIWIKI_LLM=off
 # Installed by the app (design §2.11): the bundles whose changesets commit (none while
 # AIWIKI_DISABLE=changesets), and whether a principal may still propose one to a bundle.
@@ -271,7 +272,7 @@ def _reconcile_running(bundle: Path, job: dict) -> str:
             report = job.get("audit")
             if not isinstance(report, dict) or report.get("status") not in {"passed", "needs_attention"}:
                 return "remote contains audit commit, but durable audit result is incomplete"
-        else:
+        elif job.get("kind") != "intake":  # an intake commit adds one file and no concept
             validation = job.get("validation")
             if not isinstance(validation, dict) or validation.get("status") != "passed":
                 return "remote contains ingest commit, but durable validation result is incomplete"
@@ -360,8 +361,14 @@ def submit_revert(bundle: Path, job_path: Path) -> None:
     _put("revert", bundle, job_path.stem, job_path)
 
 
+def submit_intake(bundle: Path, job_path: Path) -> None:
+    """Queue the intake commit of a member submission with the changesets (``inbox.commit``)."""
+    _finished.setdefault(job_path, threading.Event())
+    _put("intake", bundle, job_path.stem, job_path)
+
+
 def wait(job_path: Path, timeout: float) -> None:
-    """Block until a queued changeset's or revert's receipt is final, or ``timeout`` seconds pass."""
+    """Block until a queued changeset's, revert's or intake's receipt is final, or ``timeout`` seconds pass."""
     event = _finished.get(job_path)
     if event is not None:
         event.wait(timeout)
@@ -409,6 +416,8 @@ def _run() -> None:
                         _run_changeset(bundle, job_path)
                     elif kind == "revert":
                         revert.run(bundle, job_path)
+                    elif kind == "intake":
+                        inbox.commit(bundle, job_path)
                     else:
                         curate.run(bundle, subject, job_path)
                 finally:
@@ -579,13 +588,19 @@ _NAMED_SHA = re.compile(r"-([0-9a-f]{64})\.")
 def sweep_once(bundles: list[Path]) -> int:
     """Pick up sources sitting in sources/inbox/ that no job has seen yet (e.g. dropped
     out-of-band) and queue the curatable ones, or under inbox intake register each as a member
-    work item. Deduped by content sha. Returns #queued (#registered).
+    work item and commit it. Deduped by content sha. Returns #queued (#registered).
 
     An upload's stored name carries its sha (``ingest.write_source``): once a job knows it, the
-    file is not read again, so the uploads inbox intake keeps never slow the sweep down."""
+    file is not read again, so the uploads inbox intake keeps never slow the sweep down. The
+    sweep also hands the worker every intake commit still to make, even after inbox intake is
+    rolled back: one queued and not already waiting, or failed and due for its retry
+    (``inbox.pending_intakes``)."""
     with serialized_lifecycle():
         queued = 0
         for b in bundles:
+            for pending in inbox.pending_intakes(b):
+                if pending not in _finished:
+                    submit_intake(b, pending)
             drops = b / "sources" / "inbox"
             if not drops.is_dir():
                 continue
@@ -603,9 +618,11 @@ def sweep_once(bundles: list[Path]) -> int:
                 source_rel = f.relative_to(b).as_posix()
                 if inbox_intake(b):
                     try:
-                        inbox.register_drop(b, source_rel, data)
+                        job = inbox.register_drop(b, source_rel, data)
                     except M.MaintError:  # one bad drop never holds up the others
                         continue
+                    if job.get("intake"):
+                        submit_intake(b, I.job_path(b, job["intake"]))
                     known.add(sha)
                     queued += 1
                     continue
@@ -683,6 +700,8 @@ def recover(bundles: list[Path]) -> bool:
                     )
                     if kind == "revert":
                         job["reverted"] = []  # its commit never reached the remote
+                elif kind == "intake":
+                    inbox.settle(b, job)  # the remote holds its commit: record it on the item
                 job["finished"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 _save_job(jf, job)
                 curate._cleanup_recovery_source(b, job)

@@ -962,9 +962,12 @@ def main(argv=None) -> int:
                 job.get("curation") or job.get("status")
             )
             waiting = f in links and "text" not in payload and job.get("status") == "ready"
+            intake = job.get("intake") if isinstance(job.get("intake"), dict) else {}  # inbox intake's Git commit
             detail = "; ".join(str(part) for part in (note, job.get("reason"), waiting and
-                                                      "the maintainer reads it as the wiki's Feishu app") if part)
+                                                      "the maintainer reads it as the wiki's Feishu app",
+                                                      intake.get("detail")) if part)
             submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state,
+                              **({"commit": intake["commit"]} if intake.get("commit") else {}),
                               **({"detail": detail} if detail else {})})
         if a.json:
             print(json.dumps({"submissions": submitted}, ensure_ascii=False, indent=2))
@@ -972,7 +975,7 @@ def main(argv=None) -> int:
         emit(
             _count_lines(len(submitted), len(submitted)),
             table_lines("submissions", submitted, ("input", "source", "job", "state")
-                        + (("detail",) if any("detail" in row for row in submitted) else ())),
+                        + tuple(key for key in ("commit", "detail") if any(key in row for row in submitted))),
             table_lines("help", ({"command": "ai-wiki jobs <job-id>", "purpose": "check curation status"},),
                         ("command", "purpose")),
         )

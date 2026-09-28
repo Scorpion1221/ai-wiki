@@ -1,15 +1,16 @@
 """Inbox intake (design §6, §10.1): with AIWIKI_INTAKE=inbox a member's upload, pasted text or
 link and an out-of-band inbox drop become maintainer work items of a committing bundle, never
-Codex curation. The job follows its item to the changeset that curated it, the writer never
-fetches a URL (the maintainer reads a Feishu link as the wiki's app), a quota bounds what one
-principal queues, and POST /admin/inbox/requeue hands unfinished items back to Codex.
-AIWIKI_INTAKE=curate is today's path.
+Codex curation, and their redacted copies are committed and pushed at once. The job follows its
+item to the changeset that curated it, the writer never fetches a URL (the maintainer reads a
+Feishu link as the wiki's app), a quota bounds what one principal queues, and POST
+/admin/inbox/requeue hands unfinished items back to Codex. AIWIKI_INTAKE=curate is today's path.
 """
 from __future__ import annotations
 
 import base64
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -23,7 +24,7 @@ from gate_fixture import EVIDENCE_ID, METRIC, Gate, cited, git
 
 from aiwiki.cli import main as cli
 from aiwiki.cli import workspace
-from aiwiki.runtime import changeset
+from aiwiki.runtime import audit, changeset, curate
 from aiwiki.service import inbox, worker
 from aiwiki.service import ingest as I
 from aiwiki.service import maint_state as M
@@ -144,6 +145,8 @@ def test_a_member_item_goes_through_the_maintainer_loop_to_its_changeset(gate, t
                    "origin": {"kind": "git-file"}}]}]})
     assert collected.status_code == 200, collected.text
     receipt = ingest(gate, text=f"# Funnel status\n\nThe funnel moved; key {FAKE_KEY}.\n", title="Funnel").json()
+    intake = receipt["intake"]
+    assert intake["status"] == "committed" and intake["commit"] == gate.remote_head(), receipt
     gate.connect("curator")
 
     code, begun = run(capsys, "maint", "begin", "--run", "WAIO-9", "--only", "repos", "--config", config,
@@ -167,6 +170,12 @@ def test_a_member_item_goes_through_the_maintainer_loop_to_its_changeset(gate, t
     assert followed["changeset"] == verdict["id"] and followed["commit"] == gate.remote_head()
     packet = next((bundle(gate) / "sources").glob(f"{EVIDENCE_ID}-*"))
     assert FAKE_KEY not in packet.read_text(encoding="utf-8")
+    # The changeset cites the committed item: its packet is the same Git blob as the member's
+    # copy, which stays where the intake committed it.
+    assert followed["intake"] == intake
+    git(gate.remote, "merge-base", "--is-ancestor", intake["commit"], "main")
+    assert git(gate.remote, "rev-parse", f"main:{intake['path']}") == git(
+        gate.remote, "rev-parse", f"main:sources/{packet.name}")
 
 
 def run(capsys, *args) -> tuple[int, dict]:
@@ -208,13 +217,14 @@ def test_the_writer_never_fetches_a_link(gate, monkeypatch) -> None:
     assert M.get_item(bundle(gate), pdf["item"])["files"][0]["name"] == "source.pdf"
 
 
-def test_the_sweep_registers_inbox_drops_as_member_items(gate) -> None:
+def test_the_sweep_registers_inbox_drops_as_member_items_and_commits_them(gate) -> None:
     drop = bundle(gate) / "sources" / "inbox" / "handover.md.source"
     drop.parent.mkdir(parents=True, exist_ok=True)
-    drop.write_bytes(b"# Handover\n\nThe funnel owner changed.\n")
+    drop.write_bytes(f"# Handover\n\nThe funnel owner changed; key {FAKE_KEY}.\n".encode())
 
     assert worker.sweep_once([bundle(gate)]) == 1
-    assert worker.sweep_once([bundle(gate)]) == 0
+    worker._q.join()
+    assert worker.sweep_once([bundle(gate)]) == 0  # nor is its committed copy a drop
     [item] = M.list_items(bundle(gate))["items"]
     assert item["origin"]["via"] == "drop" and item["origin"]["submitter"] is None and item["status"] == "ready"
     assert item["files"][0]["name"] == "source.md" and item["brief"] == "inbox drop: handover.md"
@@ -222,6 +232,161 @@ def test_the_sweep_registers_inbox_drops_as_member_items(gate) -> None:
     assert stored["item"] == item["id"] and stored["source"] == "sources/inbox/handover.md.source"
     worker._q.join()
     assert gate.curated == []
+    # The drop is committed like a submission, redacted; the drop itself stays out of Git.
+    committed = item["intake"]
+    assert committed["commit"] == gate.remote_head() and committed["path"].startswith("sources/inbox/intake/handover-")
+    assert git(gate.remote, "log", "-1", "--format=%s", "main") == "intake: handover.md (service)"
+    assert git(gate.remote, "show", f"main:{committed['path']}").startswith("# Handover")
+    assert FAKE_KEY not in git(gate.remote, "log", "-p", "main")
+    assert git(bundle(gate), "status", "--porcelain") == "" and drop.is_file()
+
+
+def test_a_submission_is_committed_redacted_at_once_and_a_resend_commits_nothing(gate, tmp_path,
+                                                                                capsys) -> None:
+    head = gate.remote_head()
+    notes = tmp_path / "notes.md"
+    notes.write_text(f"# Funnel status\n\nThe plugin funnel moved. Deploy key {FAKE_KEY}.\n", encoding="utf-8")
+    gate.connect("member")
+
+    code, out = run(capsys, "ingest", notes)
+
+    [row] = out["submissions"]
+    assert code == 0 and row["state"] == "ready" and row["commit"] == gate.remote_head() != head, row
+    followed = run(capsys, "jobs", row["job"])[1]  # ai-wiki jobs shows the commit
+    intake = followed["intake"]
+    assert intake["status"] == "committed" and intake["commit"] == row["commit"], followed
+    assert intake["path"].startswith("sources/inbox/intake/notes-") and intake["path"].endswith(".md.source")
+    item = M.get_item(bundle(gate), followed["item"])
+    assert {key: item["intake"][key] for key in ("job", "path", "commit")} == {
+        key: intake[key] for key in ("job", "path", "commit")}
+    message = git(gate.remote, "log", "-1", "--format=%B", "main").splitlines()
+    assert message[0] == "intake: notes.md (member:alice)"
+    assert f"Intake: {intake['job']}" in message and f"Work-Items: {item['id']}" in message
+    assert git(gate.remote, "show", "--name-only", "--format=", "main") == intake["path"]
+    # What Git holds is the item's frozen, redacted file; the verbatim upload stays on the writer.
+    assert git(gate.remote, "show", f"main:{intake['path']}") + "\n" == M.read_file(
+        bundle(gate), item["id"], "source.md").decode()
+    assert FAKE_KEY not in git(gate.remote, "log", "-p", "main") and FAKE_KEY in gate.read(followed["source"])
+    assert git(bundle(gate), "status", "--porcelain") == ""
+    # A service commit: the audit backlog never takes it for a push past the writer.
+    assert audit.external_changes(bundle(gate), datetime(2026, 1, 1, tzinfo=UTC))[intake["path"]][2] is False
+
+    # The same content again is the same job: no second commit, now or from the sweep.
+    again = ingest(gate, content_b64=base64.b64encode(notes.read_bytes()).decode(), filename="notes.md").json()
+    assert again["deduplicated"] is True and again["intake"] == intake
+    assert worker.sweep_once([bundle(gate)]) == 0
+    worker._q.join()
+    assert gate.remote_head() == intake["commit"] and M.list_items(bundle(gate))["total"] == 1
+
+
+def test_a_failed_push_leaves_the_item_ready_and_is_retried(gate, monkeypatch) -> None:
+    head = gate.remote_head()
+    real = curate._git
+
+    def rejected(root, *args, **kwargs):
+        if args[:1] == ("push",):
+            return subprocess.CompletedProcess(args, 1, "", "remote: rejected")
+        return real(root, *args, **kwargs)
+
+    monkeypatch.setattr(curate, "_git", rejected)
+    receipt = ingest(gate, text="# Retry cap\n\nWe cap retries at 3.\n", title="Retry cap").json()
+
+    intake = receipt["intake"]
+    assert receipt["status"] == "ready" and intake["status"] == "failed", receipt
+    assert intake["detail"].startswith("not in the wiki's Git yet: intake git commit/push failed: push rejected")
+    assert intake["detail"].endswith("after 4 attempts; the writer retries it") and "commit" not in intake
+    stored = I.read_job(bundle(gate), intake["job"])
+    assert (stored["phase"], stored["failure"]["class"]) == ("rolled_back", "transient")
+    assert gate.remote_head() == gate.head() == head and git(bundle(gate), "status", "--porcelain") == ""
+    assert "intake" not in M.get_item(bundle(gate), receipt["item"])
+
+    monkeypatch.setattr(curate, "_git", real)
+    worker.sweep_once([bundle(gate)])  # not due yet
+    worker._q.join()
+    assert job(gate, receipt["id"])["intake"]["status"] == "failed"
+    now = M._now
+    monkeypatch.setattr(M, "_now", lambda: now() + timedelta(seconds=stored["failure"]["retry_after_s"]))
+    worker.sweep_once([bundle(gate)])
+    worker._q.join()
+
+    followed = job(gate, receipt["id"])
+    assert followed["status"] == "ready" and followed["intake"]["status"] == "committed", followed
+    assert followed["intake"]["commit"] == gate.remote_head() != head
+    assert I.read_job(bundle(gate), intake["job"])["attempt"] == 2
+    assert M.get_item(bundle(gate), receipt["item"])["intake"]["commit"] == gate.remote_head()
+
+
+def test_an_intake_commit_killed_after_its_push_is_recorded_by_recover(gate, monkeypatch) -> None:
+    """A lost acknowledgement or a writer killed after the push: the remote holds the commit."""
+    monkeypatch.setattr(worker, "submit_intake", lambda *_args: None)  # run it by hand below
+    receipt = ingest(gate, text="# Retry cap\n\nWe cap retries at 3.\n", title="Retry cap").json()
+    assert receipt["intake"]["status"] == "queued"
+    path = I.job_path(bundle(gate), receipt["intake"]["job"])
+    real = curate._git
+
+    def killed_after_push(root, *args, **kwargs):
+        result = real(root, *args, **kwargs)
+        if args[:1] == ("push",):
+            raise _Killed
+        return result
+
+    monkeypatch.setattr(curate, "_git", killed_after_push)
+    with pytest.raises(_Killed):
+        inbox.commit(bundle(gate), path)
+    monkeypatch.setattr(curate, "_git", real)
+    assert I.read_job(bundle(gate), path.stem)["status"] == "running"
+
+    assert worker.recover([bundle(gate)]) is True
+
+    stored = I.read_job(bundle(gate), path.stem)
+    assert (stored["status"], stored["recovered"]) == ("done", "remote_contains_commit")
+    assert stored["commit"] == gate.remote_head() == gate.head()
+    assert M.get_item(bundle(gate), receipt["item"])["intake"]["commit"] == stored["commit"]
+    assert job(gate, receipt["id"])["intake"]["status"] == "committed"
+
+
+def test_an_intake_job_commits_one_plain_file_in_the_intake_folder(gate, monkeypatch) -> None:
+    """.okf is not trusted: an intake job whose path leaves the intake folder commits nothing."""
+    monkeypatch.setattr(worker, "submit_intake", lambda *_args: None)
+    receipt = ingest(gate, text="# Note\n\nfact\n").json()
+    path = I.job_path(bundle(gate), receipt["intake"]["job"])
+    head = gate.remote_head()
+    for forged in ("sources/inbox/intake/../../../metrics/x.md.source", "metrics/x.md.source",
+                   "sources/inbox/intake/x.md"):
+        I._write_atomic(path, {**I.read_job(bundle(gate), path.stem), "status": "queued", "path": forged})
+        inbox.commit(bundle(gate), path)
+        stored = I.read_job(bundle(gate), path.stem)
+        assert stored["status"] == "failed" and "not a plain file path" in stored["error"], forged
+    assert gate.remote_head() == gate.head() == head and git(bundle(gate), "status", "--porcelain") == ""
+    assert not (bundle(gate) / "metrics" / "x.md.source").exists()
+
+
+class _Killed(BaseException):
+    """The writer process dies here; nothing below this frame runs."""
+
+
+def test_secrets_never_reach_git(gate, monkeypatch) -> None:
+    """A title with a secret is refused as before; content and a file name are redacted before
+    they are committed, and a copy that still matched a secret rule would not be committed."""
+    head = gate.remote_head()
+    assert ingest(gate, text="# Note\n", title=f"notes {FAKE_KEY}").status_code == 400
+    assert M.list_items(bundle(gate))["total"] == 0 and gate.remote_head() == head
+    named = ingest(gate, text="# Named\n\nfact\n", filename=f"{FAKE_KEY}.md").json()["intake"]
+    assert named["status"] == "committed" and FAKE_KEY not in named["path"]
+    assert FAKE_KEY not in git(gate.remote, "log", "--format=%B", "--name-only", "main")
+    head = gate.remote_head()
+
+    monkeypatch.setattr(inbox.secrets, "redact", lambda text: (text, 0))  # a rule's redaction that misses
+    receipt = ingest(gate, text=f"# Deploy\n\nkey {FAKE_KEY}\n").json()
+
+    intake = receipt["intake"]
+    assert receipt["status"] == "ready" and intake["status"] == "failed", receipt
+    assert "still matches secret rule aws_access_key_id" in intake["detail"] and intake["detail"].endswith(
+        "does not retry it, tell the owner")
+    worker.sweep_once([bundle(gate)])
+    worker._q.join()
+    assert job(gate, receipt["id"])["intake"]["status"] == "failed" and gate.remote_head() == head
+    assert [path.name for path in (bundle(gate) / inbox.INTAKE_DIR).iterdir()] == [Path(named["path"]).name]
 
 
 def test_requeue_hands_waiting_member_items_back_to_codex(gate, tmp_path, monkeypatch, capsys) -> None:
@@ -284,6 +449,7 @@ def test_curate_intake_is_todays_codex_path(tmp_path, monkeypatch) -> None:
     curated = []
     monkeypatch.setattr(worker.curate, "run", lambda _bundle, source, _job_path: curated.append(source))
     monkeypatch.setattr(worker.curate, "AGENT_BIN", sys.executable)
+    head = gate.remote_head()
     try:
         receipt = ingest(gate, text="# Note\n\nfact\n", title="note").json()
         assert receipt["status"] == "queued" and receipt["curation"] == "queued" and "item" not in receipt
@@ -294,6 +460,7 @@ def test_curate_intake_is_todays_codex_path(tmp_path, monkeypatch) -> None:
         worker._q.join()
         assert curated == [receipt["source"], "sources/inbox/drop.md.source"]
         assert M.list_items(bundle(gate))["total"] == 0
+        assert gate.remote_head() == head and "intake" not in receipt  # nothing is committed at intake
         assert gate.client.post("/admin/inbox/requeue", params={"bundle": "kb-a"},
                                 headers=gate.headers("owner")).json() == {"requeued": [], "held": [],
                                                                          "unavailable": []}
@@ -343,6 +510,7 @@ def test_cli_reads_feishu_links_as_the_member_and_submits_the_content(gate, tmp_
     fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{log}'\nprintf '%s' '{json.dumps(document)}'\n",
                     encoding="utf-8")
     fake.chmod(0o755)
+    (tools / "git").symlink_to(shutil.which("git"))  # the writer, in this process, commits each intake
     monkeypatch.setenv("PATH", str(tools))
     gate.connect("member")
 
@@ -389,6 +557,10 @@ def test_member_uploads_keep_binary_evidence_verbatim(gate) -> None:
     assert receipt["status"] == "ready" and item["origin"]["filename"] == "Funnel Chart.PNG"
     assert M.read_file(bundle(gate), item["id"], "source.PNG") == png and item["origin"]["redactions"] == 0
     assert git(bundle(gate), "status", "--porcelain") == ""  # sources/inbox and .okf stay out of Git
+    path = receipt["intake"]["path"]  # but for the copy intake commits, as sent
+    assert path.startswith("sources/inbox/intake/funnel-chart-") and path.endswith(".png")
+    assert subprocess.run(["git", "-C", str(gate.remote), "show", f"main:{path}"], capture_output=True,
+                          check=True).stdout == png
 
 
 def test_the_maintainer_reads_a_member_link_as_the_wiki_app(gate, tmp_path, monkeypatch, capsys) -> None:

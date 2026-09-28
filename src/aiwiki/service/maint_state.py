@@ -12,8 +12,9 @@ Items move ready -> in_progress(run) -> curated | skipped | duplicate | split |
 needs_access | needs_conversion | needs_human, or -> parked, which returns to ready when the
 next maintainer run takes the lease. Attempt caps and non-retryable failures move an item to
 needs_human; that only raises an alert and never blocks any other item. A member submission
-(``origin.kind`` member, see ``service.inbox``) is queued without a lease, and an unfinished
-one leaves the queue as requeued when an admin hands it back to the Codex path.
+(``origin.kind`` member, see ``service.inbox``) is queued without a lease and records the
+commit of its redacted copy (``intake``), and an unfinished one leaves the queue as requeued
+when an admin hands it back to the Codex path.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -720,6 +721,15 @@ def close_curated(bundle: Path, item_ids: list[str], *, job_id: str, commit: str
             _save(bundle, item, now)
             closed.append(item_id)
     return closed
+
+
+def record_intake(bundle: Path, item_id: str, *, job: str, path: str, commit: str | None) -> None:
+    """Record the commit that holds a member submission's redacted copy (``service.inbox``)."""
+    with _LOCK:
+        now = _now()
+        item = _load(bundle, item_id)
+        item["intake"] = {"job": job, "path": path, "commit": commit, "at": _iso(now)}
+        _save(bundle, item, now)
 
 
 def get_item(bundle: Path, item_id: str) -> dict:

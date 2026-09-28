@@ -18,7 +18,8 @@ Config via env (read at import):
                          rollout switches reported by /whoami; unset keeps today's behaviour.
                          AIWIKI_INTAKE=inbox turns /ingest and the inbox sweep of each bundle in
                          AIWIKI_CHANGESETS_COMMIT into member work items for the curating
-                         maintainer instead of Codex curation (other bundles keep Codex). Only
+                         maintainer instead of Codex curation, each committed to Git at once
+                         (other bundles keep Codex). Only
                          bundles listed in AIWIKI_CHANGESETS_COMMIT commit changesets (none while
                          AIWIKI_DISABLE=changesets); every bundle may dry-run. A committed changeset
                          queues its Codex audit unless its bundle is listed in
@@ -138,6 +139,7 @@ API = {"changesets": 1}
 CLIENT_MIN = "0.3.0"
 # A changeset answers synchronously within this, well inside Cloudflare's ~100s origin timeout.
 WAIT_S = float(os.environ.get("AIWIKI_CHANGESET_WAIT_S", "60"))
+INTAKE_WAIT_S = min(WAIT_S, 20.0)  # an ingest answers within the CLI's 30 s request timeout
 # Changeset quotas of a principal (design §2.2): its own `limits` override these defaults.
 QUOTAS = {
     "changesets_per_hour": (timedelta(hours=1), "AIWIKI_CHANGESETS_PER_HOUR", 30),
@@ -498,9 +500,12 @@ _FETCHED = frozenset({"tool", "document_id", "revision_id"})
 
 def _ingest_inbox(body: IngestBody, data: bytes | None, filename: str | None, bundle: str | None,
                   principal: auth.Principal) -> dict:
-    """Inbox intake: store the submission and queue its member work item (service/inbox.py).
+    """Inbox intake: store the submission, queue its member work item and commit its redacted
+    copy to the bundle's Git (service/inbox.py).
 
-    The job answers ``GET /jobs/<id>`` from the item until the maintainer's changeset curates
+    The answer waits up to INTAKE_WAIT_S for that commit and names it under ``intake``; one
+    still running or failed says so, and the writer retries a failed one. The
+    job answers ``GET /jobs/<id>`` from the item until the maintainer's changeset curates
     it. The writer never fetches ``url``: the maintainer reads a Feishu/Lark link sent alone,
     any other is needs_access. New submissions count against the principal's
     ``submissions_per_day`` for the bundle (429 past it), so a leaked member token can only
@@ -535,6 +540,13 @@ def _ingest_inbox(body: IngestBody, data: bytes | None, filename: str | None, bu
         retry = exc.extra.get("retry_after_s")
         raise HTTPException(status_code=exc.status, detail=str(exc),
                             headers={"Retry-After": str(retry)} if retry else None) from None
+    intake = job.get("intake") or {}
+    if not deduplicated and intake.get("status") == "queued":  # committed at once, answered with its commit
+        pending = I.job_path(path, intake["job"])
+        worker.ensure_started()
+        worker.submit_intake(path, pending)
+        worker.wait(pending, INTAKE_WAIT_S)
+        job = inbox.view(path, I.read_job(path, job["id"]) or job)
     return {**job, "deduplicated": deduplicated}
 
 
