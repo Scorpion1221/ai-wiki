@@ -12,7 +12,10 @@ Config via env (read at import):
   AIWIKI_DISABLE         comma-list of endpoints to 403 (ingest, audit, search, grep, create, delete,
                          maint, admin, changesets, workspace)
   AIWIKI_INTAKE, AIWIKI_AUDIT, AIWIKI_CHANGESETS_COMMIT, AIWIKI_RESTRUCTURE, AIWIKI_CODEX_AUDIT_MANUAL
-                         rollout switches reported by /whoami; unset keeps today's behaviour. Only
+                         rollout switches reported by /whoami; unset keeps today's behaviour.
+                         AIWIKI_INTAKE=inbox turns /ingest and the inbox sweep of each bundle in
+                         AIWIKI_CHANGESETS_COMMIT into member work items for the curating
+                         maintainer instead of Codex curation (other bundles keep Codex). Only
                          bundles listed in AIWIKI_CHANGESETS_COMMIT commit changesets (none while
                          AIWIKI_DISABLE=changesets); every bundle may dry-run. A committed changeset
                          queues its Codex audit unless its bundle is listed in
@@ -20,6 +23,8 @@ Config via env (read at import):
   AIWIKI_CHANGESET_WAIT_S  seconds POST /changesets waits for its receipt before a 202 (default 60)
   AIWIKI_CHANGESETS_PER_HOUR, AIWIKI_CHANGESETS_PER_DAY, AIWIKI_DEPRECATIONS_PER_DAY
                          default changeset quotas of a principal without its own `limits`
+  AIWIKI_SUBMISSIONS_PER_DAY  default member submissions a principal may queue into one bundle a
+                         day under inbox intake (30); its own `limits.submissions_per_day` wins
 
 The writer must receive /whoami, /workspace, /changesets, /maint, /audit/backlog and /admin
 as well as /ingest and /jobs (the Cloudflare route regex of design §2.1); a read mirror
@@ -55,7 +60,7 @@ from ..runtime import audit as audit_runtime
 from ..runtime import changeset, secrets
 from ..runtime import curate as curate_runtime
 from ..runtime.failure import failure
-from . import auth, worker
+from . import auth, inbox, worker
 from . import bundle as B
 from . import ingest as I
 from . import maint_state as M
@@ -102,7 +107,7 @@ def _bundles(name: str) -> list[str]:
 # misreports one: AIWIKI_AUDIT=external waits for the audit changeset gate (phase 4a) and
 # AIWIKI_RESTRUCTURE=on for the restructure intent (phase 4b).
 MODES = {
-    "intake": _mode("AIWIKI_INTAKE", ("curate",)),  # /ingest has no inbox mode yet
+    "intake": _mode("AIWIKI_INTAKE", ("curate", "inbox")),
     "audit": _mode("AIWIKI_AUDIT", ("codex",)),
     # The bundles that commit, as the worker applies it: none while the route is disabled.
     "changesets_commit": [] if "changesets" in DISABLED else _bundles("AIWIKI_CHANGESETS_COMMIT"),
@@ -402,6 +407,8 @@ class IngestBody(BaseModel):
     content_b64: str | None = None     # any file (binary-safe), base64-encoded
     filename: str | None = None        # original name (drives the stored extension)
     title: str | None = None
+    url: str | None = None             # inbox intake: where the content came from, or a link alone
+    fetched: dict | None = None        # inbox intake: how the member's CLI read it (lark-cli)
 
 
 @app.post("/ingest")
@@ -414,9 +421,12 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
     single serial worker processes one at a time, so concurrent ingests never race on the
     bundle/git. Other types are stored but flagged `needs-conversion`. Disabled with
     AIWIKI_CURATE=off; the whole endpoint is gated by AIWIKI_DISABLE=ingest.
+    Under inbox intake (``worker.inbox_intake``) it queues a member work item instead
+    (``_ingest_inbox``).
     """
     principal = _auth(authorization, "submit")
     _enabled("ingest")
+    inbox_on = worker.inbox_intake(_resolve(bundle, principal)[1])
     if body.content_b64 is not None:
         try:
             data = base64.b64decode(body.content_b64, validate=True)
@@ -425,14 +435,18 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
         filename = body.filename or "upload"
     elif body.text is not None:
         data, filename = body.text.encode("utf-8"), body.filename
+    elif inbox_on and body.url is not None:
+        data, filename = None, None  # a link alone: recorded, never fetched
     else:
         raise HTTPException(status_code=400, detail="provide `text` or `content_b64`")
+    if inbox_on:
+        return _ingest_inbox(body, data, filename, bundle, principal)
     try:
         with worker.serialized_lifecycle():
             _name, BUNDLE = _resolve(bundle, principal)  # re-resolve inside the delete exclusion window
             job, deduplicated = I.receive_source(BUNDLE, data, filename, body.title)
-            if deduplicated:
-                return {**job, "deduplicated": True}
+            if deduplicated:  # possibly a member item's job, from before a rollback to Codex
+                return {**inbox.view(BUNDLE, job), "deduplicated": True}
             source_rel = job["source"]
             curatable = job["status"] == "queued"
             if curatable and CURATE_ON:
@@ -448,6 +462,48 @@ def ingest(body: IngestBody, bundle: str | None = None, authorization: str | Non
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     return {**job, "deduplicated": False}
+
+
+_URL = re.compile(r"https?://[^\s\x00-\x1f\x7f]{1,2040}")
+_FETCHED = frozenset({"tool", "document_id", "revision_id"})
+
+
+def _ingest_inbox(body: IngestBody, data: bytes | None, filename: str | None, bundle: str | None,
+                  principal: auth.Principal) -> dict:
+    """Inbox intake: store the submission and queue its member work item (service/inbox.py).
+
+    The job answers ``GET /jobs/<id>`` from the item until the maintainer's changeset curates
+    it. The writer never fetches ``url``: the maintainer reads a Feishu/Lark link sent alone,
+    any other is needs_access. New submissions count against the principal's
+    ``submissions_per_day`` for the bundle (429 past it), so a leaked member token can only
+    queue that much.
+    """
+    if not CURATE_ON:
+        raise HTTPException(status_code=403, detail="inbox intake requires the writer (AIWIKI_CURATE enabled)")
+    if body.url is not None and (not _URL.fullmatch(body.url) or secrets.scan(body.url)):
+        raise HTTPException(status_code=400, detail="url must be an http(s) link of at most 2048 characters, "
+                                                    "without credentials")
+    if body.title is not None and (len(body.title) > 500 or secrets.scan(body.title)):
+        raise HTTPException(status_code=400, detail="title must be at most 500 characters, without secrets")
+    fetched = body.fetched
+    if fetched is not None and (not fetched or set(fetched) - _FETCHED or not all(
+            isinstance(value, str | int) and not isinstance(value, bool) and len(str(value)) <= 200
+            for value in fetched.values())):
+        raise HTTPException(status_code=400, detail="fetched takes tool, document_id and revision_id, each a short "
+                                                    "string or number")
+    quota = principal.limits.get("submissions_per_day", int(os.environ.get("AIWIKI_SUBMISSIONS_PER_DAY", "30")))
+    try:
+        with worker.serialized_lifecycle():
+            _name, path = _resolve(bundle, principal)
+            job, deduplicated = inbox.receive(path, data, filename=filename, title=body.title, url=body.url,
+                                              fetched=fetched, submitter=principal.id, quota=quota)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except M.MaintError as exc:
+        retry = exc.extra.get("retry_after_s")
+        raise HTTPException(status_code=exc.status, detail=str(exc),
+                            headers={"Retry-After": str(retry)} if retry else None) from None
+    return {**job, "deduplicated": deduplicated}
 
 
 @app.get("/jobs/pending-audit")
@@ -470,7 +526,7 @@ def get_job(job_id: str, bundle: str | None = None, authorization: str | None = 
     job = I.read_job(BUNDLE, job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"no such job: {job_id}")
-    return job
+    return inbox.view(BUNDLE, job)  # an inbox job answers from its work item
 
 
 @app.post("/jobs/{ingest_job_id}/audit")
@@ -556,6 +612,7 @@ def _actor_of(principal_id: str, bundle: str) -> str | None:
 
 # The worker admits a queued changeset again as it runs (design §2.11 rollback, §8.5 revocation).
 worker.COMMIT_BUNDLES = frozenset(MODES["changesets_commit"])
+worker.INTAKE = MODES["intake"]
 # Phase 2 (design §9): the shadow bundle's Codex audits wait for the admin cron's request, so
 # they neither queue by themselves nor jump ahead of production's Codex work.
 worker.AUDIT_BUNDLES = worker.COMMIT_BUNDLES - set(MODES["codex_audit_manual"])
@@ -1024,6 +1081,37 @@ def admin_item_resolve(item_id: str, body: dict, bundle: str | None = None,
                        authorization: str | None = Header(default=None)):
     with _maint(bundle, authorization, "admin", area="admin", write=True) as (path, principal):
         return M.admin_resolve(path, item_id, body, principal=principal)
+
+
+@app.post("/admin/inbox/requeue")
+def admin_inbox_requeue(body: dict | None = None, bundle: str | None = None,
+                        authorization: str | None = Header(default=None)):
+    """Hand unfinished member items back to Codex curation: the rollback of
+    AIWIKI_INTAKE=inbox, valid only while the writer still has the Codex path (else 409).
+
+    Body ``{items?: [<item id>], reason?}``, every unfinished member item by default. Each
+    becomes ``requeued`` and its job a queued Codex ingest. Answers ``{requeued, held,
+    unavailable}``: an item the live maintainer run holds stays with it, and one Codex cannot
+    take says why.
+    """
+    with _maint(bundle, authorization, "admin", area="admin", write=True) as (path, admin):
+        if shutil.which(curate_runtime.AGENT_BIN) is None:
+            raise HTTPException(status_code=409, detail="the Codex path is gone from this writer "
+                                                        f"({curate_runtime.AGENT_BIN} not found): member items "
+                                                        "stay with the maintainer")
+        items, reason = (body or {}).get("items"), (body or {}).get("reason")
+        if items is not None and not (isinstance(items, list) and len(items) <= 1000
+                                      and all(isinstance(item, str) for item in items)):
+            raise HTTPException(status_code=400, detail="items must be a list of work item ids")
+        if reason is not None and not (isinstance(reason, str) and len(reason) <= 500 and not secrets.scan(reason)):
+            raise HTTPException(status_code=400, detail="reason must be a string of at most 500 characters, "
+                                                        "without secrets")
+        result, queued = inbox.requeue(path, principal=admin, reason=reason, only=items)
+        if queued:
+            worker.ensure_started()
+        for source, job_path in queued:
+            worker.submit(path, source, job_path)
+    return result
 
 
 # --- incident response: what a principal changed, and reverting it (design §8.5) --------------

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import urllib.parse
 from collections.abc import Callable, Iterable
 from pathlib import PurePosixPath
 from typing import Any, TypeVar
@@ -65,6 +66,14 @@ BINARY_SUFFIXES = frozenset({
     ".otf", ".eot", ".mp3", ".mp4", ".mov", ".wav", ".webm", ".exe", ".dll", ".so", ".dylib", ".bin", ".wasm",
     ".pyc", ".class",
 })
+
+
+_LARK_HOST = re.compile(r"(?:^|\.)(?:feishu\.cn|larksuite\.com|larkoffice\.com)$")
+
+
+def lark_link(url: str) -> bool:
+    """A Feishu/Lark document link: lark-cli reads it, as the member or as the wiki's app."""
+    return bool(_LARK_HOST.search(urllib.parse.urlsplit(url).hostname or ""))
 
 
 def noise(path: str) -> str | None:

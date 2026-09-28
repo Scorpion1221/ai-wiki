@@ -239,6 +239,7 @@ ROUTES = [
     ("GET", "/maint/status", {"bundle": "kb-a"}, None, {"read"}),
     ("POST", "/admin/items/it_000000000000/retry", {"bundle": "kb-a"}, {}, {"admin"}),
     ("POST", "/admin/items/it_000000000000/resolve", {"bundle": "kb-a"}, {}, {"admin"}),
+    ("POST", "/admin/inbox/requeue", {"bundle": "kb-a"}, {}, {"admin"}),
 ]
 
 
@@ -422,9 +423,12 @@ def test_whoami_modes_follow_env_and_bad_values_refuse_start(monkeypatch, root: 
     assert modes["changesets_commit"] == [] and appmod.worker.COMMIT_BUNDLES == frozenset()
     with pytest.raises(RuntimeError, match="AIWIKI_INTAKE"):
         _app(monkeypatch, root, principals=principals, AIWIKI_INTAKE="codex")
-    # Not honoured yet (the inbox, the audit gate, the restructure intent), so a premature flip
-    # refuses to start rather than stop /ingest curation or every audit while /whoami says fine.
-    for name, value in (("AIWIKI_INTAKE", "inbox"), ("AIWIKI_AUDIT", "external"), ("AIWIKI_RESTRUCTURE", "on")):
+    appmod = _app(monkeypatch, root, principals=principals, AIWIKI_INTAKE="inbox")
+    assert TestClient(appmod.app).get("/whoami", headers=_bearer(TOKENS["owner"])).json()["modes"]["intake"] == "inbox"
+    assert appmod.worker.INTAKE == "inbox"
+    # Not honoured yet (the audit gate, the restructure intent), so a premature flip refuses
+    # to start rather than stop every audit while /whoami says fine.
+    for name, value in (("AIWIKI_AUDIT", "external"), ("AIWIKI_RESTRUCTURE", "on")):
         with pytest.raises(RuntimeError, match=f"{name} must be one of .*; got '{value}'"):
             _app(monkeypatch, root, principals=principals, **{name: value})
 

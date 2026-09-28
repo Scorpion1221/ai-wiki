@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -324,6 +325,31 @@ def _count_lines(shown: int, total: int | None = None) -> list[str]:
     return object_lines("count", values)
 
 
+def _lark_fetch(url: str, identity: str | None = None) -> tuple[dict | None, str | None]:
+    """A Feishu/Lark doc read here with lark-cli: ``(payload, None)``, else ``(None, why)``.
+
+    The writer never fetches URLs: a member reads a doc as themself, the maintainer's host as
+    the wiki's read-only app (``identity`` bot)."""
+    tool = shutil.which("lark-cli")
+    if tool is None:
+        return None, "lark-cli is not installed here"
+    try:
+        done = subprocess.run([tool, "docs", "+fetch", "--doc", url, "--doc-format", "markdown",
+                               *(("--as", identity) if identity else ())],
+                              capture_output=True, text=True, timeout=120, check=False)
+        document = json.loads(done.stdout)["data"]["document"]
+        content = document["content"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None, "lark-cli could not read it"
+    if done.returncode or not isinstance(content, str) or not content.strip():
+        return None, f"lark-cli could not read it (exit {done.returncode})"
+    heading = next((line[2:].strip() for line in content.splitlines() if line.startswith("# ")), None)
+    fetched = {"tool": "lark-cli", **({"as": identity} if identity else {}),
+               **{key: document[key] for key in ("document_id", "revision_id")
+                  if isinstance(document.get(key), str | int)}}
+    return {"text": content, "title": heading, "url": url, "fetched": fetched}, None
+
+
 def _home() -> int:
     identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION})
     print("\n".join(identity))
@@ -508,9 +534,11 @@ def main(argv=None) -> int:
             "ai-wiki ingest notes.md",
             "ai-wiki ingest report.pdf chart.png",
             "cat notes.md | ai-wiki ingest - --title \"Research notes\"",
+            "ai-wiki ingest https://example.feishu.cn/docx/<token>",
         ), **common,
     )
-    p_ing.add_argument("files", nargs="*", help="markdown file(s); omit or '-' to read stdin")
+    p_ing.add_argument("files", nargs="*", help="file(s) or http(s) link(s); omit or '-' to read stdin; lark-cli "
+                                                "reads a Feishu/Lark doc link here, as you")
     p_ing.add_argument("--title", help="title for the source (requires exactly one input)")
     p_ing.add_argument("--json", action="store_true", help="emit submission receipts as JSON")
     p_audit = sub.add_parser(
@@ -885,11 +913,31 @@ def main(argv=None) -> int:
         if a.title and len(files) != 1:
             _fail("--title requires exactly one input",
                   help_command='ai-wiki ingest <file> --title "<title>"', code=2)
+        from aiwiki.maint import planner
+
+        links = {}  # every link is resolved before anything is sent: a refusal sends nothing
+        for link in dict.fromkeys(f for f in files if re.match(r"https?://", f)):
+            payload, note = {"url": link}, None
+            if planner.lark_link(link):  # its content when lark-cli reads it here, as you; else the link alone
+                fetched, note = _lark_fetch(link)
+                payload = fetched or payload
+            payload["title"] = a.title or payload.get("title")
+            links[link] = payload, note
+        bare = next((f for f, (payload, _note) in links.items() if "text" not in payload), None)
+        if bare is not None:
+            modes = _api("/whoami").get("modes") or {}
+            target = bsel or _api("/health").get("bundle")
+            if modes.get("intake") != "inbox" or target not in (modes.get("changesets_commit") or ()):
+                note = links[bare][1]
+                _fail(f"{bare}: {note + '; ' if note else ''}bundle {target} takes content, not links: export it "
+                      "and ingest the file", help_command="ai-wiki ingest <file>", code=2)
         submitted = []
         for f in files:
-            single = len(files) == 1
+            single, note = len(files) == 1, None
             if f == "-":  # pasted text from stdin → stored as raw Markdown evidence
                 payload = {"text": sys.stdin.read(), "title": a.title if single else None}
+            elif f in links:
+                payload, note = links[f]
             else:  # any file: ship raw bytes base64 so binaries (pdf/image/…) survive intact
                 p = Path(f).expanduser()
                 try:
@@ -904,13 +952,18 @@ def main(argv=None) -> int:
             state = f"no-op:{job.get('status')}" if job.get("deduplicated") else (
                 job.get("curation") or job.get("status")
             )
-            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state})
+            waiting = f in links and "text" not in payload and job.get("status") == "ready"
+            detail = "; ".join(str(part) for part in (note, job.get("reason"), waiting and
+                                                      "the maintainer reads it as the wiki's Feishu app") if part)
+            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state,
+                              **({"detail": detail} if detail else {})})
         if a.json:
             print(json.dumps({"submissions": submitted}, ensure_ascii=False, indent=2))
             return 0
         emit(
             _count_lines(len(submitted), len(submitted)),
-            table_lines("submissions", submitted, ("input", "source", "job", "state")),
+            table_lines("submissions", submitted, ("input", "source", "job", "state")
+                        + (("detail",) if any("detail" in row for row in submitted) else ())),
             table_lines("help", ({"command": "ai-wiki jobs <job-id>", "purpose": "check curation status"},),
                         ("command", "purpose")),
         )

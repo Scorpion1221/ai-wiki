@@ -47,7 +47,8 @@ ROLES = {
     "reader": frozenset({"read"}),
 }
 # Quota names (design §2.2, §8.2); a misspelt one is refused, or its quota would never apply.
-LIMITS = frozenset({"changesets_per_hour", "changesets_per_day", "deprecations_per_day", "reviews_per_day"})
+LIMITS = frozenset({"changesets_per_hour", "changesets_per_day", "deprecations_per_day", "reviews_per_day",
+                    "submissions_per_day"})
 LEGACY_ID = "member:legacy-token"
 _ID = re.compile(r"(process|human|member):[A-Za-z0-9][A-Za-z0-9._-]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")

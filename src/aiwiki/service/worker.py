@@ -23,6 +23,7 @@ import itertools
 import json
 import os
 import queue
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -31,6 +32,7 @@ from pathlib import Path
 
 from ..runtime import audit, changeset, curate, revert
 from ..runtime.failure import classify, failure
+from . import inbox
 from . import ingest as I
 from . import maint_state as M
 
@@ -42,6 +44,13 @@ PRIORITY = {"changeset": 0, "revert": 0, "audit": 1, "ingest": 2}  # lower runs 
 # own Codex audit (all but AIWIKI_CODEX_AUDIT_MANUAL).
 COMMIT_BUNDLES: frozenset[str] = frozenset()
 AUDIT_BUNDLES: frozenset[str] = frozenset()
+INTAKE = "curate"  # AIWIKI_INTAKE, installed by the app
+
+
+def inbox_intake(bundle: Path) -> bool:
+    """AIWIKI_INTAKE=inbox applies to a bundle whose changesets commit: only its maintainer
+    curates member work items. Any other bundle's submissions keep the Codex path."""
+    return INTAKE == "inbox" and bundle.name in COMMIT_BUNDLES
 
 
 def actor_of(principal: str, bundle: str) -> str | None:
@@ -531,24 +540,42 @@ def _known_shas(bundle: Path) -> set[str]:
     return shas
 
 
+_NAMED_SHA = re.compile(r"-([0-9a-f]{64})\.")
+
+
 def sweep_once(bundles: list[Path]) -> int:
     """Pick up sources sitting in sources/inbox/ that no job has seen yet (e.g. dropped
-    out-of-band) and queue the curatable ones. Deduped by content sha. Returns #queued."""
+    out-of-band) and queue the curatable ones, or under inbox intake register each as a member
+    work item. Deduped by content sha. Returns #queued (#registered).
+
+    An upload's stored name carries its sha (``ingest.write_source``): once a job knows it, the
+    file is not read again, so the uploads inbox intake keeps never slow the sweep down."""
     with serialized_lifecycle():
         queued = 0
         for b in bundles:
-            inbox = b / "sources" / "inbox"
-            if not inbox.is_dir():
+            drops = b / "sources" / "inbox"
+            if not drops.is_dir():
                 continue
             known = _known_shas(b)
-            for f in sorted(inbox.iterdir()):
+            for f in sorted(drops.iterdir()):
                 if not f.is_file() or f.is_symlink() or f.name.startswith("."):
+                    continue
+                named = _NAMED_SHA.search(f.name)
+                if named and named[1] in known:
                     continue
                 data = f.read_bytes()
                 sha = hashlib.sha256(data).hexdigest()
                 if sha in known:
                     continue
                 source_rel = f.relative_to(b).as_posix()
+                if inbox_intake(b):
+                    try:
+                        inbox.register_drop(b, source_rel, data)
+                    except M.MaintError:  # one bad drop never holds up the others
+                        continue
+                    known.add(sha)
+                    queued += 1
+                    continue
                 curatable = I.is_curatable(source_rel, data)
                 job = I.new_job(b, source_rel, sha, curatable, filename=f.name)
                 known.add(sha)
