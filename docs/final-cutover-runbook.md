@@ -918,7 +918,9 @@ alone in `AIWIKI_CHANGESETS_COMMIT` (edit `phase3-final.conf`, then `restart_idl
 
 Rollback: `multica agent restore $SHADOW_AGENT`, and `mv $FS/watchdog-phase2-shadow.conf
 /etc/systemd/system/ai-wiki-watchdog.service.d/phase2-shadow.conf` and `systemctl
-daemon-reload`. The Codex audit timer and its principal come back only with §13 (an external
+daemon-reload`. After step 10 that alone does nothing: `zz-final-audit.conf` sorts later and
+resets `ExecStart`, so append ` --bundle /var/lib/ai-wiki/bundles/solvely-wiki-shadow` to its
+`ExecStart=` line too. The Codex audit timer and its principal come back only with §13 (an external
 audit mode refuses their requests): as the Phase 2 runbook §9 installs them, from the files in
 `$FS`, with a new token (`pp add auditor --id process:ai-wiki-shadow-audit --bundle
 solvely-wiki-shadow`).
@@ -992,7 +994,9 @@ daily run), any item over 72 h or needing a human, a cursor that has not advance
 run lease stuck over 3 h, no commit for 48 h, writer job failures, and the oldest audit
 backlog entry waiting over 72 h or a backlog the writer cannot derive
 (`audit_backlog_stale`, `audit_backlog_error`). A missed or failed daily run of the
-maintainer or the Auditor pages the same morning from the Multica side (10.2).
+maintainer or the Auditor pages the same morning from the Multica side (10.2): the maintainer's
+check runs at 07:00, the Auditor's at 10:30, after its 07:00 run has ended (at 07:05 the check
+would only see the run it just started, and a missed trigger would page a day late).
 
 Rollback: `rm -r /etc/systemd/system/ai-wiki-watchdog.timer.d
 /etc/systemd/system/ai-wiki-watchdog.service.d/zz-final-audit.conf && systemctl daemon-reload
@@ -1025,18 +1029,19 @@ else; stop at the first failure. Never print the webhook. Post one comment with 
 and its complete output verbatim, then set this issue to done with --no-start, or to blocked if
 you stopped.
 
-case "$(date +%z)" in +0800) H=7 ;; +0000) H=23 ;; *) echo "STOP: zone $(date +%z)"; false ;; esac && echo "hour $H"
+case "$(date +%z)" in +0800) H=7; A="30 10" ;; +0000) H=23; A="30 2" ;; *) echo "STOP: zone $(date +%z)"; false ;; esac && echo "hour $H, auditor $A"
 test -n "$AIWIKI_WATCHDOG_FEISHU_WEBHOOK" && echo webhook-present
 PY="$(uv tool dir)/ai-wiki/bin/python"; M="$(command -v multica)"; W="$HOME/.local/bin/ai-wiki-watchdog"; E="$HOME/.config/ai-wiki-watchdog/env"; S="$HOME/.local/state/ai-wiki-watchdog"; echo "$PY $M"
 install -d -m 0700 "$HOME/.config/ai-wiki-watchdog" "$S"
 ( umask 077; printf 'AIWIKI_WATCHDOG_FEISHU_WEBHOOK=%s\nAIWIKI_WATCHDOG_FEISHU_SECRET=%s\n' "$AIWIKI_WATCHDOG_FEISHU_WEBHOOK" "$AIWIKI_WATCHDOG_FEISHU_SECRET" > "$E" )
 curl -fsSL "https://raw.githubusercontent.com/Scorpion1221/ai-wiki/<MERGE_SHA>/scripts/maintenance_watchdog.py" -o "$W" && chmod 0755 "$W"
 env -u AIWIKI_WATCHDOG_FEISHU_WEBHOOK -u AIWIKI_WATCHDOG_FEISHU_SECRET "$PY" "$W" --multica --no-checkpoint --multica-bin "$M" --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | head -c 1500
-( crontab -l 2>/dev/null | grep -v ai-wiki-watchdog; echo "0 $H * * * set -a; . $E; set +a; $PY $W --multica --no-checkpoint --multica-bin $M --state-file $S/maintainer.json --label multica-maintainer >> $S/cron.log 2>&1"; echo "5 $H * * * set -a; . $E; set +a; $PY $W --multica --no-checkpoint --multica-bin $M --autopilot-id <AUDITOR_AP> --state-file $S/auditor.json --label multica-auditor >> $S/cron.log 2>&1" ) | crontab -
+( crontab -l 2>/dev/null | grep -v ai-wiki-watchdog; echo "0 $H * * * set -a; . $E; set +a; $PY $W --multica --no-checkpoint --multica-bin $M --state-file $S/maintainer.json --label multica-maintainer >> $S/cron.log 2>&1"; echo "$A * * * set -a; . $E; set +a; $PY $W --multica --no-checkpoint --multica-bin $M --autopilot-id <AUDITOR_AP> --state-file $S/auditor.json --label multica-auditor >> $S/cron.log 2>&1" ) | crontab -
 crontab -l | grep -c ai-wiki-watchdog
 ```
 
-Verify from the comment: `hour 7` (or `hour 23` on a UTC host: 07:00 CST), `webhook-present`,
+Verify from the comment: `hour 7, auditor 30 10` (or `hour 23, auditor 30 2` on a UTC host:
+07:00 and 10:30 CST), `webhook-present`,
 the replay's `"status"` is `ok` or names only real alerts with `"checkpoint": null`, and the
 crontab count is `2`. Then take the webhook back out of the agent's env (laptop):
 
@@ -1107,7 +1112,9 @@ The deploy script lives outside this repository. Apply before step 0's deploy:
      || { echo 'modes changed by the deploy'; exit 1; }
    ```
 
-4. Mirror: unchanged (it keeps the live container's mounts, Phase 2 runbook §6).
+4. Mirror: it keeps the live container's mounts (Phase 2 runbook §6), and its `AIWIKI_DISABLE`
+   gains `audit` next to the gate routes, so it refuses `POST /jobs/<id>/audit` itself instead of
+   relying on the tunnel and the token's scopes.
 
 Rollback: `deploy_aliyun.sh.pre-final`.
 
@@ -1172,7 +1179,11 @@ for f in /home/admin/.config/secrets/codex-gateway.env /home/admin/.local/bin/co
 The gateway token in `/etc/environment` was world-readable (and a review's transcript saw it;
 operator step 1 rotated it), and the backup holds a live 9Router key and admin's Feishu login.
 The owner revokes them now, each after the inventory of operator step 1 for that exact
-credential, since the files above were only this host's copies:
+credential. The files above were admin's copies; root keeps its own copies of the same 9Router
+key and wrapper (`/root/.config/secrets/codex-gateway.env`, `/root/.local/bin/codex-9router`) and of
+the same Feishu login (`/root/.lark-cli`, `/root/.local/share/lark-cli`), for the owner's own
+interactive use: the owner decides whether they go too, and revoking the key or the
+authorization ends them either way.
 
 - **The 9Router key** of `codex-gateway.env`: its usage in the 9Router console, and the model
   settings of the maintainer's runtime and of the auditor host (the Auditor's Codex Gateway

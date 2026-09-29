@@ -170,7 +170,8 @@ The watchdog runs once a day, at 07:00 CST, after the 04:00 maintainer run, on t
   Auditor's backlog has new work older than 72 h.
 - The maintainer's runtime host, `--multica --no-checkpoint`, once for the maintainer's
   autopilot and once with `--autopilot-id <the Auditor's autopilot>`: failed, overdue and stuck
-  runs and issues. `--no-checkpoint` is required: the curating maintainer writes no v4
+  runs and issues. The Auditor's check runs at 10:30 CST, after its 07:00 run has ended.
+  `--no-checkpoint` is required: the curating maintainer writes no v4
   checkpoint, so the checkpoint checks would alert `checkpoint_missing` forever.
 
 `--ledger` reads the legacy `maintain` ledger, and the checkpoint checks the legacy v4
