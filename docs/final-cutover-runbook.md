@@ -574,7 +574,7 @@ nothing. When its issue is done:
 
 ```bash
 AUDIT_ISSUE=$(multica autopilot runs $AUDITOR_AP --limit 1 --output json | jq -r '.runs[0].issue_id')
-multica issue comment list $AUDIT_ISSUE --output json | jq -r '(.comments // .)[-1].content' | head -20
+multica issue comment list $AUDIT_ISSUE --output json | jq -r '.[-1].content' | head -20
 #   the review end counts with shadow true, then the dry_run rows (path, base, verdict, outcome)
 ```
 
@@ -623,6 +623,7 @@ with every command and its complete output verbatim, then set this issue to done
 
 flock -n "${XDG_STATE_HOME:-$HOME/.local/state}/ai-wiki-maintainer/solvely-wiki/runner.lock" true || echo 'STOP: a legacy maintain is still running'
 SKILL_DIR="${AI_WIKI_MAINTAINER_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/ai-wiki-maintainer}"
+[ -f "$SKILL_DIR/scripts/checkpoint.py" ] || SKILL_DIR="$PWD/.claude/skills/ai-wiki-maintainer"
 [ -f "$SKILL_DIR/scripts/checkpoint.py" ] || SKILL_DIR="$HOME/.agents/skills/ai-wiki-maintainer"
 mkdir -p /tmp/ai-wiki-final
 python3 "$SKILL_DIR/scripts/checkpoint.py" find --autopilot 5c80732b-67a6-4e33-ba22-c620a94e27c1 --seed-issue 01a063b5-62c8-7f34-8901-580e722d9532 --cache-dir /tmp/ai-wiki-final/find-cache --output /tmp/ai-wiki-final/find.json; echo "find exit $?"
@@ -840,7 +841,7 @@ When it is done, on the laptop with the owner token and a throwaway CLI config:
 export AIWIKI_CONFIG=$(mktemp -d)/config.json
 echo '{"endpoint": "https://ai-wiki.yqbqnn.com/"}' > $AIWIKI_CONFIG
 read -rs AIWIKI_TOKEN && export AIWIKI_TOKEN                                            # owner, aiw_h_
-multica issue comment list $CANARY_ISSUE --output json | jq -r '(.comments // .)[-1].content' | head -1
+multica issue comment list $CANARY_ISSUE --output json | jq -r '.[-1].content' | head -1
 #   AI Wiki maintenance <run> (…) status=done: the report opens the comment
 cd $CHECKOUT
 uv run ai-wiki -b solvely-wiki admin changesets --limit 5 --json \
@@ -1269,6 +1270,7 @@ stop at the first failure. Post one comment with every command and its complete 
 verbatim, then set this issue to done with --no-start, or to blocked if you stopped.
 
 SKILL_DIR="${AI_WIKI_MAINTAINER_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/ai-wiki-maintainer}"
+[ -f "$SKILL_DIR/scripts/checkpoint.py" ] || SKILL_DIR="$PWD/.claude/skills/ai-wiki-maintainer"
 [ -f "$SKILL_DIR/scripts/checkpoint.py" ] || SKILL_DIR="$HOME/.agents/skills/ai-wiki-maintainer"
 mkdir -p /tmp/ai-wiki-rollback
 ai-wiki -b solvely-wiki maint status --json
