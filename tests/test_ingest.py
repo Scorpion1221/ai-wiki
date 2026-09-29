@@ -44,6 +44,16 @@ def test_write_source_is_verbatim(bundle: Path) -> None:
     assert rel2.endswith(".md.source") and (bundle / rel2).read_text() == "just text"
 
 
+def test_a_stored_name_never_ends_in_a_dot() -> None:
+    """A suffix with no ASCII letter or digit falls back to .source: Windows cannot check out a
+    name that ends in a dot, and an intake copy is committed under this name."""
+    for filename in ("报告.文档", "x.日本", "a.Ω"):
+        name = I.source_name(b"text", filename)
+        assert name.endswith(".source") and ".." not in name, name
+    assert I.source_name(b"text", "Chart.PNG").endswith(".png")
+    assert I.source_name(b"text", "notes.md").endswith(".md.source")
+
+
 def test_write_source_no_samename_collision(bundle: Path) -> None:
     # two different docs sharing a filename get distinct paths (sha suffix) — no overwrite
     a, _ = I.write_source(bundle, b"alpha content", "report.pdf")

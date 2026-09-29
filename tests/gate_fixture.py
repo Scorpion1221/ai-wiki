@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,8 @@ from aiwiki.runtime import changeset
 from aiwiki.service import auth, worker
 
 LIVE = Path(__file__).parent / "fixtures" / "live_bundle"
+# The seeded bundle is the production snapshot of 2026-09-19, before any audit epoch a test sets.
+BASE_DATE = "2026-09-19T00:00:00Z"
 METRIC = "metrics/plugin-install-first-payment-funnel-2026-09.md"
 AI_STUDY = "experiments/ai-study-deferred-login-ab.md"
 AIO_AB = "experiments/web-landing-page-aio-ab.md"
@@ -74,7 +77,8 @@ def seeded_remote(tmp_path: Path, name: str) -> Path:
     generate_indexes(seed)
     assert scan_sources.main([str(seed), "--commit"]) == 0
     git(seed, "add", "-A")
-    git(seed, "commit", "-qm", "base")
+    subprocess.run(["git", "-C", str(seed), "commit", "-qm", "base"], check=True, capture_output=True,
+                   env={**os.environ, "GIT_AUTHOR_DATE": BASE_DATE, "GIT_COMMITTER_DATE": BASE_DATE})
     git(seed, "push", "-q", "origin", "main")
     return remote
 
@@ -100,7 +104,8 @@ class Gate:
         self.audits: list[str] = []
         monkeypatch.setattr(worker.audit, "run", lambda _bundle, parent, _job_path: self.audits.append(parent))
         monkeypatch.setattr(worker, "DEFER_POLL_S", 0.05)
-        for name in ("COMMIT_BUNDLES", "AUDIT_BUNDLES", "actor_of"):  # the app installs its own; undo that
+        # The app installs its own; undo that.
+        for name in ("COMMIT_BUNDLES", "AUDIT_BUNDLES", "INTAKE", "actor_of", "may_submit", "auditors"):
             monkeypatch.setattr(worker, name, getattr(worker, name))
         monkeypatch.delenv("AIWIKI_GIT", raising=False)
         self.app(AIWIKI_PRINCIPALS=str(principals), **env)
@@ -111,8 +116,9 @@ class Gate:
                     "AIWIKI_CHANGESETS_COMMIT": "kb-a", "AIWIKI_CHANGESET_WAIT_S": "30", **env}
         self.monkeypatch.delenv("AIWIKI_BUNDLE", raising=False)
         self.monkeypatch.delenv("AIWIKI_DEFAULT_BUNDLE", raising=False)
-        for name in ("AIWIKI_AUDIT", "AIWIKI_INTAKE", "AIWIKI_RESTRUCTURE", "AIWIKI_CODEX_AUDIT_MANUAL",
-                     "AIWIKI_CHANGESETS_PER_HOUR", "AIWIKI_CHANGESETS_PER_DAY", "AIWIKI_DEPRECATIONS_PER_DAY"):
+        for name in ("AIWIKI_AUDIT", "AIWIKI_INTAKE", "AIWIKI_RESTRUCTURE", "AIWIKI_CODEX_AUDIT_MANUAL", "AIWIKI_LLM",
+                     "AIWIKI_CHANGESETS_PER_HOUR", "AIWIKI_CHANGESETS_PER_DAY", "AIWIKI_DEPRECATIONS_PER_DAY",
+                     "AIWIKI_REVIEWS_PER_DAY", "AIWIKI_BACKLOG_EPOCH", "AIWIKI_AUDIT_SEED_PER_DAY"):
             self.monkeypatch.delenv(name, raising=False)
         for name, value in settings.items():
             self.monkeypatch.setenv(name, value)

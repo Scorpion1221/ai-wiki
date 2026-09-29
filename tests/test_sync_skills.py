@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "sync_skills.py"
 
@@ -67,19 +69,19 @@ def test_sync_skills_check_covers_every_canonical_skill(tmp_path: Path) -> None:
 
     assert checked.returncode == 1
     assert [line.split(":")[0] for line in checked.stdout.splitlines()] == [
-        "DRIFT ai-wiki", "DRIFT ai-wiki-maintainer", "DRIFT ai-wiki-curating-maintainer",
+        "DRIFT ai-wiki", "DRIFT ai-wiki-maintainer", "DRIFT ai-wiki-curating-maintainer", "DRIFT ai-wiki-auditor",
         "DRIFT okf-knowledge-curator"]
 
 
-def test_sync_skills_apply_installs_the_curating_maintainer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("skill", ["ai-wiki-curating-maintainer", "ai-wiki-auditor"])
+def test_sync_skills_apply_installs_the_changeset_agents(tmp_path: Path, skill: str) -> None:
     target = tmp_path / "skills"
 
-    applied = run("--apply", "--dest", str(target), "ai-wiki-curating-maintainer")
+    applied = run("--apply", "--dest", str(target), skill)
 
     assert applied.returncode == 0, applied.stdout + applied.stderr
-    assert applied.stdout == f"OK ai-wiki-curating-maintainer: {target / 'ai-wiki-curating-maintainer'}\n"
-    installed = target / "ai-wiki-curating-maintainer" / "SKILL.md"
-    assert installed.read_bytes() == (ROOT / "skills/ai-wiki-curating-maintainer/SKILL.md").read_bytes()
+    assert applied.stdout == f"OK {skill}: {target / skill}\n"
+    assert (target / skill / "SKILL.md").read_bytes() == (ROOT / "skills" / skill / "SKILL.md").read_bytes()
 
 
 def test_sync_skills_apply_and_check_preserves_platform_metadata(tmp_path: Path) -> None:

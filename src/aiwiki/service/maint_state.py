@@ -11,7 +11,10 @@ record is written with fsync + atomic rename, so a crash leaves the old or the n
 Items move ready -> in_progress(run) -> curated | skipped | duplicate | split |
 needs_access | needs_conversion | needs_human, or -> parked, which returns to ready when the
 next maintainer run takes the lease. Attempt caps and non-retryable failures move an item to
-needs_human; that only raises an alert and never blocks any other item.
+needs_human; that only raises an alert and never blocks any other item. A member submission
+(``origin.kind`` member, see ``service.inbox``) is queued without a lease and records the
+commit of its redacted copy (``intake``), and an unfinished one leaves the queue as requeued
+when an admin hands it back to the Codex path.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -50,7 +53,7 @@ MAX_STARTED = 8
 AGING_PER_DAY = 5
 DEFAULT_PRIORITY = 40
 TERMINAL = frozenset({"curated", "skipped", "duplicate", "split", "needs_access", "needs_conversion",
-                      "needs_human"})
+                      "needs_human", "requeued"})
 SKIP_REASONS = frozenset({"no_durable_knowledge", "insufficient_evidence", "out_of_scope"})
 AGENT_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conversion", "parked", "split"})
 MERGEABLE = frozenset({"ready", "parked"})  # not yet claimed again: newer evidence folds in
@@ -58,6 +61,8 @@ ADMIN_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conve
 REOPENABLE = frozenset({"needs_human", "skipped", "duplicate", "needs_access", "needs_conversion", "parked"})
 MAX_FILES = 64
 MAX_CHILDREN = 20
+MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
+REQUEUEABLE = frozenset({"ready", "parked", "needs_human"})  # member items the inbox rollback hands to Codex
 _ID = re.compile(r"it_[0-9a-f]{12}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -500,6 +505,75 @@ def enqueue(bundle: Path, items: object, *, principal: str, run: str | None = No
                                   for r in ("created", "merged", "duplicate")}}
 
 
+def intake(bundle: Path, planned: dict, *, principal: str, outcome: str | None = None,
+           reason: str | None = None) -> dict:
+    """Queue one planned member submission (``planner.plan`` output, files with their ``data``)
+    without a lease: the service admits it on the member's behalf. ``outcome`` (needs_access or
+    needs_conversion) records it closed at once, when no maintainer could curate it.
+
+    Idempotent by item_key like ``enqueue``: the same submission returns the item it made, now
+    naming this submission's job (``origin.job``). The caller intakes only content no live job
+    holds, so an item naming another job lost it: the job write failed after the item's, or the
+    requeue handed it to a Codex job that ended unfinished. A requeued item reopens as ready.
+    """
+    files = [({key: file[key] for key in ("name", "sha256", "bytes", "origin")}, file["data"])
+             for file in planned["files"]]
+    _check_size([meta for meta, _ in files])
+    spec = {key: planned[key] for key in ("origin", "topic_key", "priority", "brief")}
+    spec["item_key"] = item_key(spec["origin"]["kind"], spec["topic_key"], [meta["sha256"] for meta, _ in files])
+    with _LOCK:
+        now = _now()
+        result = _enqueue(bundle, spec, files, principal, _items(bundle), now)
+        item = _load(bundle, result["id"])
+        job = spec["origin"].get("job")
+        if outcome and result["result"] == "created":
+            _close(item, outcome, reason, by="service", run=None, now=now)
+            _save(bundle, item, now)
+        elif result["result"] == "duplicate" and item["origin"].get("job") != job:
+            item["origin"] = {**item["origin"], "job": job}
+            if item["status"] == "requeued":
+                item.setdefault("reopened", []).append({"by": principal, "at": _iso(now), "from": "requeued",
+                                                        "resolution": item.get("resolution"), "reason": "resubmitted"})
+                item["attempts"].update(started=0, counted=0)
+                item.update(status="ready", resolution=None, current_run=None)
+            _save(bundle, item, now)
+        return item
+
+
+def requeue(bundle: Path, item_ids: list[str], *, principal: str, reason: str | None) -> dict:
+    """Close the unfinished member items among ``item_ids`` as requeued: the Codex path curates
+    them instead (the inbox rollback). ``{requeued: [items], held: [ids], refused: [{item, error}]}``.
+
+    An item the live maintainer run has in progress stays with it (held); one left in progress
+    by a run whose lease is gone is taken back first, as the next run would. One already
+    requeued comes back too, so a retry finishes a requeue that stopped before its job was queued.
+    """
+    result: dict = {"requeued": [], "held": [], "refused": []}
+    with _LOCK:
+        now = _now()
+        lease = _read_json(_lease_path(bundle, "maintainer"))
+        live = lease.get("run") if _active(lease, now) else None
+        for item_id in item_ids:
+            item = _read_item(bundle, item_id)
+            if item is None or item["origin"].get("kind") != MEMBER:
+                result["refused"].append({"item": item_id, "error": "no such member item"})
+                continue
+            if item["status"] == "in_progress":
+                if live is not None and item.get("current_run") == live:
+                    result["held"].append(item_id)
+                    continue
+                _fail_attempt(item, run=item.get("current_run"), cls="interrupted",
+                              detail="its run's lease is gone", now=now)
+            if item["status"] in REQUEUEABLE:
+                _close(item, "requeued", reason, by=principal, run=None, now=now, job=item["origin"].get("job"))
+                _save(bundle, item, now)
+            if item["status"] == "requeued":
+                result["requeued"].append(item)
+            else:
+                result["refused"].append({"item": item_id, "error": f"it is {item['status']}"})
+    return result
+
+
 def _effective_priority(item: dict, now: datetime) -> int:
     """Aging: every whole day an item has waited adds AGING_PER_DAY, so nothing starves."""
     created = _parse(item.get("created_at")) or now
@@ -647,6 +721,15 @@ def close_curated(bundle: Path, item_ids: list[str], *, job_id: str, commit: str
             _save(bundle, item, now)
             closed.append(item_id)
     return closed
+
+
+def record_intake(bundle: Path, item_id: str, *, job: str, path: str, commit: str | None) -> None:
+    """Record the commit that holds a member submission's redacted copy (``service.inbox``)."""
+    with _LOCK:
+        now = _now()
+        item = _load(bundle, item_id)
+        item["intake"] = {"job": job, "path": path, "commit": commit, "at": _iso(now)}
+        _save(bundle, item, now)
 
 
 def get_item(bundle: Path, item_id: str) -> dict:

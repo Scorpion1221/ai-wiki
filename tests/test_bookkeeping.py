@@ -210,6 +210,26 @@ def test_deprecated_status_survives_audit_and_draft_becomes_stable() -> None:
     assert "status: deprecated" in _audit(deprecated, deprecated, verdict="unverified")[0]
 
 
+def test_an_unverified_review_makes_a_current_verification_historical() -> None:
+    """Stage ``review`` only; a Codex audit (stage ``audit``) keeps its behaviour."""
+    before = _live("metrics/plugin-install-first-payment-funnel-2026-09.md")
+    reviewer = "process:ai-wiki-auditor"
+
+    def review(text: str) -> dict:
+        return parse_document(bookkeeping.apply_bookkeeping(text, text, actor=reviewer, trusted_now=NOW,
+                                                            stage="review", verdict="unverified")[0]).frontmatter
+
+    assert _audit(before, before, verdict="unverified")[0] == before
+    assert review(before)["generated"] == {"by": CURATOR, "at": STAMP}
+    assert concept_metadata(review(before))["verification_current"] is False
+    assert review(before)["verified"] == parse_document(before).frontmatter["verified"]
+    unstamped = before.replace("generated:\n  by: process:ai-wiki-curator\n  at: '2026-09-17T21:23:50Z'\n", "")
+    assert "generated" not in parse_document(unstamped).frontmatter
+    assert review(unstamped)["generated"] == {"by": reviewer, "at": NOW.replace(microsecond=0)}  # no author to keep
+    draft = _live(ORPHAN_REL)  # generated after its last verification: nothing current to withdraw
+    assert review(draft)["generated"] == parse_document(draft).frontmatter["generated"]
+
+
 MAINTAINER = "process:ai-wiki-maintainer"
 
 

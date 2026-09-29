@@ -787,7 +787,9 @@ def test_audit_changesets_are_schema_checked_but_not_evaluated_here(bundle: Path
     assert changeset.check_request(audit) == []
     assert changeset.check_request({**audit, "reviews": audit["reviews"] * 6})[0]["code"] == "too_large"
     corrected = {**audit, "reviews": [{**audit["reviews"][0], "verdict": "corrected"}]}
-    assert [error["code"] for error in changeset.check_request(corrected)] == ["input"]
+    assert changeset.check_request(corrected) == []  # A8: the audit gate concludes it unverified
+    malformed = {**audit, "reviews": [{**audit["reviews"][0], "content": 42}]}
+    assert [error["code"] for error in changeset.check_request(malformed)] == ["input"]
     assert _evaluate(bundle, audit)["http_status"] == 400
 
 

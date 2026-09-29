@@ -37,6 +37,15 @@ _BUNDLE_MARKERS = ("SCHEMA.md", "purpose.md", "index.md", ".okf")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")  # bundle names: slug-ish, filesystem-safe
 
 
+def _private(parts: tuple[str, ...]) -> bool:
+    """Never served: Git metadata, the writer's job state (``.okf``) and the verbatim uploads in
+    ``sources/inbox``, which hold what redaction keeps out of Git. The redacted copies inbox
+    intake commits to ``sources/inbox/intake`` are published, so they are served."""
+    lowered = [part.lower() for part in parts]
+    return any(part in PRIVATE_COMPONENTS for part in lowered) or lowered[:1] == [".okf"] or (
+        lowered[:2] == ["sources", "inbox"] and len(lowered) > 2 and lowered[2] != "intake")
+
+
 def _bundle_is_v02(root: Path) -> bool:
     """Read surfaces expose concepts only from an explicitly versioned v0.2 bundle."""
     return bundle_okf_version(root) == OKF_VERSION
@@ -133,7 +142,7 @@ def scaffold(target: Path, name: str) -> None:
     (target / ".okf" / "jobs").mkdir(parents=True, exist_ok=True)
     (target / "sources" / "inbox").mkdir(parents=True, exist_ok=True)
     # .okf/ and sources/inbox/ are operational state — only curated source snapshots
-    # under sources/ belong in Git.
+    # under sources/ belong in Git, and the redacted copies inbox intake commits by name.
     (target / ".gitignore").write_text(
         ".okf/\nsources/inbox/\nviz.html\n.obsidian/\n.gstack/\n.DS_Store\n",
         encoding="utf-8",
@@ -288,7 +297,8 @@ def safe_resolve(root: Path, rel: str) -> Path:
     if has_symlink_component(root, candidate):
         raise ValueError("path traverses a symlink")
     p = candidate.resolve()
-    p.relative_to(root.resolve())
+    if _private(p.relative_to(root.resolve()).parts):
+        raise ValueError("private bundle path")
     return p
 
 
@@ -373,7 +383,8 @@ def list_dir(root: Path, subdir: str | None = None, recursive: bool = False,
     Aligns with shell `ls`: lists every entry (dirs + files), hides dotfiles unless
     show_all (`-a`), recurses with recursive (`-R`). Each entry is annotated by kind —
     dir (concept count + index-meta description), doc (SCHEMA/purpose/log/index),
-    concept (frontmatter), or file (size) — but nothing is filtered out. `ls` is the
+    concept (frontmatter), or file (size) — and only what is never served is left out
+    (``_private``). `ls` is the
     structural view; search/grep/health are the concept-semantic view (those still
     exclude sources/ and .okf/).
     """
@@ -391,7 +402,7 @@ def list_dir(root: Path, subdir: str | None = None, recursive: bool = False,
         return any(part.startswith(".") for part in rel_parts) and not show_all
 
     def visible_safe(path: Path, parts) -> bool:
-        if any(part.lower() in PRIVATE_COMPONENTS for part in parts):
+        if _private(path.relative_to(root).parts):
             return False
         if hidden(parts):
             return False

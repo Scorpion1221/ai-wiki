@@ -29,7 +29,8 @@ _SLUG_RE = re.compile(r"[^\w一-鿿.-]+")
 # flagged needs-conversion rather than guessed (the writer has no PDF converter contract).
 _READABLE_BINARY_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _NEEDS_CONVERSION_EXT = {".pdf"}
-_REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion"}
+# An "inbox" job (AIWIKI_INTAKE=inbox, service/inbox.py) answers from its work item, whatever its state.
+_REUSABLE_JOB_STATUSES = {"queued", "running", "done", "needs-conversion", "inbox"}
 _REUSABLE_AUDIT_STATUSES = {"queued", "running", "done"}
 # A rejected or failed changeset frees its idempotency key, so a fixed resubmission runs (§2.7).
 _REUSABLE_CHANGESET_STATUSES = {"queued", "running", "done"}
@@ -62,35 +63,43 @@ def is_curatable(filename: str, data: bytes) -> bool:
         return False
 
 
+def source_name(data: bytes, filename: str | None = None, title: str | None = None) -> str:
+    """The stored name of a source: ``<slug>-<sha256><ext>``, under its original extension.
+
+    The name carries the content sha, so two concurrent uploads of *different* content can
+    never map to the same path (kills the same-filename TOCTOU race), while an exact re-upload
+    maps to the same path and just rewrites identical bytes (idempotent). Markdown/pasted text
+    use a ``.md.source`` suffix to keep source evidence outside OKF concept discovery.
+    """
+    sha = hashlib.sha256(data).hexdigest()
+    if not filename:  # pasted text, no filename → raw Markdown source (not a concept document)
+        return f"{slugify(title, 'ingest')}-{sha}.md.source"
+    # A dot, then only letters and digits: the name may be committed (service/inbox.py), and a
+    # name ending in a dot is one Windows cannot check out.
+    ext = re.sub(r"[^a-z0-9]", "", Path(filename).suffix.lower())[:15]
+    ext = f".{ext}" if ext else ".source"
+    # Raw Markdown is source evidence, not an OKF concept. Keep the submitted bytes
+    # verbatim but prevent generic ``**/*.md`` tooling from parsing it as a concept.
+    if ext == ".md":
+        ext = ".md.source"
+    return f"{slugify(Path(filename).stem, 'ingest')}-{sha}{ext}"
+
+
 def write_source(bundle: Path, data: bytes, filename: str | None = None,
                  title: str | None = None) -> tuple[str, str]:
     """Snapshot a submitted source (raw bytes) into sources/inbox/. Returns (bundle-path, sha256).
 
-    The file is stored verbatim under its original extension. Markdown/pasted text use a
-    ``.md.source`` suffix to keep source evidence outside OKF concept discovery.
+    The file is stored verbatim, named by ``source_name``.
     """
     if not data or not data.strip():
         raise ValueError("empty source")
     if len(data) > MAX_BYTES:
         raise ValueError(f"source exceeds {MAX_BYTES} bytes")
-    sha = hashlib.sha256(data).hexdigest()
     inbox = bundle / "sources" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
-    # The stored name carries the content sha, so two concurrent uploads of *different*
-    # content can never map to the same path (kills the same-filename TOCTOU race), while
-    # an exact re-upload maps to the same path and just rewrites identical bytes (idempotent).
-    if filename:
-        ext = Path(filename).suffix.lower() or ".source"
-        # Raw Markdown is source evidence, not an OKF concept. Keep the submitted bytes
-        # verbatim but prevent generic ``**/*.md`` tooling from parsing it as a concept.
-        if ext == ".md":
-            ext = ".md.source"
-        name = f"{slugify(Path(filename).stem, 'ingest')}-{sha}{ext}"
-    else:  # pasted text, no filename → raw Markdown source (not a concept document)
-        name = f"{slugify(title, 'ingest')}-{sha}.md.source"
-    dest = inbox / name
+    dest = inbox / source_name(data, filename, title)
     dest.write_bytes(data)
-    return dest.relative_to(bundle).as_posix(), sha
+    return dest.relative_to(bundle).as_posix(), hashlib.sha256(data).hexdigest()
 
 
 def job_path(bundle: Path, job_id: str) -> Path:

@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -134,7 +135,7 @@ def _command_path(args: list[str]) -> str:
             positionals.append(arg)
     if not positionals:
         return "ai-wiki"
-    depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint") \
+    depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint", "review") \
         and len(positionals) > 1 else 1
     return "ai-wiki " + " ".join(positionals[:depth])
 
@@ -324,6 +325,37 @@ def _count_lines(shown: int, total: int | None = None) -> list[str]:
     return object_lines("count", values)
 
 
+LARK_TIMEOUT = "lark-cli timed out"
+
+
+def _lark_fetch(url: str, identity: str | None = None) -> tuple[dict | None, str | None]:
+    """A Feishu/Lark doc read here with lark-cli: ``(payload, None)``, else ``(None, why)``;
+    ``why`` is LARK_TIMEOUT when it took too long, which is no answer about access.
+
+    The writer never fetches URLs: a member reads a doc as themself, the maintainer's host as
+    the wiki's read-only app (``identity`` bot)."""
+    tool = shutil.which("lark-cli")
+    if tool is None:
+        return None, "lark-cli is not installed here"
+    try:
+        done = subprocess.run([tool, "docs", "+fetch", "--doc", url, "--doc-format", "markdown",
+                               *(("--as", identity) if identity else ())],
+                              capture_output=True, text=True, timeout=120, check=False)
+        document = json.loads(done.stdout)["data"]["document"]
+        content = document["content"]
+    except subprocess.TimeoutExpired:
+        return None, LARK_TIMEOUT
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None, "lark-cli could not read it"
+    if done.returncode or not isinstance(content, str) or not content.strip():
+        return None, f"lark-cli could not read it (exit {done.returncode})"
+    heading = next((line[2:].strip() for line in content.splitlines() if line.startswith("# ")), None)
+    fetched = {"tool": "lark-cli", **({"as": identity} if identity else {}),
+               **{key: document[key] for key in ("document_id", "revision_id")
+                  if isinstance(document.get(key), str | int)}}
+    return {"text": content, "title": heading, "url": url, "fetched": fetched}, None
+
+
 def _home() -> int:
     identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION})
     print("\n".join(identity))
@@ -508,9 +540,11 @@ def main(argv=None) -> int:
             "ai-wiki ingest notes.md",
             "ai-wiki ingest report.pdf chart.png",
             "cat notes.md | ai-wiki ingest - --title \"Research notes\"",
+            "ai-wiki ingest https://example.feishu.cn/docx/<token>",
         ), **common,
     )
-    p_ing.add_argument("files", nargs="*", help="markdown file(s); omit or '-' to read stdin")
+    p_ing.add_argument("files", nargs="*", help="file(s) or http(s) link(s); omit or '-' to read stdin; lark-cli "
+                                                "reads a Feishu/Lark doc link here, as you")
     p_ing.add_argument("--title", help="title for the source (requires exactly one input)")
     p_ing.add_argument("--json", action="store_true", help="emit submission receipts as JSON")
     p_audit = sub.add_parser(
@@ -557,10 +591,11 @@ def main(argv=None) -> int:
                             help="maximum wait per stage; timeout preserves job ID (default: 3600)")
     p_maintain.add_argument("--json", action="store_true",
                             help="emit the run summary as JSON (receipts stay in <state-dir>/state.json)")
-    from aiwiki.cli import admin, maint
+    from aiwiki.cli import admin, maint, review
 
     admin.add_parser(sub, common)
     maint.add_parser(sub, common)
+    review.add_parser(sub, common)
 
     # curation through changesets (design §3): a local workspace judged by the gate's own code
     p_doctor = sub.add_parser(
@@ -568,7 +603,7 @@ def main(argv=None) -> int:
         command_path="ai-wiki doctor",
         epilog=_examples("ai-wiki doctor --role curator", "ai-wiki doctor --role auditor --json"), **common,
     )
-    p_doctor.add_argument("--role", required=True, choices=("curator", "auditor", "member"))
+    p_doctor.add_argument("--role", required=True, choices=("curator", "auditor", "reviewer", "member"))
     p_doctor.add_argument("--state-dir", type=Path, default=_STATE_DIR, help=f"default: {_STATE_DIR}")
     p_doctor.add_argument("--skills-dir", type=Path, help="report the role's installed skills by digest")
     p_doctor.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
@@ -681,6 +716,8 @@ def main(argv=None) -> int:
         return admin.command(a, bsel)
     if a.cmd == "maint":
         return maint.command(a, a.bundle)  # a run keeps its bundle; only -b may contradict it
+    if a.cmd == "review":
+        return review.command(a, a.bundle)
 
     if a.cmd == "maintain":
         from aiwiki.cli import maintain
@@ -885,11 +922,31 @@ def main(argv=None) -> int:
         if a.title and len(files) != 1:
             _fail("--title requires exactly one input",
                   help_command='ai-wiki ingest <file> --title "<title>"', code=2)
+        from aiwiki.maint import planner
+
+        links = {}  # every link is resolved before anything is sent: a refusal sends nothing
+        for link in dict.fromkeys(f for f in files if re.match(r"https?://", f)):
+            payload, note = {"url": link}, None
+            if planner.lark_link(link):  # its content when lark-cli reads it here, as you; else the link alone
+                fetched, note = _lark_fetch(link)
+                payload = fetched or payload
+            payload["title"] = a.title or payload.get("title")
+            links[link] = payload, note
+        bare = next((f for f, (payload, _note) in links.items() if "text" not in payload), None)
+        if bare is not None:
+            modes = _api("/whoami").get("modes") or {}
+            target = bsel or _api("/health").get("bundle")
+            if modes.get("intake") != "inbox" or target not in (modes.get("changesets_commit") or ()):
+                note = links[bare][1]
+                _fail(f"{bare}: {note + '; ' if note else ''}bundle {target} takes content, not links: export it "
+                      "and ingest the file", help_command="ai-wiki ingest <file>", code=2)
         submitted = []
         for f in files:
-            single = len(files) == 1
+            single, note = len(files) == 1, None
             if f == "-":  # pasted text from stdin → stored as raw Markdown evidence
                 payload = {"text": sys.stdin.read(), "title": a.title if single else None}
+            elif f in links:
+                payload, note = links[f]
             else:  # any file: ship raw bytes base64 so binaries (pdf/image/…) survive intact
                 p = Path(f).expanduser()
                 try:
@@ -904,13 +961,21 @@ def main(argv=None) -> int:
             state = f"no-op:{job.get('status')}" if job.get("deduplicated") else (
                 job.get("curation") or job.get("status")
             )
-            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state})
+            waiting = f in links and "text" not in payload and job.get("status") == "ready"
+            intake = job.get("intake") if isinstance(job.get("intake"), dict) else {}  # inbox intake's Git commit
+            detail = "; ".join(str(part) for part in (note, job.get("reason"), waiting and
+                                                      "the maintainer reads it as the wiki's Feishu app",
+                                                      intake.get("detail")) if part)
+            submitted.append({"input": label, "source": job.get("source"), "job": job.get("id"), "state": state,
+                              **({"commit": intake["commit"]} if intake.get("commit") else {}),
+                              **({"detail": detail} if detail else {})})
         if a.json:
             print(json.dumps({"submissions": submitted}, ensure_ascii=False, indent=2))
             return 0
         emit(
             _count_lines(len(submitted), len(submitted)),
-            table_lines("submissions", submitted, ("input", "source", "job", "state")),
+            table_lines("submissions", submitted, ("input", "source", "job", "state")
+                        + tuple(key for key in ("commit", "detail") if any(key in row for row in submitted))),
             table_lines("help", ({"command": "ai-wiki jobs <job-id>", "purpose": "check curation status"},),
                         ("command", "purpose")),
         )

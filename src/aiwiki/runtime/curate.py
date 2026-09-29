@@ -41,7 +41,7 @@ from ..engine.validate import validate as validate_bundle
 from ..service.ingest import write_source
 from ..version import service_identity
 from . import changeset, secrets
-from .config import load_agent_config, load_agent_timeouts
+from .config import llm_mode, load_agent_config, load_agent_timeouts
 from .failure import classify, failure, model_output_error, output_tail, redact
 from .policy import (
     CURATOR_ACTOR,
@@ -65,7 +65,7 @@ GIT_TIMEOUT_S = 120
 REBASE_CONFLICT = "rebase conflict; retry from remote"
 AGENT_HEARTBEAT_S = 15
 AGENT_RUNTIME = "codex"
-_AGENT_CONFIG = load_agent_config()
+_AGENT_CONFIG = load_agent_config() or {"bin": "", "model": "", "reasoning_effort": ""}  # none: AIWIKI_LLM=off
 AGENT_MODEL = _AGENT_CONFIG["model"]
 AGENT_REASONING_EFFORT = _AGENT_CONFIG["reasoning_effort"]
 AGENT_BIN = _AGENT_CONFIG["bin"]
@@ -187,7 +187,19 @@ def _codex_command(
     return command
 
 
+class AgentDisabled(RuntimeError):
+    """AIWIKI_LLM=off: this server never starts an agent process."""
+
+
+def agents_enabled() -> bool:
+    """Whether this server may start an agent process: AIWIKI_LLM is not ``off``, and was not
+    when the service started (then it never read an agent configuration to start)."""
+    return bool(AGENT_BIN) and llm_mode() != "off"
+
+
 def _agent_metadata() -> dict[str, str]:
+    if not agents_enabled():
+        return {"runtime": "off"}
     return {
         "runtime": AGENT_RUNTIME,
         "bin": AGENT_BIN,
@@ -227,7 +239,11 @@ def _agent_process(
     cwd: Path,
     timeout: float,
 ) -> subprocess.CompletedProcess:
-    """Run Codex as a process-group leader and guarantee descendant cleanup."""
+    """Run Codex as a process-group leader and guarantee descendant cleanup.
+
+    The one place the service starts an agent, so AIWIKI_LLM=off is enforced here too."""
+    if not agents_enabled():
+        raise AgentDisabled("AIWIKI_LLM=off: this server never starts an agent process")
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -601,7 +617,8 @@ def _exclude_inbox(root: Path, bundle: Path) -> None:
 
     Existing/third-party bundles may predate the scaffolded ``.gitignore`` rules.
     Use Git's local exclude file so job sidecars or a failed inbox source cannot leak
-    into a later job's ``git add -A`` without modifying the knowledge bundle itself.
+    into a later job's ``git add -A`` without modifying the knowledge bundle itself. Only an
+    intake commit (``service.inbox``) adds a file there, by name.
     """
     try:
         bundle_rel = bundle.resolve().relative_to(root.resolve()).as_posix()

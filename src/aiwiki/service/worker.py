@@ -5,16 +5,20 @@ time. Serializing curation is what makes many concurrent writers safe: two curat
 passes never touch the bundle or its git tree at once, so the only contention left is
 between this worker and *other* writers' pushes — which curate.py handles by rebasing.
 
-The queue is ordered by kind (design §2.6): changesets and admin reverts, then Codex
-audits, then Codex ingests, first in first out within a kind; a running job is never
-preempted. Until a bundle commits changesets its Codex audits and ingests stay in one FIFO,
-as before. Once it does, a Codex audit of it waits while its maintainer run holds the lease,
-so it never takes the lock for minutes in the middle of a run; a lease on any other bundle
-holds nothing back.
+The queue is ordered by kind (design §2.6): changesets, admin reverts and the intake
+commits of member submissions (``inbox.commit``), then Codex audits, then Codex ingests,
+first in first out within a kind; a running job is never preempted. Until a bundle commits
+changesets its Codex audits and ingests stay in one FIFO, as before. Once it does, a Codex
+audit of it waits while its maintainer run holds the lease, so it never takes the lock for
+minutes in the middle of a run; a lease on any other bundle holds nothing back.
 
 On startup, queued jobs left by a previous run are re-enqueued (a changeset from its
-request in ``.okf/changesets``, a revert from its own job). Interrupted running jobs are
-reconciled from durable Git transaction metadata before being marked failed.
+request in ``.okf/changesets``, a revert from its own job; the sweep queues intake commits).
+Interrupted running jobs are reconciled from durable Git transaction metadata before being
+marked failed.
+
+Under AIWIKI_LLM=off no Codex audit or ingest is ever queued (``_put`` refuses one), so the
+worker runs only changesets, reverts and intake commits: Git, and never an agent.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ import itertools
 import json
 import os
 import queue
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -31,10 +36,12 @@ from pathlib import Path
 
 from ..runtime import audit, changeset, curate, revert
 from ..runtime.failure import classify, failure
+from . import inbox
 from . import ingest as I
 from . import maint_state as M
 
-PRIORITY = {"changeset": 0, "revert": 0, "audit": 1, "ingest": 2}  # lower runs first
+PRIORITY = {"changeset": 0, "revert": 0, "intake": 0, "audit": 1, "ingest": 2}  # lower runs first
+CODEX_KINDS = ("audit", "ingest")  # the kinds a Codex agent runs: never queued under AIWIKI_LLM=off
 # Installed by the app (design §2.11): the bundles whose changesets commit (none while
 # AIWIKI_DISABLE=changesets), and whether a principal may still propose one to a bundle.
 # A queued changeset is checked again when it runs, so a rollback or a revoked principal
@@ -42,12 +49,33 @@ PRIORITY = {"changeset": 0, "revert": 0, "audit": 1, "ingest": 2}  # lower runs 
 # own Codex audit (all but AIWIKI_CODEX_AUDIT_MANUAL).
 COMMIT_BUNDLES: frozenset[str] = frozenset()
 AUDIT_BUNDLES: frozenset[str] = frozenset()
+INTAKE = "curate"  # AIWIKI_INTAKE, installed by the app
 
 
-def actor_of(principal: str, bundle: str) -> str | None:
-    """The actor a principal now in force stamps on a changeset to ``bundle``, or None when it
-    may no longer propose one there."""
+def inbox_intake(bundle: Path) -> bool:
+    """AIWIKI_INTAKE=inbox applies to a bundle whose changesets commit: only its maintainer
+    curates member work items. Any other bundle's submissions keep the Codex path."""
+    return INTAKE == "inbox" and bundle.name in COMMIT_BUNDLES
+
+
+def actor_of(principal: str, bundle: str, kind: str = "curate") -> str | None:
+    """The actor a principal now in force stamps on a ``kind`` changeset to ``bundle``, or None
+    when it may no longer propose one there."""
     return None  # until the app installs its principals
+
+
+def may_submit(principal: str, bundle: str) -> bool:
+    """Whether a principal now in force may still submit to ``bundle``: its intake commit runs."""
+    return False  # until the app installs its principals
+
+
+def auditors() -> frozenset[str]:
+    """Auditor-class actors (design §5.3); the app adds its principals holding the audit scope."""
+    return audit.AUDITOR_ACTORS
+
+
+def _audit_mode() -> str:
+    return os.environ.get("AIWIKI_AUDIT", "").strip() or "codex"  # as app.MODES reads it
 
 
 _q: queue.PriorityQueue = queue.PriorityQueue()
@@ -249,7 +277,7 @@ def _reconcile_running(bundle: Path, job: dict) -> str:
             report = job.get("audit")
             if not isinstance(report, dict) or report.get("status") not in {"passed", "needs_attention"}:
                 return "remote contains audit commit, but durable audit result is incomplete"
-        else:
+        elif job.get("kind") != "intake":  # an intake commit adds one file and no concept
             validation = job.get("validation")
             if not isinstance(validation, dict) or validation.get("status") != "passed":
                 return "remote contains ingest commit, but durable validation result is incomplete"
@@ -304,6 +332,8 @@ def _classify_failed(job_path: Path) -> None:
 
 
 def _put(kind: str, bundle: Path, subject: str, job_path: Path) -> None:
+    if kind in CODEX_KINDS and not curate.agents_enabled():
+        raise curate.AgentDisabled(f"AIWIKI_LLM=off: this server queues no Codex {kind}")
     # A bundle's Codex audits go ahead of Codex ingests only once its changesets commit and
     # queue their own audits; a manual (shadow) bundle's audits never pass production's work.
     priority = PRIORITY["ingest"] if kind == "audit" and bundle.name not in AUDIT_BUNDLES else PRIORITY[kind]
@@ -336,8 +366,14 @@ def submit_revert(bundle: Path, job_path: Path) -> None:
     _put("revert", bundle, job_path.stem, job_path)
 
 
+def submit_intake(bundle: Path, job_path: Path) -> None:
+    """Queue the intake commit of a member submission with the changesets (``inbox.commit``)."""
+    _finished.setdefault(job_path, threading.Event())
+    _put("intake", bundle, job_path.stem, job_path)
+
+
 def wait(job_path: Path, timeout: float) -> None:
-    """Block until a queued changeset's or revert's receipt is final, or ``timeout`` seconds pass."""
+    """Block until a queued changeset's, revert's or intake's receipt is final, or ``timeout`` seconds pass."""
     event = _finished.get(job_path)
     if event is not None:
         event.wait(timeout)
@@ -375,7 +411,9 @@ def _run() -> None:
         try:
             with serialized_mutation():
                 try:
-                    if kind == "audit" and subject in I.reverted_by(bundle):
+                    if kind == "audit" and _audit_mode() != "codex":
+                        _cancel_codex_audit(job_path)
+                    elif kind == "audit" and subject in I.reverted_by(bundle):
                         _skip_reverted(job_path)
                     elif kind == "audit":
                         audit.run(bundle, subject, job_path)
@@ -383,6 +421,8 @@ def _run() -> None:
                         _run_changeset(bundle, job_path)
                     elif kind == "revert":
                         revert.run(bundle, job_path)
+                    elif kind == "intake":
+                        _run_intake(bundle, job_path)
                     else:
                         curate.run(bundle, subject, job_path)
                 finally:
@@ -396,6 +436,15 @@ def _run() -> None:
             _q.task_done()
 
 
+def _run_intake(bundle: Path, job_path: Path) -> None:
+    """Admit an intake commit again as it runs, as a changeset is (design §2.11, §8.5). While
+    inbox intake does not apply to its bundle (rolled back to curate, or AIWIKI_DISABLE=changesets)
+    the job stays queued, and the sweep hands it over once it applies again; a submitter no
+    longer in force fails it with nothing committed."""
+    if inbox_intake(bundle):
+        inbox.commit(bundle, job_path, lambda principal: may_submit(principal, bundle.name))
+
+
 def _skip_reverted(job_path: Path) -> None:
     """An admin reverted the changeset this Codex audit reviews: nothing of it is left to verify."""
     job = json.loads(job_path.read_text(encoding="utf-8"))
@@ -403,6 +452,14 @@ def _skip_reverted(job_path: Path) -> None:
     job.update(status="failed", error=detail, finished=curate._now(),
                failure=failure("input", stage="intake", detail=detail, retryable=False))
     _save_job(job_path, job)
+
+
+def _cancel_codex_audit(job_path: Path) -> None:
+    """AIWIKI_AUDIT=external: a Codex audit queued before the switch never runs (design §5.1)."""
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    if job.get("status") == "queued":
+        job.update(status="cancelled", reason="audit_external", finished=curate._now())
+        _save_job(job_path, job)
 
 
 def closed_rejection(items: list[dict]) -> dict:
@@ -438,9 +495,10 @@ def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, st
     job or request that no longer matches what intake admitted fails without running.
     """
     principal, digest = admitted or (str(job.get("principal")), job.get("changeset_sha256"))
-    actor = actor_of(principal, bundle.name)
-    if bundle.name not in COMMIT_BUNDLES or actor is None:
-        detail = f"{principal} may no longer commit changesets to '{bundle.name}'"
+    review = job.get("kind") == "audit"
+    actor = actor_of(principal, bundle.name, "audit" if review else "curate")
+    if bundle.name not in COMMIT_BUNDLES or actor is None or (review and _audit_mode() != "external"):
+        detail = f"{principal} may no longer commit {job.get('kind')} changesets to '{bundle.name}'"
         job.update(status="rejected", http_status=403, errors=[changeset._error("forbidden", detail)],
                    failure=failure("auth", stage="intake", detail=detail), finished=curate._now())
         _save_job(job_path, job)
@@ -455,6 +513,8 @@ def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, st
             changeset.changeset_sha256(request, {item.name: hashlib.sha256(item.data).hexdigest() for item in evidence})
         items = [M.get_item(bundle, item_id) for item_id in job.get("work_items") or []]
         closed = [item for item in items if item["status"] in M.TERMINAL]
+        if review != (request.get("kind") == "audit"):
+            raise ValueError("the job's kind and its request's differ")
     except (OSError, ValueError, KeyError, TypeError, AttributeError, M.MaintError) as exc:
         job.update(status="failed", error=f"changeset request or evidence unusable: {exc}", finished=curate._now(),
                    failure=failure("internal", stage="intake", detail=exc, retryable=False))
@@ -470,6 +530,9 @@ def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, st
         # G3b again: an item another changeset closed while this one waited in the queue.
         job.update(closed_rejection(closed), finished=curate._now())
         _save_job(job_path, job)
+        return
+    if review:  # intake checked the lease; the gate derives the backlog again on the synced tree
+        audit.run_changeset(bundle, job_path, request, actor=actor, auditors=auditors())
         return
     curate.run_changeset(bundle, job_path, request, actor=actor, evidence_files=evidence,
                          on_done=lambda done: _closeout(bundle, done))
@@ -495,6 +558,8 @@ def _register_audit(bundle: Path, job: dict) -> dict:
     mode = os.environ.get("AIWIKI_AUDIT", "").strip() or "codex"
     if mode != "codex":
         return {"mode": mode}
+    if not curate.agents_enabled():  # the parent stays in /jobs/pending-audit for a rollback
+        return {"mode": "llm_off"}
     if bundle.name not in AUDIT_BUNDLES:
         return {"mode": "manual"}
     audit_job, existing = I.receive_audit(bundle, job["id"], audit.concept_files(bundle, job))
@@ -531,25 +596,53 @@ def _known_shas(bundle: Path) -> set[str]:
     return shas
 
 
+_NAMED_SHA = re.compile(r"-([0-9a-f]{64})\.")
+
+
 def sweep_once(bundles: list[Path]) -> int:
     """Pick up sources sitting in sources/inbox/ that no job has seen yet (e.g. dropped
-    out-of-band) and queue the curatable ones. Deduped by content sha. Returns #queued."""
+    out-of-band) and queue the curatable ones, or under inbox intake register each as a member
+    work item and commit it. Deduped by content sha. Returns #queued (#registered).
+
+    An upload's stored name carries its sha (``ingest.write_source``): once a job knows it, the
+    file is not read again, so the uploads inbox intake keeps never slow the sweep down. While
+    inbox intake applies, the sweep also hands the worker every intake commit still to make: one
+    queued and not already waiting, or failed and due for its retry (``inbox.pending_intakes``).
+    After a rollback they wait, uncommitted, until it applies again."""
     with serialized_lifecycle():
         queued = 0
         for b in bundles:
-            inbox = b / "sources" / "inbox"
-            if not inbox.is_dir():
+            for pending in inbox.pending_intakes(b) if inbox_intake(b) else ():
+                if pending not in _finished:
+                    submit_intake(b, pending)
+            drops = b / "sources" / "inbox"
+            if not drops.is_dir():
                 continue
             known = _known_shas(b)
-            for f in sorted(inbox.iterdir()):
+            for f in sorted(drops.iterdir()):
                 if not f.is_file() or f.is_symlink() or f.name.startswith("."):
+                    continue
+                named = _NAMED_SHA.search(f.name)
+                if named and named[1] in known:
                     continue
                 data = f.read_bytes()
                 sha = hashlib.sha256(data).hexdigest()
                 if sha in known:
                     continue
                 source_rel = f.relative_to(b).as_posix()
+                if inbox_intake(b):
+                    try:
+                        job = inbox.register_drop(b, source_rel, data)
+                    except M.MaintError:  # one bad drop never holds up the others
+                        continue
+                    if job.get("intake"):
+                        submit_intake(b, I.job_path(b, job["intake"]))
+                    known.add(sha)
+                    queued += 1
+                    continue
                 curatable = I.is_curatable(source_rel, data)
+                if not curate.agents_enabled():
+                    continue  # only Codex curates a drop from here: under AIWIKI_LLM=off none is queued
                 job = I.new_job(b, source_rel, sha, curatable, filename=f.name)
                 known.add(sha)
                 if curatable:
@@ -599,7 +692,7 @@ def recover(bundles: list[Path]) -> bool:
                                finished=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                failure=failure("interrupted", stage="startup", detail="changeset request lost"))
                     _save_job(jf, job)
-            elif status == "done" and job.get("mode") == "changeset" and "closed_items" not in job:
+            elif status == "done" and job.get("mode") == "changeset" and kind != "audit" and "closed_items" not in job:
                 closeouts.append((b, jf))  # G15 interrupted after the receipt read done
             elif status == "queued" and job.get("source") and job.get("mode") != "changeset":
                 # A changeset stages its packet as ``source``; the Codex curator never takes it.
@@ -621,10 +714,12 @@ def recover(bundles: list[Path]) -> bool:
                     )
                     if kind == "revert":
                         job["reverted"] = []  # its commit never reached the remote
+                elif kind == "intake":
+                    inbox.settle(b, job)  # the remote holds its commit: record it on the item
                 job["finished"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 _save_job(jf, job)
                 curate._cleanup_recovery_source(b, job)
-                if job.get("status") == "done" and job.get("mode") == "changeset":
+                if job.get("status") == "done" and job.get("mode") == "changeset" and kind != "audit":
                     closeouts.append((b, jf))  # the remote holds the commit: finish G15
     # Never build new work on an unresolved local commit. A failed fetch is retried
     # on the next service startup rather than being mistaken for a rejected push.
@@ -638,6 +733,10 @@ def recover(bundles: list[Path]) -> bool:
         _closeout(bundle, job)
         _save_job(job_path, job)
     for kind, bundle, subject, job_path in queued:
+        if kind in CODEX_KINDS and not curate.agents_enabled():
+            if kind == "audit" and _audit_mode() != "codex":
+                _cancel_codex_audit(job_path)  # external auditors took over: it would never run
+            continue  # otherwise it stays queued on disk: a rollback to AIWIKI_LLM=codex runs it
         if kind == "audit":
             submit_audit(bundle, subject, job_path)
         elif kind == "changeset":

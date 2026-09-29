@@ -2,7 +2,8 @@
 
     begin          doctor, the maintainer lease, Codex audit resubmission, workspace pull, collect
     collect        run the collectors; freeze their evidence as work items, then move the cursors
-    next           claim the next work item and fetch its evidence into the workspace
+    next           claim the next work item and fetch its evidence into the workspace; a member's
+                   Feishu/Lark link sent alone is read first, as the wiki's app (lark-cli --as bot)
     add-evidence   freeze one more file into the item: a Git blob at a commit, or a Multica issue
     skip | park | split   close the item without a changeset, hand it back, or divide it
     end            release the lease and render the run's deterministic report
@@ -49,6 +50,11 @@ from aiwiki.cli.toon import emit, object_lines, table_lines
 
 OK, FAILED, USAGE, NEEDS_HUMAN, PREFLIGHT, PARTIAL, EMPTY, BUDGET, DIRTY = 0, 1, 2, 3, 4, 5, 10, 11, 12
 COLLECTORS = ("repos", "issues")
+# ``--only inbox``: the writer queues member submissions as they arrive, so the inbox needs no
+# collecting; a run begun with only it just drains the member queue (the design's inbox trigger).
+INBOX = "inbox"
+LINK = "link.txt"  # the one file of a member's link sent without its content
+PACKET_HEADROOM = 16 * 1024  # the evidence packet's header beside a frozen member doc
 CONFIG = Path("~/.ai-wiki/maint.json")  # expanded when used
 AUDIT_ATTEMPTS = 3  # failed Codex audits of one parent before it needs a human (design §4.7)
 BATCH = 20  # items per POST /maint/items
@@ -329,6 +335,13 @@ def collect(bundle: str, *, run: str | None, work: Path, state_dir: Path, config
             results[name] = collector(bundle, run, work / name, state_dir / "cache", config.get(name))
         except (MaintError, OSError, ValueError, KeyError) as exc:
             results[name] = {"status": "failed", "error": str(exc)[:500]}
+    if INBOX in only:
+        try:
+            members = _call("GET", "/maint/items", bundle=bundle, params={"status": "ready", "origin": "member",
+                                                                         "limit": 1})[1]
+            results[INBOX] = {"status": "ok", "ready": members.get("total", 0)}
+        except MaintError as exc:
+            results[INBOX] = {"status": "failed", "error": str(exc)[:500]}
     return results
 
 
@@ -365,8 +378,10 @@ def _audits(bundle: str) -> dict:
     from aiwiki.runtime.failure import classify
 
     who = _call("GET", "/whoami", bundle=bundle)[1]
-    if (who.get("modes") or {}).get("audit") != "codex":
-        return {"mode": (who.get("modes") or {}).get("audit"), "resubmitted": [], "needs_human": []}
+    modes = who.get("modes") or {}
+    mode = "llm_off" if modes.get("llm") == "off" else modes.get("audit")  # a writer without Codex audits nothing
+    if mode != "codex":
+        return {"mode": mode, "resubmitted": [], "needs_human": []}
     build = (who.get("service") or {}).get("build")
     pending = _call("GET", "/jobs/pending-audit", bundle=bundle, params={"older_than_hours": 1, "limit": 100})[1]
     resubmitted, needs_human, refused = [], [], []
@@ -398,7 +413,12 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
     state = _read(folder / "run.json")
     if state and state.get("bundle") != bundle:
         raise MaintError(f"run {run} maintains bundle {state['bundle']!r}, not {bundle!r}", USAGE)
-    checked = doctor.run("curator", bundle=bundle, state_dir=state_dir, skills_dir=None)
+    # Only the issues collector and the repos collector's Multica registry run `multica`: a run
+    # that drains the member inbox needs no Multica host (design §7, the owner's laptop).
+    repos = settings.get("repos")
+    multica = "issues" in only or ("repos" in only and isinstance(repos, dict) and repos.get("registry") == "multica")
+    checked = doctor.run("curator", bundle=bundle, state_dir=state_dir, skills_dir=None,
+                         tools=tuple(tool for tool in doctor.TOOLS["curator"] if multica or tool != "multica"))
     if not checked["ok"]:
         failed = [row for row in checked["checks"] if not row["ok"]]
         return PREFLIGHT, {"run": run, "failed": "doctor", "checks": failed}
@@ -479,22 +499,32 @@ def next_item(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
                        if held else f"the workspace holds changes but run {state['run']} has no item in progress; "
                                     f"run ai-wiki maint begin --run {state['run']} to reset it",
                        "item": held, "changes": sorted(changed), "conflicts": pending}
-    stop = ("budget" if len(state["taken"]) >= state["max_items"]
-            else "deadline" if _iso(_now()) >= state["deadline"] else None)
-    if stop:
-        state["stopped"] = stop
-        _save_run(state_dir, state)
-        return BUDGET, {"stopped": stop, "taken": len(state["taken"]), "max_items": state["max_items"],
-                        "deadline": state["deadline"], "next": "ai-wiki maint end --run " + state["run"]}
-    answer = _call("POST", "/maint/items/next", bundle=state["bundle"], run=state["run"])[1]
-    item = answer.get("item")
-    if not item:
-        state["stopped"] = "queue_empty"
-        _save_run(state_dir, state)
-        return EMPTY, {"stopped": "queue_empty", "ready": 0, "next": "ai-wiki maint end --run " + state["run"]}
-    if item["id"] not in state["taken"]:
-        state["taken"].append(item["id"])
-        _save_run(state_dir, state)
+    closed = []  # member links this host could not read, closed (or parked) on the way
+    while True:
+        stop = ("budget" if len(state["taken"]) >= state["max_items"]
+                else "deadline" if _iso(_now()) >= state["deadline"] else None)
+        if stop:
+            state["stopped"] = stop
+            _save_run(state_dir, state)
+            return BUDGET, {"stopped": stop, "taken": len(state["taken"]), "max_items": state["max_items"],
+                            "deadline": state["deadline"], "next": "ai-wiki maint end --run " + state["run"],
+                            **({"closed": closed} if closed else {})}
+        answer = _call("POST", "/maint/items/next", bundle=state["bundle"], run=state["run"])[1]
+        item = answer.get("item")
+        if not item:
+            state["stopped"] = "queue_empty"
+            _save_run(state_dir, state)
+            return EMPTY, {"stopped": "queue_empty", "ready": 0, "next": "ai-wiki maint end --run " + state["run"],
+                           **({"closed": closed} if closed else {})}
+        if item["id"] not in state["taken"]:
+            state["taken"].append(item["id"])
+            _save_run(state_dir, state)
+        resolution = _read_link(state, item)
+        if resolution is None:
+            break
+        _call("POST", f"/maint/items/{quote(item['id'], safe='')}/resolve", bundle=state["bundle"], run=state["run"],
+              body=resolution)
+        closed.append({"item": item["id"], "status": resolution["outcome"]})
     files, _claimed = workspace._item_evidence(root, state["bundle"], item["id"])
     history = item["attempts"]["history"]
     brief = {
@@ -507,10 +537,42 @@ def next_item(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
         "evidence_dir": str(root / workspace.META / "items" / item["id"]), "files_total": len(files),
         "files": [{"name": file.name.split("/", 1)[1], "bytes": len(file.data)} for file in files],
         "commands": _commands(state, state_dir, item["id"]),
+        **({"closed": closed} if closed else {}),
     }
     while len(json.dumps(brief, ensure_ascii=False).encode()) > BRIEF_BYTES and brief["files"]:
         brief["files"].pop()  # the rest are in evidence_dir
     return OK, brief
+
+
+def _read_link(state: dict, item: dict) -> dict | None:
+    """A member's Feishu/Lark link sent without its content (design §6): read here as the wiki's
+    read-only Feishu app and frozen into the item beside the link. None when the item needs no
+    reading or its content is now frozen; else the resolution that closes it with the reason, or
+    parks it for the next run when lark-cli timed out (a slow network says nothing about access)."""
+    from aiwiki.runtime import changeset, secrets
+
+    url = item["origin"].get("url")
+    if (item["origin"].get("kind") != "member" or not isinstance(url, str)
+            or [file.get("name") for file in item["files"]] != [LINK]):
+        return None
+    fetched, why = cli._lark_fetch(url, "bot")
+    if why == cli.LARK_TIMEOUT:
+        return {"outcome": "parked", "class": "transient", "reason": f"the wiki's Feishu app could not read it ({why})"}
+    if fetched is None:
+        return {"outcome": "needs_access", "reason": f"the wiki's Feishu app cannot read it ({why}): ingest the link "
+                                                     "where lark-cli reads it as you, or export it and ingest the "
+                                                     "file; once the app can read it, the same link sent again "
+                                                     "reopens this"}
+    text, redactions = secrets.redact(fetched["text"])
+    data = text.encode()
+    if len(data) > changeset.limits()["packet_text_bytes"] - PACKET_HEADROOM:
+        return {"outcome": "needs_conversion", "reason": f"{len(data)} bytes of text is more than one evidence "
+                                                         "packet holds: export it in parts and ingest each"}
+    _call("POST", f"/maint/items/{quote(item['id'], safe='')}/files", bundle=state["bundle"], run=state["run"],
+          body={"name": "source.md", "content_b64": base64.b64encode(data).decode(),
+                "origin": {"kind": "member-source", "url": url, "fetched": fetched["fetched"],
+                           "redactions": redactions}})
+    return None
 
 
 def _reset(state: dict) -> list[str]:
@@ -879,8 +941,8 @@ def _duration(value: str) -> int:
 
 def _only(value: str) -> tuple[str, ...]:
     names = tuple(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
-    if not names or set(names) - set(COLLECTORS):
-        raise argparse.ArgumentTypeError("a comma-separated subset of " + ",".join(COLLECTORS))
+    if not names or set(names) - {*COLLECTORS, INBOX}:
+        raise argparse.ArgumentTypeError("a comma-separated subset of " + ",".join((*COLLECTORS, INBOX)))
     return names
 
 
@@ -908,7 +970,8 @@ def add_parser(sub, common: dict) -> None:
 
     begin_ = verb("begin", "doctor, lease, audit resubmission, workspace pull and collect (exit 4 fails closed)",
                   'ai-wiki -b solvely-wiki maint begin --run "$MULTICA_ISSUE_ID"',
-                  "ai-wiki maint begin --run WAIO-612 --max-items 3 --only repos")
+                  "ai-wiki maint begin --run WAIO-612 --max-items 3 --only repos",
+                  "ai-wiki maint begin --run WAIO-613 --max-items 3 --only inbox")
     begin_.add_argument("--run", required=True, type=cli._run, help="the run id (X-AIWiki-Run)")
     begin_.add_argument("--max-items", type=cli._positive, default=6, help="items this run may take (default: 6)")
     begin_.add_argument("--deadline", type=_duration, default=100 * 60, help="stop taking items after (default: 100m)")
@@ -916,7 +979,8 @@ def add_parser(sub, common: dict) -> None:
     collect_ = verb("collect", "run the collectors, enqueue their evidence, then move the cursors",
                     "ai-wiki maint collect --only issues")
     for parser in (begin_, collect_):
-        parser.add_argument("--only", type=_only, default=COLLECTORS, help="collectors (default: repos,issues)")
+        parser.add_argument("--only", type=_only, default=COLLECTORS,
+                            help="collectors (default: repos,issues); inbox alone just drains the member queue")
     next_ = verb("next", "claim the next work item (exit 10 queue empty, 11 budget spent, 12 workspace dirty)",
                  "ai-wiki maint next --json")
     evidence = verb("add-evidence", "freeze a Git file or a Multica issue into the item",

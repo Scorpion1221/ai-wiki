@@ -8,7 +8,10 @@ document, then stamps them deterministically with trusted time.
   substantively (whitespace, key order and scalar quoting do not count).
 * ``verified`` history is never edited by the editor; an audit verdict of
   ``verified`` appends one event.
-* audit also freezes ``sources`` and owns ``status`` (``draft`` becomes ``stable``).
+* audit also freezes ``sources`` and owns ``status`` (``draft`` becomes ``stable``); an
+  audit changeset (stage ``review``) freezes ``type``, ``title`` and ``stale_after`` too,
+  and its ``unverified`` verdict on a verified version stamps ``generated.at`` anew, so the
+  old verification stops being current.
 * a curate changeset owns ``status`` too: a new concept starts ``draft``, an existing
   one keeps its value, and a deprecate operation sets ``deprecated``.
 
@@ -26,7 +29,7 @@ from typing import Any
 
 import yaml
 
-from .document import OKFDocumentError, _instant, normalize_verified, parse_document
+from .document import OKFDocumentError, _instant, current_verified, normalize_verified, parse_document
 from .scan_sources import _source_resource_rel
 from .validate import SPILL_KEY_RE, split_body_spill
 
@@ -35,7 +38,10 @@ SERVICE_KEYS = {
     "curate": ("verified", "generated"),
     "audit": ("verified", "generated", "status", "sources"),
     "changeset": ("verified", "generated", "status"),
+    # An audit changeset (design §2.4, §5.4 A5) also freezes identity and freshness.
+    "review": ("verified", "generated", "status", "sources", "type", "title", "stale_after"),
 }
+_AUDITS = ("audit", "review")  # the stages that pass a verdict and own status
 VERDICTS = {"verified", "unverified"}
 # Verification-event fields an editor may drop to column 0 (a lost ``- ``): never content.
 _EVENT_FIELDS = ("by", "at")
@@ -50,6 +56,14 @@ _RESTORED = {
     "changeset": {
         "verified": "restored service-owned verification history without adding verification",
         "status": "restored service-owned status",
+    },
+    "review": {
+        "verified": "restored service-owned verification history",
+        "status": "restored service-owned status",
+        "sources": "restored immutable sources provenance",
+        "type": "restored identity-locked type",
+        "title": "restored identity-locked title",
+        "stale_after": "restored frozen stale_after",
     },
 }
 # A top-level YAML key at column 0; indented, list, comment and blank lines belong to it.
@@ -465,9 +479,9 @@ def apply_bookkeeping(
     """
     if stage not in SERVICE_KEYS:
         raise ValueError(f"unknown bookkeeping stage {stage!r}")
-    if verdict is not None and (stage != "audit" or verdict not in VERDICTS):
+    if verdict is not None and (stage not in _AUDITS or verdict not in VERDICTS):
         raise ValueError("only an audit may pass a verified/unverified verdict")
-    if before_text is None and (stage == "audit" or deprecate):
+    if before_text is None and (stage in _AUDITS or deprecate):
         raise ValueError("audit and deprecate bookkeeping require the pre-edit document")
     if deprecate and stage != "changeset":
         raise ValueError("only a changeset may deprecate a concept")
@@ -490,7 +504,7 @@ def apply_bookkeeping(
             raise BookkeepingError(f"pre-edit document is invalid: {exc}") from exc
     order = [key for key, _lines in (before_blocks or after_blocks) if key is not None]
     status = None
-    if stage == "audit":
+    if stage in _AUDITS:
         status = "deprecated" if before_doc.get("status") == "deprecated" else "stable"
     elif stage == "changeset":
         status = "deprecated" if deprecate else "draft" if before_text is None else None
@@ -527,19 +541,26 @@ def apply_bookkeeping(
             split_body_spill(after_body)[1] != split_body_spill(before_body)[1]
         ):
             repairs.append("discarded non-substantive formatting edits")
-        if stage != "audit" and not deprecate:
+        if stage not in _AUDITS and not deprecate:
             return before_text, repairs
         blocks, body = before_blocks, before_body
 
     generated = before_doc.get("generated")
     generated_at = _instant(generated.get("at")) if isinstance(generated, dict) else None
+    history = [_instant(event.get("at")) for event in normalize_verified(before_doc)]
     stamp = None
     if substantive:
         # A new generation supersedes every earlier generation and verification event.
-        history = [_instant(event.get("at")) for event in normalize_verified(before_doc)]
         stamp = _not_before(trusted_now, max(filter(None, [generated_at, *history]), default=None), strictly=True)
         template = _lines(before_blocks, "generated") or _lines(after_blocks, "generated")
         blocks = _put(blocks, "generated", _generated_lines(template, actor, _text(stamp)), order)
+    elif stage == "review" and verdict == "unverified" and current_verified(before_doc):
+        # A reviewer found this verified version unsupported (a push kept its old stamps): the
+        # service dates the generation now, so no earlier event confirms it. Its author stays.
+        stamp = _not_before(trusted_now, max(filter(None, [generated_at, *history]), default=None), strictly=True)
+        author = generated.get("by") if isinstance(generated, dict) and generated.get("by") else actor
+        blocks = _put(blocks, "generated", _generated_lines(_lines(blocks, "generated"), str(author), _text(stamp)),
+                      order)
     if status is not None and _value(_lines(blocks, "status")) != status:
         blocks = _put(blocks, "status", [f"status: {status}\n"], order)
     if verdict == "verified":
