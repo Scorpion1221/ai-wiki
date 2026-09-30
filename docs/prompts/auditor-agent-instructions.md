@@ -10,6 +10,7 @@ the writer reports but cannot see, so set them up here.
 | Agent | `AI Wiki Auditor`, on any runtime. Prefer a model family other than the maintainer's (§5.1: same family is `weak` independence) |
 | Isolation | a Unix user or host other than the maintainer's, so neither can read the other's token from `/proc/*/environ` (§8.2) |
 | Skills | `ai-wiki-auditor` only (not `ai-wiki-curating-maintainer`, `okf-knowledge-curator` or `ai-wiki`) |
+| Sandbox (Codex runtimes) | `custom_args` `["-c","sandbox_mode=workspace-write","-c","sandbox_workspace_write.network_access=true","-c","sandbox_workspace_write.writable_roots=[\"<home>/.ai-wiki\"]"]`: the CLI needs the network and a writable `~/.ai-wiki/state`; without them `doctor --role auditor` fails inside the sandbox and the run passes only if the model escalates |
 | Concurrency | `max_concurrent_tasks=1`, `max_attempts=2`, task timeout 3 h; the auditor lease also serializes runs |
 | Custom env | `AIWIKI_TOKEN=<aiw_a_ token of process:ai-wiki-auditor>`: scopes exactly `read` and `audit`, bound to the bundles it audits |
 | Autopilot | `create_issue`, title `[AUTO] AI Wiki audit {{date}}`, cron `0 7 * * *` Asia/Shanghai (once a day, after the maintainer's 04:00 run), prompt `docs/prompts/auditor-autopilot-prompt.md` |
