@@ -573,7 +573,7 @@ def test_curate_intake_is_todays_codex_path(tmp_path, monkeypatch) -> None:
         gate.close()
 
 
-def test_member_items_come_first_and_age_like_every_item(tmp_path, monkeypatch) -> None:
+def test_member_items_come_first_and_ageing_never_passes_them(tmp_path, monkeypatch) -> None:
     root = tmp_path / "kb"
     (root / ".okf" / "jobs").mkdir(parents=True)
     now = [datetime(2026, 10, 1, tzinfo=UTC)]
@@ -602,7 +602,9 @@ def test_member_items_come_first_and_age_like_every_item(tmp_path, monkeypatch) 
     ancient = collected("repo:x#ancient")
     now[0] += timedelta(days=13)
     fresh = member("fresh")
-    assert [claimed(), claimed()] == [ancient, fresh]  # 105: ageing starves nothing, members included
+    # Members come first whatever the backlog's age (ancient is at 105): a member's fresh
+    # submission never waits a day behind it, and the ancient item still comes right after.
+    assert [claimed(), claimed()] == [fresh, ancient]
 
 
 def test_cli_reads_feishu_links_as_the_member_and_submits_the_content(gate, tmp_path, monkeypatch,

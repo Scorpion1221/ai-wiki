@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import types
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -31,6 +32,8 @@ REPLAY = ["--runs-limit", "100", "--checkpoint-key", "ai_wiki_incremental_checkp
 
 def run(*args: str, env: dict | None = None) -> tuple[int, dict]:
     base = {k: v for k, v in os.environ.items() if not k.startswith("AIWIKI_WATCHDOG_")}
+    if "--bundle" in args and "--min-free-gb" not in args:
+        args = (*args, "--min-free-gb", "0")  # the test host's own free space is not under test
     proc = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
                           env={**base, **(env or {})}, timeout=120)
     assert proc.stdout, proc.stderr
@@ -39,6 +42,13 @@ def run(*args: str, env: dict | None = None) -> tuple[int, dict]:
 
 def multica_bin(snapshot: Path = SNAPSHOT) -> str:
     return shlex.join([sys.executable, str(FIXTURES / "fake_multica.py"), str(snapshot)])
+
+
+def load_watchdog():
+    spec = importlib.util.spec_from_file_location("maintenance_watchdog", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def keys(result: dict) -> set[str]:
@@ -481,7 +491,7 @@ def test_maint_queue_alerts_follow_the_design_slos(tmp_path: Path, monkeypatch) 
     assert maint_keys(at(7)) == {human, lease}
     assert maint_keys(at(31)) == {human, lease, cursor_stale}
     stale = at(73)
-    assert maint_keys(stale) == {human, lease, cursor_stale, "maint_ready_stale:solvely-wiki"}
+    assert maint_keys(stale) == {human, lease, cursor_stale, "maint_ready_stale:solvely-wiki:1"}
     facts = stale["checks"]["maint:solvely-wiki"]
     assert facts["needs_human"] == [{"id": a, "topic_key": "repo:x#a", "since": iso(t0),
                                      "reason": "not_retryable/input"}]
@@ -561,7 +571,48 @@ def test_a_build_retry_restarts_the_ready_wait(tmp_path: Path, monkeypatch) -> N
     assert result["checks"]["maint:solvely-wiki"]["oldest_ready"] == {
         "id": row["id"], "since": iso(t0 + timedelta(hours=120)), "age_hours": 1.0}
     _code, result = run("--bundle", str(bundle), "--now", iso(t0 + timedelta(hours=193)))
-    assert maint_keys(result) == {"maint_ready_stale:solvely-wiki"}
+    assert maint_keys(result) == {"maint_ready_stale:solvely-wiki:1"}
+
+
+def test_a_growing_ready_backlog_pages_again_at_each_size_bucket(tmp_path: Path, monkeypatch) -> None:
+    """One constant key would page once and then stay silent while the backlog grows; a key per
+    bucket must page only upward, not again as the backlog drains back below a boundary."""
+    t0 = datetime(2026, 10, 16, 20, 0, tzinfo=UTC)
+    monkeypatch.setattr(M, "_now", lambda: t0)
+    bundle = make_bundle(tmp_path, iso(t0), [])
+    later = iso(t0 + timedelta(hours=73))
+
+    M.enqueue(bundle, [maint_item(f"repo:x#t{n}", 40) for n in range(24)], principal=MAINTAINER)
+    _code, result = run("--bundle", str(bundle), "--now", later)
+    assert maint_keys(result) == {"maint_ready_stale:solvely-wiki:1"}
+    M.enqueue(bundle, [maint_item(f"repo:x#u{n}", 40) for n in range(2)], principal=MAINTAINER)
+    _code, result = run("--bundle", str(bundle), "--now", later)
+    assert maint_keys(result) == {"maint_ready_stale:solvely-wiki:25"}  # 26 stale: a new key, a new page
+
+    watchdog = load_watchdog()
+    args = types.SimpleNamespace(state_file=str(tmp_path / "state.json"), feishu_webhook=None,
+                                 feishu_secret=None, label="t")
+
+    def announce(*stale_keys: str) -> dict:
+        return watchdog.notify(args, {"now": later, "alerts": [{"key": k, "message": k} for k in stale_keys],
+                                      "errors": []})
+
+    assert announce("maint_ready_stale:solvely-wiki:1")["action"] == "alert"
+    assert announce("maint_ready_stale:solvely-wiki:25")["action"] == "alert"  # grew: pages
+    assert announce("maint_ready_stale:solvely-wiki:1")["action"] == "unchanged"  # drained: quiet
+    assert announce("maint_ready_stale:solvely-wiki:25")["action"] == "unchanged"  # back up: no repeat
+    assert announce("maint_ready_stale:solvely-wiki:50")["action"] == "alert"
+    assert announce()["action"] == "recovery"
+    assert announce("maint_ready_stale:solvely-wiki:1")["action"] == "alert"  # a new episode starts low
+
+
+def test_low_disk_on_the_bundle_filesystem_pages(tmp_path: Path) -> None:
+    bundle = make_bundle(tmp_path, "2026-09-23T18:00:00Z", [])
+    _code, result = run("--bundle", str(bundle), "--now", "2026-09-23T19:00:00Z", "--min-free-gb", "1000000")
+    assert {a["key"] for a in result["alerts"]} >= {"disk_low:solvely-wiki"}
+    assert result["checks"]["disk:solvely-wiki"]["free_gb"] > 0
+    _code, result = run("--bundle", str(bundle), "--now", "2026-09-23T19:00:00Z", "--min-free-gb", "0")
+    assert "disk_low:solvely-wiki" not in {a["key"] for a in result["alerts"]}
 
 
 def test_a_member_submission_pages_after_a_day_in_ready(tmp_path: Path, monkeypatch) -> None:

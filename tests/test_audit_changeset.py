@@ -449,6 +449,16 @@ def test_a6_content_keys_narrow_like_the_body() -> None:
             "---\n#", edit + "\n---\n#")
         assert audit._narrowing(before, widened, before) == "D_GROWTH", edit
     assert audit._narrowing(before, before.replace("[x.md]", "[]"), before) == "D_GROWTH"  # a caveat cleared
+    # Removing an optional assertive key says less (the 2026-09-29 downgrades deleted `owner`).
+    owned = before.replace("confidence: medium\n", "confidence: medium\nowner: growth\naliases: [x]\n")
+    for key in ("owner", "aliases"):
+        assert audit._narrowing(owned, re.sub(rf"(?m)^{key}:.*\n", "", owned), owned) is None, key
+    # A hedge must stay: without a caveat or a confidence below high the concept reads unhedged.
+    # A required key must stay too, or validation would refuse the auditor's whole changeset.
+    for key in ("confidence", "contested", "contradictions", "tags", "description"):
+        assert audit._narrowing(owned, re.sub(rf"(?m)^{key}:.*\n", "", owned), owned) == "D_GROWTH", key
+    sure = owned.replace("confidence: medium", "confidence: high")
+    assert audit._narrowing(sure, sure.replace("confidence: high\n", ""), sure) is None
     assert audit._narrowing(before, before.replace("[x.md]", "[x.md, y.md]"), before) == "D_NEW_LINK"
 
 

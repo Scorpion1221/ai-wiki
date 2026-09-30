@@ -39,6 +39,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -63,6 +64,7 @@ LEASE_TTL = timedelta(hours=3)
 LEASE_CLOCK_SKEW = timedelta(minutes=5)
 MAINT_ROLES = ("maintainer", "auditor")
 MAINT_CURSORS = ("repos", "issues")
+READY_BUCKETS = (1, 25, 50, 100, 200, 400, 800)  # maint_ready_stale pages again at each
 MEMBER_ORIGIN = "member"  # origin.kind of a member submission (service/inbox.py, AIWIKI_INTAKE=inbox)
 MAINT_ITEM = re.compile(r"it_[0-9a-f]{12}")
 # service/maint_state._valid: an item.json that fails it is invisible to the writer.
@@ -82,6 +84,7 @@ CARD_GROUPS = (
     (("job_",), "✍️ Writer 任务",
      "maintain 管理的来源会自动重试；成员手动 ingest 的失败需要重新提交"),
     (("bundle_commit_",), "📦 Bundle 提交", "确认 writer 服务和每日维护是否仍在产出提交"),
+    (("disk_low",), "💾 磁盘", "清理 docker 构建缓存和旧镜像（docker builder prune -a），再看 journald 和备份目录"),
     (("audit_",), "🔎 外部审计",
      "查 auditor agent 最近的运行（`ai-wiki review begin` 预检或 lease 失败会让 issue blocked）和它的 token；"
      "`GET /audit/backlog` 列出待审概念"),
@@ -470,6 +473,19 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
 # --- maintainer queue ----------------------------------------------------------------------
 
 
+def check_disk(bundle: Path, args: argparse.Namespace) -> tuple[dict, list[dict]]:
+    """Free space on the bundle's filesystem: commits and frozen sources fail once it is full."""
+    try:
+        free = shutil.disk_usage(bundle).free / 1024 ** 3
+    except OSError as exc:
+        raise CheckError(f"cannot stat {bundle}: {exc}") from None
+    alerts = []
+    if free < args.min_free_gb:
+        alerts.append(alert(f"disk:{bundle.name}", f"disk_low:{bundle.name}",
+                            f"writer {bundle.name}：所在磁盘只剩 {free:.1f}G（阈值 {args.min_free_gb:g}G）"))
+    return {"path": str(bundle), "free_gb": round(free, 1)}, alerts
+
+
 def maint_item_ok(item: dict | None, item_id: str) -> bool:
     """The writer's own item check (maint_state._valid), plus a created_at the watchdog can age."""
     if not item or item.get("id") != item_id or not all(
@@ -538,7 +554,10 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
     members.sort()
     stale = [(since, item_id) for since, item_id in ready if age_h(now, since) > args.ready_max_age_hours]
     if stale:
-        alerts.append(alert(check, f"maint_ready_stale:{name}",
+        # The key carries the size bucket, so a backlog that keeps growing pages again at each
+        # doubling instead of once; the same bucket stays deduplicated.
+        bucket = next((b for b in reversed(READY_BUCKETS) if len(stale) >= b), 1)
+        alerts.append(alert(check, f"maint_ready_stale:{name}:{bucket}",
                             f"maint {name}：{len(stale)} 个条目 ready 超过 {args.ready_max_age_hours:g}h"
                             f"（最老 {stale[0][1]}，已 {age_h(now, stale[0][0])}h）"))
     late = [(since, item_id) for since, item_id in members if age_h(now, since) > args.member_ready_max_age_hours]
@@ -753,9 +772,19 @@ def _post_feishu(url: str, secret: str | None, body: dict) -> None:
         raise CheckError(f"feishu webhook rejected the message: code {code} {short(reply.get('msg'), 120)}")
 
 
+def _announced(key: str, previous: list[str]) -> str:
+    """A size-bucketed key (``maint_ready_stale:<bundle>:<bucket>``) keeps the highest bucket
+    already announced while it stays alerting, so a shrinking backlog does not page as a new
+    alert and a count around a boundary does not page twice; only a higher bucket pages."""
+    stem, _, bucket = key.rpartition(":")
+    if not stem.startswith("maint_ready_stale:") or not bucket.isdigit():
+        return key
+    seen = [int(b) for k in previous for s, _, b in [k.rpartition(":")] if s == stem and b.isdigit()]
+    return f"{stem}:{max([int(bucket), *seen])}"
+
+
 def notify(args: argparse.Namespace, result: dict) -> dict:
     keys = sorted([a["key"] for a in result["alerts"]] + [f"error:{e['check']}" for e in result["errors"]])
-    fingerprint = hashlib.sha256("\n".join(keys).encode()).hexdigest()[:16] if keys else None
     state_path = Path(args.state_file).expanduser() if args.state_file else None
     previous: dict = {}
     if state_path:
@@ -764,6 +793,8 @@ def notify(args: argparse.Namespace, result: dict) -> dict:
             previous = loaded if isinstance(loaded, dict) else {}
         except (OSError, ValueError):
             pass  # missing or unreadable state: re-announce rather than stay silent
+    keys = sorted(_announced(key, previous.get("keys") or []) for key in keys)
+    fingerprint = hashlib.sha256("\n".join(keys).encode()).hexdigest()[:16] if keys else None
     if fingerprint == previous.get("fingerprint"):
         action = "unchanged"
     elif fingerprint:
@@ -827,6 +858,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--cursor-max-age-hours", type=float, default=30,
                    help="a maint collector cursor that exists but has not advanced")
     t.add_argument("--failed-window-hours", type=float, default=24, help="writer failures listed in the output")
+    t.add_argument("--min-free-gb", type=float, default=3, help="free space on each --bundle's filesystem (GB)")
     t.add_argument("--unresolved-failure-hours", type=float, default=168,
                    help="keep alerting on a writer failure with no later attempt for this long (default 7 days)")
     n = p.add_argument_group("notification")
@@ -890,6 +922,7 @@ def watch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         path = Path(bundle).expanduser().resolve()
         plan.append((f"writer:{path.name}", lambda path=path: check_bundle(path, args, now)))
         plan.append((f"maint:{path.name}", lambda path=path: check_maint(path, args, now)))
+        plan.append((f"disk:{path.name}", lambda path=path: check_disk(path, args)))
         if args.writer_url:
             plan.append((f"audit:{path.name}", lambda path=path: check_audit(path.name, args, now)))
     for name, check in plan:

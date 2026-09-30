@@ -24,8 +24,10 @@ PRIORITY = {
     "member": 100,  # member submissions (inbox)
     "memory": 80,  # shared memory and solution docs
     "task_doc": 70,  # a task root's README/status/PRD/report
-    "issue_signal": 60,  # an issue with a decision or a status change
+    "issue_signal": 60,  # an issue with a member's decision, or one that reached review or done
+    "doc": 50,  # repository documentation or SQL outside the priority prefixes
     "delta": 40,  # any other repository or issue increment
+    "tooling": 35,  # a repository topic that changed only tooling or dependency manifests
     "hygiene": 30,
     "refresh": 20,  # refresh and attention
 }
@@ -39,6 +41,9 @@ TASK_PREFIX = "tasks"
 MEMORY_PREFIXES = ("memory", "docs/solutions")
 TOPIC_PREFIXES = (TASK_PREFIX, *MEMORY_PREFIXES)
 TASK_DOCS = frozenset({"readme", "status", "prd", "report"})
+DOC_SUFFIXES = frozenset({".md", ".markdown", ".mdx", ".rst", ".txt", ".sql"})
+# Issue statuses that settle what happened; todo, in_progress and blocked describe work under way.
+SETTLED_STATUSES = frozenset({"in_review", "done", "cancelled", "canceled"})
 
 LOCKFILES = frozenset({
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "poetry.lock",
@@ -54,6 +59,25 @@ NOISE_DIRS = {
 CI_FILES = frozenset({
     ".gitlab-ci.yml", ".travis.yml", "jenkinsfile", "azure-pipelines.yml", ".drone.yml", "bitbucket-pipelines.yml",
 })
+# Tooling and dependency manifests: mostly version bumps and editor or linter settings, but a
+# pinned dependency or a new env var can carry a fact, so they are frozen and ranked last among
+# repository changes rather than dropped as noise.
+TOOLING_FILES = frozenset({
+    "package.json", ".gitignore", ".gitattributes", ".dockerignore", ".npmrc", ".nvmrc", ".node-version",
+    ".python-version", ".tool-versions", ".editorconfig", ".prettierrc", ".prettierignore", ".eslintrc",
+    ".eslintignore", ".stylelintrc", ".browserslistrc", ".babelrc", "tsconfig.json", "jsconfig.json",
+    "env.example", "renovate.json", "pyproject.toml", "go.mod", "cargo.toml", "gemfile", "pom.xml",
+    "composer.json",
+})
+TOOLING_FILE = re.compile(
+    r"^(?:\.(?:prettier|eslint|stylelint|babel|lintstaged|release)rc(?:\..+)?|tsconfig\..+\.json"
+    r"|(?:eslint|prettier|babel|stylelint)\.config\.[cm]?[jt]s|(?:requirements|constraints)(?:[-_.].+)?\.txt)$")
+
+
+def tooling(path: str) -> bool:
+    """A tooling or dependency manifest (ranked ``tooling``), not a documentation or code change."""
+    name = PurePosixPath(path).name.lower()
+    return name in TOOLING_FILES or bool(TOOLING_FILE.search(name))
 TEST_FILE = re.compile(r"^test_.+\.py$|_test\.(?:py|go)$|\.(?:test|spec)\.[cm]?[jt]sx?$")
 MINIFIED = re.compile(r"\.min\.(?:js|css)$|\.map$")
 # Credential stores: the secret rules only catch known token shapes, not ``DB_PASS=...``.
@@ -156,7 +180,8 @@ def priority_class(candidate: dict[str, Any]) -> str:
     if collector in ("hygiene", "refresh"):
         return collector
     if collector == "issues":
-        return "issue_signal" if signals.get("decision") or signals.get("status_changes") else "delta"
+        settled = signals.get("status_changes") and signals.get("settled", True)
+        return "issue_signal" if signals.get("decision") or settled else "delta"
     topic = candidate["topic_key"].partition("#")[2]
     if any(topic == prefix or topic.startswith(prefix + "/") for prefix in MEMORY_PREFIXES):
         return "memory"
@@ -164,6 +189,11 @@ def priority_class(candidate: dict[str, Any]) -> str:
         PurePosixPath(path).stem.lower() in TASK_DOCS for path in signals.get("paths", ())
     ):
         return "task_doc"
+    paths = signals.get("paths") or ()
+    if paths and all(tooling(path) for path in paths):
+        return "tooling"
+    if paths and all(PurePosixPath(path).suffix.lower() in DOC_SUFFIXES and not tooling(path) for path in paths):
+        return "doc"
     return "delta"
 
 

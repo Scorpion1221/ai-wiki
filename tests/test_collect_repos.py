@@ -1070,7 +1070,8 @@ def test_collect_freezes_task_roots_and_top_directories_and_counts_noise(tmp_pat
 
     items = planner.plan(collected["candidates"])
     assert [(item["topic_key"].removeprefix(f"repo:{identity}#"), item["priority"]) for item in items] == [
-        ("memory/learnings.md", 80), ("tasks/h5", 70), (".", 40), ("docs", 40), ("src", 40),
+        # "." changed only README.md (documentation); docs also holds a binary file
+        ("memory/learnings.md", 80), ("tasks/h5", 70), (".", 50), ("docs", 40), ("src", 40),
     ]
     # Collecting the same delta again yields the same item keys, which the queue dedupes on.
     again = planner.plan(collect_repos.collect(report)["candidates"])

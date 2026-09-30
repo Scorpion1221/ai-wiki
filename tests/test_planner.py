@@ -26,6 +26,13 @@ def test_plan_orders_candidates_by_the_design_priority_table() -> None:
         candidate("repos", f"{remote}#tasks/h5-checkout", paths=["tasks/h5-checkout/a.sql",
                                                                   "tasks/h5-checkout/status.md"]),
         candidate("issues", "issue:WAIO-9", decision=False, status_changes=2),
+        candidate("issues", "issue:WAIO-10", decision=False, status_changes=1, settled=False),
+        candidate("issues", "issue:WAIO-11", decision=True, status_changes=0, settled=False),
+        candidate("repos", f"{remote}#docs", paths=["docs/checkout.md", "docs/q.sql"]),
+        candidate("repos", f"{remote}#app", paths=["app/a.ts", "app/README.md"]),
+        candidate("repos", f"{remote}#.", paths=["package.json", ".gitignore", "requirements-dev.txt"]),
+        candidate("repos", f"{remote}#cfg", paths=["cfg/eslint.config.js", "cfg/notes.txt"]),
+        candidate("issues", "issue:WAIO-12", decision=False, status_changes=1, settled=True),  # e.g. cancelled
         candidate("repos", f"{remote}#docs/solutions/cache.md", paths=["docs/solutions/cache.md"]),
         candidate("issues", "issue:WAIO-8#part-1", decision=True, status_changes=0),
         candidate("repos", "rebaseline:code.example.com/web/app"),
@@ -40,12 +47,19 @@ def test_plan_orders_candidates_by_the_design_priority_table() -> None:
         ("#docs/solutions/cache.md", 80),
         ("#memory/learnings.md", 80),
         ("#tasks/h5-checkout", 70),
+        ("issue:WAIO-11", 60),  # a member's decision counts even while work is under way
+        ("issue:WAIO-12", 60),
         ("issue:WAIO-8#part-1", 60),
         ("issue:WAIO-9", 60),
+        ("#docs", 50),  # documentation and SQL only
+        ("#tasks/h5", 50),
+        ("issue:WAIO-10", 40),  # a status change into todo/in_progress/blocked settles nothing
         ("issue:WAIO-7", 40),
         ("rebaseline:code.example.com/web/app", 40),
+        ("#app", 40),  # code with a README is still a code change
+        ("#cfg", 40),  # a linter config next to notes: mixed, so a plain delta
         ("#src", 40),
-        ("#tasks/h5", 40),
+        ("#.", 35),  # only tooling and dependency manifests: frozen, ranked below code
         ("hygiene:orphan:x.md", 30),
         ("refresh:metrics/a.md", 20),
     ]
@@ -94,6 +108,8 @@ def test_plan_redacts_secrets_in_briefs() -> None:
     ("certs/server.pem", "secret"),
     ("ops/tls.key", "secret"),
     ("ops/credentials-prod.json", "secret"),
+    ("package.json", None),  # tooling: frozen, ranked last (below)
+    (".env.example", "secret"),  # the secret rule comes first: never frozen
     ("docs/environment.md", None),
     ("tasks/h5/README.md", None),
     ("src/app.ts", None),
@@ -101,6 +117,16 @@ def test_plan_redacts_secrets_in_briefs() -> None:
 ])
 def test_noise_categories(path: str, kind: str | None) -> None:
     assert planner.noise(path) == kind
+
+
+@pytest.mark.parametrize(("path", "manifest"), [
+    ("package.json", True), ("web/package.json", True), (".gitignore", True), (".prettierrc.json", True),
+    ("tsconfig.app.json", True), ("env.example", True), ("requirements-dev.txt", True), ("constraints.txt", True),
+    ("eslint.config.mjs", True), ("pyproject.toml", True), ("docs/notes.txt", False), ("CMakeLists.txt", False),
+    ("src/app.ts", False), ("docs/package.md", False),
+])
+def test_tooling_manifests(path: str, manifest: bool) -> None:
+    assert planner.tooling(path) is manifest
 
 
 @pytest.mark.parametrize(("path", "topic"), [

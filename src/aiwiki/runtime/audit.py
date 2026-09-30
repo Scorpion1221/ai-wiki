@@ -38,7 +38,7 @@ from ..engine.document import (
 )
 from ..engine.gen_indexes import generate_indexes
 from ..engine.scan_sources import _source_resource_rel
-from ..engine.validate import parse_doc, should_check, validate_changed
+from ..engine.validate import PROFILE_REQUIRED, parse_doc, should_check, validate_changed
 from ..engine.validate import validate as validate_bundle
 from ..service import ingest as I
 from ..version import service_identity
@@ -1163,9 +1163,15 @@ def _targets(document) -> set[str]:
 
 def _widens(key: str, old: object, new: object) -> bool:
     """Whether a content key says more than HEAD's (§2.4: content keys narrow like the body):
-    a new key or list item, a higher confidence, text grown past 20%, or a changed caveat."""
+    a new key or list item, a higher confidence, text grown past 20%, or a changed caveat.
+    Removing an optional key says less, except a hedge: a caveat, whose conflict only its
+    curators resolve, or a confidence below the top, whose absence reads as unhedged. A
+    required key cannot be removed at all (validation would refuse the whole changeset)."""
     if old == new:
         return False
+    if new is None:
+        hedge = key in _CAVEATS or (key == "confidence" and old != _CONFIDENCE[-1])
+        return hedge or key in PROFILE_REQUIRED
     if key == "confidence":
         return not (old in _CONFIDENCE and new in _CONFIDENCE and _CONFIDENCE.index(new) < _CONFIDENCE.index(old))
     if isinstance(old, list) and isinstance(new, list) and key not in _CAVEATS:
