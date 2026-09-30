@@ -449,6 +449,12 @@ def test_a6_content_keys_narrow_like_the_body() -> None:
             "---\n#", edit + "\n---\n#")
         assert audit._narrowing(before, widened, before) == "D_GROWTH", edit
     assert audit._narrowing(before, before.replace("[x.md]", "[]"), before) == "D_GROWTH"  # a caveat cleared
+    # Removing a content key says less (the 2026-09-29 downgrades deleted a whole key); removing a
+    # caveat does not: a recorded conflict is its curators' to resolve.
+    for key in ("tags", "confidence", "description"):
+        removed = re.sub(rf"(?m)^{key}:.*\n", "", before)
+        assert audit._narrowing(before, removed, before) is None, key
+    assert audit._narrowing(before, before.replace("contested: true\n", ""), before) == "D_GROWTH"
     assert audit._narrowing(before, before.replace("[x.md]", "[x.md, y.md]"), before) == "D_NEW_LINK"
 
 

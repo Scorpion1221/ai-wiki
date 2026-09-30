@@ -239,7 +239,9 @@ def test_aging_adds_five_per_whole_day_waited_so_nothing_starves(bundle, clock):
         return M._effective_priority({"priority": priority, "created_at": M._iso(now - age)}, now)
 
     assert [aged(40, age) for age in (timedelta(0), timedelta(hours=23, minutes=59), timedelta(days=1),
-                                      timedelta(days=12, hours=5), -timedelta(days=1))] == [40, 40, 45, 100, 40]
+                                      timedelta(days=11, hours=5), timedelta(days=12, hours=5),
+                                      -timedelta(days=1))] == [40, 40, 45, 95, 99, 40]
+    assert aged(100, timedelta(days=3)) == 100  # a member submission neither ages nor caps
     waiting = {"repo:x#new-issue": (60, timedelta(hours=1)), "repo:x#old-code": (40, timedelta(days=5)),
                "repo:x#new-member": (100, timedelta(0)), "repo:x#starved": (20, timedelta(days=17))}
     for topic, (priority, age) in waiting.items():
@@ -252,8 +254,9 @@ def test_aging_adds_five_per_whole_day_waited_so_nothing_starves(bundle, clock):
         served.append(item["topic_key"])
         M.resolve(bundle, item["id"], {"outcome": "skipped", "reason": "out_of_scope"}, principal=P, run="WAIO-1")
 
-    # 20 + 17*5 = 105 > 100 > 40 + 5*5 = 65 > 60
-    assert served == ["repo:x#starved", "repo:x#new-member", "repo:x#old-code", "repo:x#new-issue"]
+    # A fresh member submission (100) comes first; aging caps at 99, so the starved item
+    # (20 + 17*5 = 105 -> 99) still beats 40 + 5*5 = 65 > 60.
+    assert served == ["repo:x#new-member", "repo:x#starved", "repo:x#old-code", "repo:x#new-issue"]
 
 def test_item_key_is_idempotent_and_a_ready_topic_absorbs_newer_evidence(bundle, clock, monkeypatch):
     first = _item("repo:x#a", _file("S1-README.md", "v1"))

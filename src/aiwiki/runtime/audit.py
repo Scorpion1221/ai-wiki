@@ -1163,8 +1163,11 @@ def _targets(document) -> set[str]:
 
 def _widens(key: str, old: object, new: object) -> bool:
     """Whether a content key says more than HEAD's (§2.4: content keys narrow like the body):
-    a new key or list item, a higher confidence, text grown past 20%, or a changed caveat."""
+    a new key or list item, a higher confidence, text grown past 20%, or a changed caveat.
+    Removing a key says less, except a caveat, whose conflict only its curators resolve."""
     if old == new:
+        return False
+    if new is None and key not in _CAVEATS:
         return False
     if key == "confidence":
         return not (old in _CONFIDENCE and new in _CONFIDENCE and _CONFIDENCE.index(new) < _CONFIDENCE.index(old))

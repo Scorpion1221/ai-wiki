@@ -126,7 +126,7 @@ def test_collect_excludes_maintenance_issues_and_agent_output(multica: Path, tmp
     assert {key: value for key, value in first["origin"].items() if key != "until"} == {
         "kind": "issue", "issue_id": "issue-610", "identifier": "WAIO-610", "status": "in_review",
         "after": CURSOR["updated_at"], "deferred": False}
-    assert first["signals"] == {"decision": True, "status_changes": 1}
+    assert first["signals"] == {"decision": True, "status_changes": 1, "settled": True}  # in_review
     assert first["brief"] == ("WAIO-610 [in_review] title 610; 2 comments (1 by members); "
                               "status in_review → done; decision")
     [file] = first["files"]
@@ -140,7 +140,7 @@ def test_collect_excludes_maintenance_issues_and_agent_output(multica: Path, tmp
     assert "reply to c-member" in text
     for dropped in ("before the cursor", "wiki updated", "usage limit"):
         assert dropped not in text
-    assert second["signals"] == {"decision": False, "status_changes": 0}
+    assert second["signals"] == {"decision": False, "status_changes": 0, "settled": True}
     assert [(item["topic_key"], item["priority"]) for item in planner.plan(result["candidates"])] == [
         ("issue:WAIO-610", 60), ("issue:WAIO-612", 40),
     ]

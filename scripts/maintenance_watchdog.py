@@ -39,6 +39,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -63,6 +64,7 @@ LEASE_TTL = timedelta(hours=3)
 LEASE_CLOCK_SKEW = timedelta(minutes=5)
 MAINT_ROLES = ("maintainer", "auditor")
 MAINT_CURSORS = ("repos", "issues")
+READY_BUCKETS = (1, 25, 50, 100, 200, 400, 800)  # maint_ready_stale pages again at each
 MEMBER_ORIGIN = "member"  # origin.kind of a member submission (service/inbox.py, AIWIKI_INTAKE=inbox)
 MAINT_ITEM = re.compile(r"it_[0-9a-f]{12}")
 # service/maint_state._valid: an item.json that fails it is invisible to the writer.
@@ -82,6 +84,7 @@ CARD_GROUPS = (
     (("job_",), "✍️ Writer 任务",
      "maintain 管理的来源会自动重试；成员手动 ingest 的失败需要重新提交"),
     (("bundle_commit_",), "📦 Bundle 提交", "确认 writer 服务和每日维护是否仍在产出提交"),
+    (("disk_low",), "💾 磁盘", "清理 docker 构建缓存和旧镜像（docker builder prune -a），再看 journald 和备份目录"),
     (("audit_",), "🔎 外部审计",
      "查 auditor agent 最近的运行（`ai-wiki review begin` 预检或 lease 失败会让 issue blocked）和它的 token；"
      "`GET /audit/backlog` 列出待审概念"),
@@ -370,6 +373,11 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
     if proc.returncode != 0:
         raise CheckError(f"git log in {bundle} exit {proc.returncode}: {short(proc.stderr, 300)}")
     alerts = []
+    usage = shutil.disk_usage(bundle)
+    free_gb = round(usage.free / 1024 ** 3, 1)
+    if free_gb < args.min_free_gb:  # commits and frozen sources fail once the disk is full
+        alerts.append(alert(check, f"disk_low:{name}",
+                            f"writer {name}：所在磁盘只剩 {free_gb}G（阈值 {args.min_free_gb:g}G）"))
     commit, _, committed_at = proc.stdout.strip().partition(" ")
     committed = parse_ts(committed_at)
     commit_fact = {"commit": commit[:12] or None, "committed_at": iso(committed), "age_hours": age_h(now, committed)}
@@ -459,7 +467,8 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
             alerts.append(alert(check, f"job_stuck:{name}:{job.get('id')}:{status}",
                                 f"writer {name}：job {job.get('id')} 停在 {status} 已 {age}h"
                                 f"（阈值 {args.stuck_hours:g}h）"))
-    facts = {"bundle": str(bundle), "last_commit": commit_fact, "jobs": len(jobs), "unreadable_jobs": unreadable,
+    facts = {"bundle": str(bundle), "free_gb": free_gb, "last_commit": commit_fact, "jobs": len(jobs),
+             "unreadable_jobs": unreadable,
              "status_counts": counts, "queue_depth": len(queued), "maintainer_lease_until": iso(until),
              "oldest_queued_age_hours": age_h(now, queued[0]) if queued else None, "stuck_jobs": stuck,
              "failed_in_window": failed, "failed_window_hours": args.failed_window_hours,
@@ -538,7 +547,10 @@ def check_maint(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple[
     members.sort()
     stale = [(since, item_id) for since, item_id in ready if age_h(now, since) > args.ready_max_age_hours]
     if stale:
-        alerts.append(alert(check, f"maint_ready_stale:{name}",
+        # The key carries the size bucket, so a backlog that keeps growing pages again at each
+        # doubling instead of once; the same bucket stays deduplicated.
+        bucket = next((b for b in reversed(READY_BUCKETS) if len(stale) >= b), 1)
+        alerts.append(alert(check, f"maint_ready_stale:{name}:{bucket}",
                             f"maint {name}：{len(stale)} 个条目 ready 超过 {args.ready_max_age_hours:g}h"
                             f"（最老 {stale[0][1]}，已 {age_h(now, stale[0][0])}h）"))
     late = [(since, item_id) for since, item_id in members if age_h(now, since) > args.member_ready_max_age_hours]
@@ -827,6 +839,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--cursor-max-age-hours", type=float, default=30,
                    help="a maint collector cursor that exists but has not advanced")
     t.add_argument("--failed-window-hours", type=float, default=24, help="writer failures listed in the output")
+    t.add_argument("--min-free-gb", type=float, default=3, help="free space on each --bundle's filesystem (GB)")
     t.add_argument("--unresolved-failure-hours", type=float, default=168,
                    help="keep alerting on a writer failure with no later attempt for this long (default 7 days)")
     n = p.add_argument_group("notification")
