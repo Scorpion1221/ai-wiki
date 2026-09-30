@@ -51,7 +51,7 @@ NOT_RETRYABLE = frozenset(cls for cls, (retryable, _after) in CLASSES.items() if
 MAX_COUNTED = 3
 MAX_STARTED = 8
 AGING_PER_DAY = 5
-AGING_CAP = 99  # below a member submission (planner: 100)
+MEMBER_PRIORITY = 100  # planner.PRIORITY["member"]: served before any aged backlog
 DEFAULT_PRIORITY = 40
 TERMINAL = frozenset({"curated", "skipped", "duplicate", "split", "needs_access", "needs_conversion",
                       "needs_human", "requeued"})
@@ -576,11 +576,14 @@ def requeue(bundle: Path, item_ids: list[str], *, principal: str, reason: str | 
 
 
 def _effective_priority(item: dict, now: datetime) -> int:
-    """Aging: every whole day an item has waited adds AGING_PER_DAY, so nothing starves, up to
-    AGING_CAP, so an old backlog never outranks a member's fresh submission."""
+    """Aging: every whole day an item has waited adds AGING_PER_DAY, so nothing starves."""
     created = _parse(item.get("created_at")) or now
-    aged = item["priority"] + AGING_PER_DAY * max(0, (now - created).days)
-    return item["priority"] if item["priority"] >= AGING_CAP else min(aged, AGING_CAP)
+    return item["priority"] + AGING_PER_DAY * max(0, (now - created).days)
+
+
+def _serve_order(item: dict, now: datetime) -> tuple:
+    """Member submissions first, whatever the backlog's age; then aged priority, oldest first."""
+    return (item["priority"] < MEMBER_PRIORITY, -_effective_priority(item, now), item["created_at"], item["id"])
 
 
 def next_item(bundle: Path, *, principal: str, run: str | None) -> dict:
@@ -599,7 +602,7 @@ def next_item(bundle: Path, *, principal: str, run: str | None) -> dict:
             return {"item": current, "resumed": True, "ready": len(ready)}
         if not ready:
             return {"item": None, "resumed": False, "ready": 0}
-        ready.sort(key=lambda i: (-_effective_priority(i, now), i["created_at"], i["id"]))
+        ready.sort(key=lambda i: _serve_order(i, now))
         item = ready[0]
         item.update(status="in_progress", current_run=run)
         item["attempts"]["started"] += 1

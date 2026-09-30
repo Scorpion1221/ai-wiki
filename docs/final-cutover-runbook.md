@@ -991,7 +991,8 @@ anything `-E` would blank.
 
 What the writer side pages on: a member's submission waiting in ready over 24 h (it missed a
 daily run), any item over 72 h or needing a human, a cursor that has not advanced for 30 h, a
-run lease stuck over 3 h, no commit for 48 h, writer job failures, and the oldest audit
+run lease stuck over 3 h, no commit for 48 h, writer job failures, less than 3 GB free on the
+bundle's disk, and the oldest audit
 backlog entry waiting over 72 h or a backlog the writer cannot derive
 (`audit_backlog_stale`, `audit_backlog_error`). A missed or failed daily run of the
 maintainer or the Auditor pages the same morning from the Multica side (10.2): the maintainer's
@@ -1322,9 +1323,10 @@ Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` show
 - Step 2's isolation gate may fail on the Multica check: a runtime whose daemon is logged in
   as a workspace owner or admin can read every agent's custom env. The fix changes who the
   daemon runs as, which the owner decides.
-- One maintainer run a day with `max_items=6` curates at most 6 items a day. The import of
-  step 4 and a busy day can queue more; `maint_ready_stale` (72 h) and the member check (24 h)
-  say when to raise `max_items`.
+- One maintainer run a day curates at most `max_items` items. The first scheduled day
+  (2026-09-30) enqueued 53 new items against `max_items=6`, so production runs with 25 since
+  then; `maint_ready_stale` (72 h, paging again at each bigger bucket) and the member check
+  (24 h) say when to raise it further.
 - The first days of `AIWIKI_AUDIT=external` release the old unverified concepts into the
   backlog 30 a day (the seed, step 6), so the Auditor's backlog stays long for a few days; the
   maintainer is not affected. The 72 h backlog alert (step 10.1) leaves seed entries out of

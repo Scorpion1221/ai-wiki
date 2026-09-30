@@ -487,7 +487,7 @@ def test_a_deferred_codex_audit_of_a_reverted_changeset_never_runs(gate) -> None
     assert gate.audits == [] and (audit["failure"]["class"], audit["failure"]["retryable"]) == ("input", False)
     assert I.pending_audits(gate.writer, older_than_hours=0)["total"] == 0
     # The watchdog reads the revert as what settled that audit, not as a failure to page about.
-    watchdog = subprocess.run([sys.executable, str(WATCHDOG), "--bundle", str(gate.writer)],
+    watchdog = subprocess.run([sys.executable, str(WATCHDOG), "--bundle", str(gate.writer), "--min-free-gb", "0"],
                               capture_output=True, text=True, timeout=60)
     report = json.loads(watchdog.stdout)
     assert (watchdog.returncode, report["alerts"]) == (0, []), report

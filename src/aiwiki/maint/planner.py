@@ -27,6 +27,7 @@ PRIORITY = {
     "issue_signal": 60,  # an issue with a member's decision, or one that reached review or done
     "doc": 50,  # repository documentation or SQL outside the priority prefixes
     "delta": 40,  # any other repository or issue increment
+    "tooling": 35,  # a repository topic that changed only tooling or dependency manifests
     "hygiene": 30,
     "refresh": 20,  # refresh and attention
 }
@@ -42,7 +43,7 @@ TOPIC_PREFIXES = (TASK_PREFIX, *MEMORY_PREFIXES)
 TASK_DOCS = frozenset({"readme", "status", "prd", "report"})
 DOC_SUFFIXES = frozenset({".md", ".markdown", ".mdx", ".rst", ".txt", ".sql"})
 # Issue statuses that settle what happened; todo, in_progress and blocked describe work under way.
-SETTLED_STATUSES = frozenset({"in_review", "done"})
+SETTLED_STATUSES = frozenset({"in_review", "done", "cancelled", "canceled"})
 
 LOCKFILES = frozenset({
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "poetry.lock",
@@ -58,14 +59,25 @@ NOISE_DIRS = {
 CI_FILES = frozenset({
     ".gitlab-ci.yml", ".travis.yml", "jenkinsfile", "azure-pipelines.yml", ".drone.yml", "bitbucket-pipelines.yml",
 })
-# Tooling and dependency manifests: version bumps and editor or linter settings, not knowledge.
+# Tooling and dependency manifests: mostly version bumps and editor or linter settings, but a
+# pinned dependency or a new env var can carry a fact, so they are frozen and ranked last among
+# repository changes rather than dropped as noise.
 TOOLING_FILES = frozenset({
     "package.json", ".gitignore", ".gitattributes", ".dockerignore", ".npmrc", ".nvmrc", ".node-version",
     ".python-version", ".tool-versions", ".editorconfig", ".prettierrc", ".prettierignore", ".eslintrc",
     ".eslintignore", ".stylelintrc", ".browserslistrc", ".babelrc", "tsconfig.json", "jsconfig.json",
-    "env.example", "renovate.json", ".releaserc",
+    "env.example", "renovate.json", "pyproject.toml", "go.mod", "cargo.toml", "gemfile", "pom.xml",
+    "composer.json",
 })
-TOOLING_FILE = re.compile(r"^(?:\.(?:prettier|eslint|stylelint|babel|lintstaged)rc(?:\..+)?|tsconfig\..+\.json)$")
+TOOLING_FILE = re.compile(
+    r"^(?:\.(?:prettier|eslint|stylelint|babel|lintstaged|release)rc(?:\..+)?|tsconfig\..+\.json"
+    r"|(?:eslint|prettier|babel|stylelint)\.config\.[cm]?[jt]s|(?:requirements|constraints)(?:[-_.].+)?\.txt)$")
+
+
+def tooling(path: str) -> bool:
+    """A tooling or dependency manifest (ranked ``tooling``), not a documentation or code change."""
+    name = PurePosixPath(path).name.lower()
+    return name in TOOLING_FILES or bool(TOOLING_FILE.search(name))
 TEST_FILE = re.compile(r"^test_.+\.py$|_test\.(?:py|go)$|\.(?:test|spec)\.[cm]?[jt]sx?$")
 MINIFIED = re.compile(r"\.min\.(?:js|css)$|\.map$")
 # Credential stores: the secret rules only catch known token shapes, not ``DB_PASS=...``.
@@ -101,8 +113,6 @@ def noise(path: str) -> str | None:
             return kind
     if name in CI_FILES:
         return "ci"
-    if name in TOOLING_FILES or TOOLING_FILE.search(name):
-        return "tooling"
     if TEST_FILE.search(name):
         return "test"
     if MINIFIED.search(name):
@@ -180,7 +190,9 @@ def priority_class(candidate: dict[str, Any]) -> str:
     ):
         return "task_doc"
     paths = signals.get("paths") or ()
-    if paths and all(PurePosixPath(path).suffix.lower() in DOC_SUFFIXES for path in paths):
+    if paths and all(tooling(path) for path in paths):
+        return "tooling"
+    if paths and all(PurePosixPath(path).suffix.lower() in DOC_SUFFIXES and not tooling(path) for path in paths):
         return "doc"
     return "delta"
 

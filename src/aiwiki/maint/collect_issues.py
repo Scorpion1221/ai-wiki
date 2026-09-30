@@ -224,7 +224,7 @@ def issue_candidates(
             "brief": brief if len(parts) == 1 else f"part {number}/{len(parts)} · {brief}",
             "files": part,
             "signals": {"decision": decision, "status_changes": len(changes),
-                        "settled": issue.get("status") in planner.SETTLED_STATUSES},
+                        "settled": bool(changes) and transition(changes[-1])[1] in planner.SETTLED_STATUSES},
         }
         for number, part in enumerate(parts, 1)
     ]

@@ -373,11 +373,6 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
     if proc.returncode != 0:
         raise CheckError(f"git log in {bundle} exit {proc.returncode}: {short(proc.stderr, 300)}")
     alerts = []
-    usage = shutil.disk_usage(bundle)
-    free_gb = round(usage.free / 1024 ** 3, 1)
-    if free_gb < args.min_free_gb:  # commits and frozen sources fail once the disk is full
-        alerts.append(alert(check, f"disk_low:{name}",
-                            f"writer {name}：所在磁盘只剩 {free_gb}G（阈值 {args.min_free_gb:g}G）"))
     commit, _, committed_at = proc.stdout.strip().partition(" ")
     committed = parse_ts(committed_at)
     commit_fact = {"commit": commit[:12] or None, "committed_at": iso(committed), "age_hours": age_h(now, committed)}
@@ -467,8 +462,7 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
             alerts.append(alert(check, f"job_stuck:{name}:{job.get('id')}:{status}",
                                 f"writer {name}：job {job.get('id')} 停在 {status} 已 {age}h"
                                 f"（阈值 {args.stuck_hours:g}h）"))
-    facts = {"bundle": str(bundle), "free_gb": free_gb, "last_commit": commit_fact, "jobs": len(jobs),
-             "unreadable_jobs": unreadable,
+    facts = {"bundle": str(bundle), "last_commit": commit_fact, "jobs": len(jobs), "unreadable_jobs": unreadable,
              "status_counts": counts, "queue_depth": len(queued), "maintainer_lease_until": iso(until),
              "oldest_queued_age_hours": age_h(now, queued[0]) if queued else None, "stuck_jobs": stuck,
              "failed_in_window": failed, "failed_window_hours": args.failed_window_hours,
@@ -477,6 +471,19 @@ def check_bundle(bundle: Path, args: argparse.Namespace, now: datetime) -> tuple
 
 
 # --- maintainer queue ----------------------------------------------------------------------
+
+
+def check_disk(bundle: Path, args: argparse.Namespace) -> tuple[dict, list[dict]]:
+    """Free space on the bundle's filesystem: commits and frozen sources fail once it is full."""
+    try:
+        free = shutil.disk_usage(bundle).free / 1024 ** 3
+    except OSError as exc:
+        raise CheckError(f"cannot stat {bundle}: {exc}") from None
+    alerts = []
+    if free < args.min_free_gb:
+        alerts.append(alert(f"disk:{bundle.name}", f"disk_low:{bundle.name}",
+                            f"writer {bundle.name}：所在磁盘只剩 {free:.1f}G（阈值 {args.min_free_gb:g}G）"))
+    return {"path": str(bundle), "free_gb": round(free, 1)}, alerts
 
 
 def maint_item_ok(item: dict | None, item_id: str) -> bool:
@@ -765,9 +772,19 @@ def _post_feishu(url: str, secret: str | None, body: dict) -> None:
         raise CheckError(f"feishu webhook rejected the message: code {code} {short(reply.get('msg'), 120)}")
 
 
+def _announced(key: str, previous: list[str]) -> str:
+    """A size-bucketed key (``maint_ready_stale:<bundle>:<bucket>``) keeps the highest bucket
+    already announced while it stays alerting, so a shrinking backlog does not page as a new
+    alert and a count around a boundary does not page twice; only a higher bucket pages."""
+    stem, _, bucket = key.rpartition(":")
+    if not stem.startswith("maint_ready_stale:") or not bucket.isdigit():
+        return key
+    seen = [int(b) for k in previous for s, _, b in [k.rpartition(":")] if s == stem and b.isdigit()]
+    return f"{stem}:{max([int(bucket), *seen])}"
+
+
 def notify(args: argparse.Namespace, result: dict) -> dict:
     keys = sorted([a["key"] for a in result["alerts"]] + [f"error:{e['check']}" for e in result["errors"]])
-    fingerprint = hashlib.sha256("\n".join(keys).encode()).hexdigest()[:16] if keys else None
     state_path = Path(args.state_file).expanduser() if args.state_file else None
     previous: dict = {}
     if state_path:
@@ -776,6 +793,8 @@ def notify(args: argparse.Namespace, result: dict) -> dict:
             previous = loaded if isinstance(loaded, dict) else {}
         except (OSError, ValueError):
             pass  # missing or unreadable state: re-announce rather than stay silent
+    keys = sorted(_announced(key, previous.get("keys") or []) for key in keys)
+    fingerprint = hashlib.sha256("\n".join(keys).encode()).hexdigest()[:16] if keys else None
     if fingerprint == previous.get("fingerprint"):
         action = "unchanged"
     elif fingerprint:
@@ -903,6 +922,7 @@ def watch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         path = Path(bundle).expanduser().resolve()
         plan.append((f"writer:{path.name}", lambda path=path: check_bundle(path, args, now)))
         plan.append((f"maint:{path.name}", lambda path=path: check_maint(path, args, now)))
+        plan.append((f"disk:{path.name}", lambda path=path: check_disk(path, args)))
         if args.writer_url:
             plan.append((f"audit:{path.name}", lambda path=path: check_audit(path.name, args, now)))
     for name, check in plan:

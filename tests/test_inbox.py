@@ -602,8 +602,8 @@ def test_member_items_come_first_and_ageing_never_passes_them(tmp_path, monkeypa
     ancient = collected("repo:x#ancient")
     now[0] += timedelta(days=13)
     fresh = member("fresh")
-    # Ageing caps at 99: an old backlog never pushes a member's fresh submission back a day,
-    # and the ancient item still comes right after it, ahead of anything fresher.
+    # Members come first whatever the backlog's age (ancient is at 105): a member's fresh
+    # submission never waits a day behind it, and the ancient item still comes right after.
     assert [claimed(), claimed()] == [fresh, ancient]
 
 
