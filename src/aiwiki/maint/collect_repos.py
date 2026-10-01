@@ -932,7 +932,9 @@ def topic_candidate(
         if not blob:  # deleted, a symlink or a submodule: listed in the manifest only
             continue
         data = read_blob(object_repo, blob)
-        file = None if b"\0" in data else planner.evidence_file(
+        # An empty file (an ``__init__.py``) or binary content: listed in the manifest only. The
+        # writer refuses empty evidence, which would fail the whole collect.
+        file = None if not data.strip() or b"\0" in data else planner.evidence_file(
             snapshot_name(change["path"]), data.decode(errors="replace"),
             {"kind": "git-file", **remote, "path": change["path"], "blob": blob},
         )

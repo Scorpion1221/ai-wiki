@@ -1015,6 +1015,7 @@ def test_collect_freezes_task_roots_and_top_directories_and_counts_noise(tmp_pat
         "tasks/h5/sql/q.sql": "select 2;\n",
         "memory/learnings.md": "- one\n- two\n",
         "src/app.ts": f"const client = new Client('{secret}')\n",
+        "src/__init__.py": "",  # empty: the writer refuses empty evidence (2026-10-01 collect failure)
         "package-lock.json": '{"lockfileVersion": 3}\n',
         "tests/test_app.py": "def test(): assert True\n",
         "assets/logo.png": b"\x89PNG\x00\x01",
@@ -1057,6 +1058,9 @@ def test_collect_freezes_task_roots_and_top_directories_and_counts_noise(tmp_pat
 
     app = by_topic["src"]["files"][1]
     assert secret not in app["data"].decode() and app["origin"]["redactions"] == 1
+    assert [file["origin"].get("path") for file in by_topic["src"]["files"][1:]] == ["src/app.ts"]
+    assert all(file["bytes"] > 0 for candidate in collected["candidates"] for file in candidate["files"])
+    assert "- A src/__init__.py" in by_topic["src"]["files"][0]["data"].decode()  # listed, not frozen
     big = by_topic["docs"]["files"][1]
     assert big["origin"]["path"] == "docs/big.md"
     assert big["origin"]["truncated"] and big["bytes"] <= planner.FILE_TEXT_LIMIT
