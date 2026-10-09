@@ -83,6 +83,9 @@ fresh, `verification_current: true`, and backed by a source that proves that exa
 - Cite the concept paths used, for example `metrics/<name>.md`.
 - Trust only returned content; never invent metrics, prices, events, fields, dates, or outcomes.
 - Surface material status/trust/freshness and the latest verification date.
+- A claim a concept attributes to an issue ("WAIO-722 reported…", "Reportedly,", "据报，") is
+  that report, whatever the concept's trust: relay it as a report with its issue and the date it
+  states, never as verified fact. The audit confirmed the report was made, not that it is true.
 - Follow `contested`, contradictions, and correction notes rather than choosing silently.
 - This client targets OKF v0.2 only. Do not produce `timestamp`, string `sources`,
   `last_verified_at`, `# Citations`, or legacy statuses.

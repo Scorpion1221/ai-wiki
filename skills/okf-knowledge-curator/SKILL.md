@@ -97,6 +97,13 @@ The redirect runs before analytics initialization.[^waio-68]
 [^waio-68]: WAIO-68 issue snapshot, localization diagnosis section.
 ```
 
+A footnote says where a claim comes from, not who stands behind it. When the source is an
+issue comment, the sentence itself names the issue as the reporter, with the date:
+
+```markdown
+WAIO-68 reported on 2026-08-01 that the redirect runs before analytics initialization.[^waio-68]
+```
+
 Do not use positional citations (`[1]`) or rely on footnote prose as the source key. A
 claim without adequate evidence stays narrowly worded and transiently `draft`, or is
 omitted. When the independent audit completes, the service sets every retained concept

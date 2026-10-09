@@ -122,6 +122,7 @@ For **commercial metrics** (payment, revenue, renewal, LTV), **experiment winner
 - `freshness: fresh` (`today < stale_after`);
 - `verification_current: true` (a `verified` event exists at or after `generated.at`);
 - sources that directly prove the claimed boundary (requirement ≠ merged code ≠ release ≠ production effect).
+  A high-risk claim known only from an attributed report (below) is never current truth.
 
 If any condition fails, do not output the claim as current truth. Say what is missing or
 expired and, if useful, report only the narrower source-backed statement.
@@ -131,6 +132,10 @@ expired and, if useful, report only the narrower source-backed statement.
 - Cite concept paths, for example `metrics/<x>.md` and `experiments/<y>.md`.
 - Trust only returned content. Never invent definitions, prices, events, dates, or outcomes.
 - Surface `status`, `trust`, `freshness`, and verification date when they affect the answer.
+- A claim the concept attributes to an issue ("WAIO-722 reported…", "据 WAIO-722 报告…",
+  "Reportedly,", "据报，") is that report, whatever the concept's trust: relay it as a report
+  with its issue and the date it states (never `generated_at`/`verified_at`), and never call
+  its content verified or machine-confirmed. The audit confirmed the report, not its truth.
 - Separate explicit facts from your inference across concepts.
 - Definitive empty arrays/counts mean the command succeeded and found nothing; do not rerun
   just to verify emptiness.
