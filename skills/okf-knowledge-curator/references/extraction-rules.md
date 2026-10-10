@@ -16,6 +16,8 @@ release/live state, prices, events, and data contracts.
 For each fact record what the source can and cannot prove:
 
 - requirement/discussion → intent or proposal
+- issue comment → that its author reported it (or, a member only, decided it) at that time:
+  name the issue in the sentence ("WAIO-68 reported that …"); a footnote alone is not that
 - mainline commit → merged code only
 - production QA → availability at the observed time
 - mature metric/data result → measured effect for its cohort/window

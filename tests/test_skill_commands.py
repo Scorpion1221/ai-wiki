@@ -74,7 +74,9 @@ def test_every_command_resolves_to_a_real_verb_and_flags(root, text: Path) -> No
 def test_the_skill_covers_the_whole_loop(root) -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert text.startswith("---\nname: ai-wiki-curating-maintainer\n")
-    assert len(text.splitlines()) <= 220
+    # A budget, not a style rule: the whole skill is loaded into every maintainer run. 2026-10-10
+    # took it from 220 to 230 for the issue-comment attribution rule and the `--deadline` parameter.
+    assert len(text.splitlines()) <= 230
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert {"doctor", "maint begin", "maint next", "maint skip", "maint split", "maint add-evidence",
             "concept new", "validate", "propose", "workspace pull", "maint park", "maint end"} <= verbs
