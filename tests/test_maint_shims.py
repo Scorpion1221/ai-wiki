@@ -123,4 +123,5 @@ def test_deployed_shim_fails_closed_without_a_usable_cli(tmp_path: Path) -> None
         assert result.stdout == ""
         assert result.stderr.startswith(f"{name}: fatal: cannot import aiwiki.maint.{name} ")
         assert result.stderr.rstrip().endswith("uv tool install --force git+https://github.com/Scorpion1221/ai-wiki "
-                                               "&& hash -r"), "the skill preflight's own repair command"
+                                               "&& hash -r && ai-wiki skill install"), \
+            "the skill preflight's own repair command"

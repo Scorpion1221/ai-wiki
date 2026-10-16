@@ -1,6 +1,6 @@
 [project]
 name = "ai-wiki"
-version = "0.3.0"
+version = "0.3.1"
 description = "Hosted, agent-maintained OKF knowledge service (engine + CLI + API)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,6 +40,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aiwiki"]
+
+# The agent skills ship in the wheel, so `ai-wiki skill install` installs the ones written for this version.
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "aiwiki/skills"
 
 [tool.ruff]
 line-length = 120

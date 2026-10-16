@@ -7,6 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
+<!-- ai-wiki:version 0.3.1 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -22,7 +23,9 @@ ai-wiki bundle list        # bundles hosted by this server
 ```
 
 If the binary is missing, install it once with
-`uv tool install git+https://github.com/Scorpion1221/ai-wiki`. If it is unconfigured, ask
+`uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`. Keep it current with `ai-wiki update` (it installs the latest CLI and this skill
+together; re-read this file afterwards; never copy skills by hand; an ai-wiki without `update` needs the
+install command above). If it is unconfigured, ask
 the owner for the endpoint and token, then run:
 
 ```sh

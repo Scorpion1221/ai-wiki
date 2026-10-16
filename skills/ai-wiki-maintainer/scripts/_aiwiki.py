@@ -16,7 +16,8 @@ from pathlib import Path
 from types import ModuleType
 
 REEXEC_ENV = "AIWIKI_MAINT_SHIM_REEXEC"
-UPGRADE = "uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r"
+# Works with no CLI or one older than `ai-wiki update` (0.3.0): install, then let the new CLI install its skills.
+UPGRADE = "uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install"
 
 
 def load(module: str, label: str) -> ModuleType:
