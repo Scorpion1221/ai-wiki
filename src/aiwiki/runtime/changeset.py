@@ -40,6 +40,11 @@ HASH_PREFIX = "ch1:"
 # Keys the service stamps. They never count toward a concept's content hash.
 SERVICE_KEYS = frozenset(bookkeeping.SERVICE_KEYS["changeset"])
 VERDICTS = ("verified", "corrected", "unverified")
+# Stored origin kinds of work-item files (service.attention, maint add-evidence source:): an
+# attention notice says what is wrong and is never evidence; a bundle source is a file of the
+# bundle's sources/ whose bytes the writer matched against sources/.hashes.yaml before storing.
+NOTICE_KIND = "attention"
+SOURCE_KIND = "bundle-source"
 
 # name -> (environment variable, default)
 _LIMITS = {
@@ -60,6 +65,7 @@ CODES = {
     "duplicate_title": 422, "body_shrink": 422, "identity_locked": 422, "path_forbidden": 422,
     "service_owned_path": 422, "delete_forbidden": 422, "restructure_new_source": 422,
     "secret_detected": 422, "validation": 422, "audit_scope": 422, "self_verification": 422,
+    "notice_not_evidence": 422,
 }
 HINTS = {
     "missing_key": "add the key to the frontmatter",
@@ -82,6 +88,8 @@ HINTS = {
     "validation": "fix the reported problem",
     "audit_scope": "review only what GET /audit/backlog lists; drop this review",
     "self_verification": "no reviewer verifies its own generation, nor an auditor another auditor's; drop it",
+    "notice_not_evidence": "add evidence first (ai-wiki maint add-evidence <item> source:sources/<file>, a Git "
+                           "file or an issue) and cite that file, never the notice",
 }
 # Validator, policy and lint messages -> error code; the first match wins.
 _MESSAGE_CODES = (
@@ -513,6 +521,8 @@ def _label(part: Mapping) -> str:
         return f"{repository}@{str(part['commit'])[:7]}:{part['path']}"
     if kind == "multica-comment" and part.get("issue"):
         return f"{part['issue']}#{part['comment']}" if part.get("comment") else str(part["issue"])
+    if kind == SOURCE_KIND and part.get("path"):
+        return str(part["path"])
     return f"{part['item']}/{part['file']}" if part.get("item") else str(part.get("file"))
 
 
@@ -538,6 +548,11 @@ def build_packet(
         missing = [name for name in evidence["item_files"] if name not in provided]
         if missing:
             return None, [_error("input", f"evidence file(s) not provided: {', '.join(missing)}")]
+        # By the origin the writer stored with the file, never its name: a notice is no source.
+        notices = [name for name in evidence["item_files"] if provided[name].origin.get("kind") == NOTICE_KIND]
+        if notices:
+            return None, [_error("notice_not_evidence", f"{', '.join(notices)}: an attention notice says what is "
+                                                        "wrong with a concept, not why a claim holds")]
         members = []
         for index, name in enumerate(evidence["item_files"], start=1):
             item, file = name.split("/", 1)

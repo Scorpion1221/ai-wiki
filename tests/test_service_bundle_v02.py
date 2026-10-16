@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import subprocess
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from aiwiki.engine.document import concept_metadata, freshness, trust_tier
+from aiwiki.engine.document import DEFAULT_STALE_DAYS, concept_metadata, freshness, stale_date, trust_tier
 from aiwiki.runtime import curate
 from aiwiki.service import bundle as B
 from aiwiki.service import ingest as I
@@ -55,6 +55,55 @@ def test_okf_v02_metadata_derivation() -> None:
     assert freshness({}) == "unspecified"
     assert freshness({"stale_after": "2026-08-13"}, date(2026, 8, 12)) == "fresh"
     assert freshness({"stale_after": "2026-08-13"}, date(2026, 8, 13)) == "stale"
+
+
+def test_freshness_defaults_to_ninety_days_after_generation_and_writes_nothing() -> None:
+    """Without a valid stale_after a generation is fresh for 90 days (the owner's one default
+    for every type); a declared date, even an earlier or later one, always wins."""
+    generated = {"generated": {"by": "process:curator", "at": "2026-08-13T23:30:00-02:00"}}  # 08-14 in UTC
+    assert DEFAULT_STALE_DAYS == 90 and stale_date(generated) == date(2026, 11, 12)
+    assert freshness(generated, date(2026, 11, 11)) == "fresh"
+    assert freshness(generated, date(2026, 11, 12)) == "stale"
+    metadata = concept_metadata(generated)
+    assert (metadata["stale_after"], metadata["stale_on"], metadata["freshness_basis"]) == ("", "2026-11-12", "default")
+
+    declared = {**generated, "stale_after": "2027-06-30"}
+    assert freshness(declared, date(2026, 12, 1)) == "fresh"
+    assert concept_metadata(declared) | {"freshness": None} == concept_metadata(declared) | {
+        "freshness": None, "stale_after": "2027-06-30", "stale_on": "2027-06-30", "freshness_basis": "declared"}
+    early = {**generated, "stale_after": date(2026, 9, 1)}  # a YAML date scalar
+    assert freshness(early, date(2026, 9, 2)) == "stale" and concept_metadata(early)["stale_on"] == "2026-09-01"
+
+    # An invalid stale_after (the validator reports it) or a datetime falls back to the default;
+    # no usable generation either leaves freshness unspecified, never fresh.
+    for broken in ("soon", "2026-02-30", datetime(2027, 1, 1, tzinfo=UTC)):
+        assert concept_metadata({**generated, "stale_after": broken})["stale_on"] == "2026-11-12"
+    for none in ({}, {"generated": {"at": "2026-08-13"}}, {"generated": {"at": "2026-08-13T10:00:00"}}):
+        assert freshness(none) == "unspecified"
+        assert (concept_metadata(none)["stale_on"], concept_metadata(none)["freshness_basis"]) == ("", "none")
+
+
+def test_the_default_drives_health_ranking_and_listings(tmp_path: Path) -> None:
+    """Every read surface agrees on the effective date: health counts, the search tie-breaker
+    (stale reads as history), ls and cat metadata, and nothing is written to the concept."""
+    today = date.today()
+    for name, generated in (("recent", today), ("old", date(2020, 1, 1))):
+        _concept(tmp_path, name, verified="verified: {by: process:audit, at: 2099-01-01T00:00:00Z}\n")
+        path = tmp_path / "topics" / f"{name}.md"
+        path.write_text(path.read_text(encoding="utf-8").replace("stale_after: 2099-01-01\n", "").replace(
+            "at: 2026-08-13T10:00:00Z", f"at: {generated.isoformat()}T00:00:00Z"), encoding="utf-8")
+    before = {path: path.read_bytes() for path in (tmp_path / "topics").glob("*.md")}
+
+    data = B.health(tmp_path)
+    assert data["by_freshness"] == {"fresh": 1, "stale": 1}
+    assert data["by_freshness_basis"] == {"default": 2}
+    assert [item["title"] for item in B.search(tmp_path, "needle", top_k=None)] == ["recent", "old"]
+    entries = {item["title"]: item for item in B.list_dir(tmp_path, "topics")}
+    assert entries["old"] | {"freshness": "stale", "stale_after": "", "stale_on": "2020-03-31",
+                             "freshness_basis": "default"} == entries["old"]
+    expected = (today + timedelta(days=DEFAULT_STALE_DAYS)).isoformat()
+    assert B.metadata_for_path(tmp_path, tmp_path / "topics" / "recent.md")["stale_on"] == expected
+    assert {path: path.read_bytes() for path in (tmp_path / "topics").glob("*.md")} == before
 
 
 def test_verification_before_current_generation_is_historical_only() -> None:
@@ -372,6 +421,7 @@ def test_health_reports_version_counts_and_git_revision(tmp_path: Path) -> None:
     assert data["concepts"] == 2
     assert data["by_trust"] == {"machine-confirmed": 1, "unverified": 1}
     assert data["by_freshness"] == {"fresh": 1, "stale": 1}
+    assert data["by_freshness_basis"] == {"declared": 2}
     assert data["git_revision"] == subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True,
     ).strip()

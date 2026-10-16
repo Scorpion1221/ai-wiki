@@ -1,7 +1,9 @@
 """Shared Open Knowledge Format v0.2 document helpers.
 
 This module is deliberately small: it parses one concept and derives the two
-read-side signals defined by OKF v0.2.  Validation policy lives in
+read-side signals defined by OKF v0.2.  Freshness is derived, never written: a concept
+without a valid ``stale_after`` goes stale ``DEFAULT_STALE_DAYS`` after its generation, so
+the default churns neither Git nor the audit backlog.  Validation policy lives in
 ``aiwiki.engine.validate`` so consumers can remain available even when a bundle
 contains an invalid document.
 """
@@ -9,7 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,11 @@ TRUST_HUMAN_REVIEWED = "human-reviewed"
 FRESHNESS_FRESH = "fresh"
 FRESHNESS_STALE = "stale"
 FRESHNESS_UNSPECIFIED = "unspecified"
+
+# The owner's one default for every type: a generation is current for 90 days unless the
+# concept declares its own ``stale_after``.
+DEFAULT_STALE_DAYS = 90
+BASIS_DECLARED, BASIS_DEFAULT, BASIS_NONE = "declared", "default", "none"
 
 
 class OKFDocumentError(ValueError):
@@ -160,8 +167,8 @@ def trust_tier(frontmatter: dict[str, Any]) -> str:
     return TRUST_MACHINE_CONFIRMED
 
 
-def stale_date(frontmatter: dict[str, Any]) -> date | None:
-    """Parse ``stale_after`` for read-side derivation, returning None if invalid."""
+def declared_stale_date(frontmatter: dict[str, Any]) -> date | None:
+    """Parse the declared ``stale_after``, returning None if absent or invalid."""
     raw = frontmatter.get("stale_after")
     if isinstance(raw, datetime):
         return None
@@ -175,14 +182,34 @@ def stale_date(frontmatter: dict[str, Any]) -> date | None:
         return None
 
 
+def _default_stale_date(frontmatter: dict[str, Any]) -> date | None:
+    generated = frontmatter.get("generated")
+    at = _instant(generated.get("at")) if isinstance(generated, dict) else None
+    return at.astimezone(UTC).date() + timedelta(days=DEFAULT_STALE_DAYS) if at is not None else None
+
+
+def freshness_basis(frontmatter: dict[str, Any]) -> str:
+    """Where the effective stale date comes from: ``declared``, ``default`` or ``none``."""
+    if declared_stale_date(frontmatter) is not None:
+        return BASIS_DECLARED
+    return BASIS_DEFAULT if _default_stale_date(frontmatter) is not None else BASIS_NONE
+
+
+def stale_date(frontmatter: dict[str, Any]) -> date | None:
+    """The effective stale date: a valid declared ``stale_after``, else the UTC date of
+    ``generated.at`` plus ``DEFAULT_STALE_DAYS``, else None."""
+    declared = declared_stale_date(frontmatter)
+    return declared if declared is not None else _default_stale_date(frontmatter)
+
+
 def is_stale(frontmatter: dict[str, Any], today: date | None = None) -> bool:
-    """A concept is stale on and after its absolute ``stale_after`` date."""
+    """A concept is stale on and after its effective stale date."""
     deadline = stale_date(frontmatter)
     return deadline is not None and (today or date.today()) >= deadline
 
 
 def freshness(frontmatter: dict[str, Any], today: date | None = None) -> str:
-    """Derive ``fresh``, ``stale``, or ``unspecified`` from ``stale_after``."""
+    """Derive ``fresh``, ``stale``, or ``unspecified`` from the effective stale date."""
     deadline = stale_date(frontmatter)
     if deadline is None:
         return FRESHNESS_UNSPECIFIED
@@ -221,6 +248,7 @@ def concept_metadata(frontmatter: dict[str, Any]) -> dict[str, Any]:
     generated_by, generated_at = generated_fields(frontmatter)
     verified_by, verified_at = verified_fields(frontmatter)
     current_verified_by, current_verified_at = current_verified_fields(frontmatter)
+    deadline = stale_date(frontmatter)
     return {
         "status": str(frontmatter.get("status") or "stable"),
         "trust": trust_tier(frontmatter),
@@ -233,7 +261,9 @@ def concept_metadata(frontmatter: dict[str, Any]) -> dict[str, Any]:
         "current_verified_by": current_verified_by,
         "current_verified_at": current_verified_at,
         "last_verification_at": verified_at,
-        "stale_after": scalar_text(frontmatter.get("stale_after")),
+        "stale_after": scalar_text(frontmatter.get("stale_after")),  # as declared
+        "stale_on": deadline.isoformat() if deadline else "",
+        "freshness_basis": freshness_basis(frontmatter),
     }
 
 

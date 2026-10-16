@@ -11,10 +11,11 @@ record is written with fsync + atomic rename, so a crash leaves the old or the n
 Items move ready -> in_progress(run) -> curated | skipped | duplicate | split |
 needs_access | needs_conversion | needs_human, or -> parked, which returns to ready when the
 next maintainer run takes the lease. Attempt caps and non-retryable failures move an item to
-needs_human; that only raises an alert and never blocks any other item. A member submission
-(``origin.kind`` member, see ``service.inbox``) is queued without a lease and records the
-commit of its redacted copy (``intake``), and an unfinished one leaves the queue as requeued
-when an admin hands it back to the Codex path.
+needs_human; that only raises an alert and never blocks any other item. A new run also queues
+the writer's attention items (``service.attention``, design §5.3) through the same enqueue
+path. A member submission (``origin.kind`` member, see ``service.inbox``) is queued without a
+lease and records the commit of its redacted copy (``intake``), and an unfinished one leaves
+the queue as requeued when an admin hands it back to the Codex path.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -31,6 +32,7 @@ import json
 import os
 import re
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -62,6 +64,7 @@ ADMIN_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conve
 REOPENABLE = frozenset({"needs_human", "skipped", "duplicate", "needs_access", "needs_conversion", "parked"})
 MAX_FILES = 64
 MAX_CHILDREN = 20
+ATTENTION_CAP = 100  # attention items one run start creates; the oldest go first, the rest wait
 MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
 REQUEUEABLE = frozenset({"ready", "parked", "needs_human"})  # member items the inbox rollback hands to Codex
 _ID = re.compile(r"it_[0-9a-f]{12}")
@@ -327,12 +330,15 @@ def require_lease(bundle: Path, role: str, *, principal: str, run: str | None) -
         return _hold(bundle, role, principal, run, _now())
 
 
-def acquire_lease(bundle: Path, role: str, *, principal: str, run: str | None) -> dict:
+def acquire_lease(bundle: Path, role: str, *, principal: str, run: str | None,
+                  attention: Callable[[], list[dict]] | None = None) -> dict:
     """Take the run-level lease for ``role``. A live lease of another run is a 409 with its holder.
 
     Taking the maintainer lease starts a run: items left in progress by an earlier or
     interrupted run return to ready (class ``interrupted``) and parked items become ready.
     The run that already holds the live lease only renews it; its own item stays claimed.
+    ``attention`` lists the attention items due (``service.attention.plan``); a new run
+    queues them, and its counts are the answer's ``attention``.
     """
     if role not in ROLES:
         raise MaintError(404, "not_found", f"unknown lease role: {role}")
@@ -350,7 +356,11 @@ def acquire_lease(bundle: Path, role: str, *, principal: str, run: str | None) -
         if role != "maintainer":
             return {"lease": lease}
         swept = {"interrupted": [], "unparked": [], "build_retry": []} if live else _begin_run(bundle, now)
+    if attention is None:
         return {"lease": lease, **swept}
+    # Outside the lock: reading the bundle takes a while, and the lease is already the run's.
+    return {"lease": lease, **swept, "attention": {"status": "not_run", "reason": "the run already held the lease"}
+            if live else _attention(bundle, attention)}
 
 
 def release_lease(bundle: Path, role: str, *, principal: str, run: str | None) -> dict:
@@ -398,6 +408,42 @@ def _begin_run(bundle: Path, now: datetime) -> dict:
             continue
         _save(bundle, item, now)
     return {"interrupted": interrupted, "unparked": unparked, "build_retry": build_retry}
+
+
+def _attention(bundle: Path, collect: Callable[[], list[dict]]) -> dict:
+    """Queue the attention items due, the oldest first, until ATTENTION_CAP of them are new.
+
+    A duplicate (a notice already queued or closed for that version) or a merge into a waiting
+    item costs nothing, so a backlog of skipped notices never starves the rest; the notices the
+    cap leaves are ``deferred`` to the next run. Nothing here may stop the run: a failure is
+    reported in the answer instead.
+    """
+    try:
+        specs, invalid = [], 0
+        for raw in collect():
+            try:
+                specs.append(_spec(raw))
+            except MaintError:  # one concept the queue cannot hold (a path past 512) spoils no other
+                invalid += 1
+        result = {"status": "ok", "due": len(specs), "cap": ATTENTION_CAP, "created": 0, "merged": 0,
+                  "duplicate": 0, "deferred": 0, "invalid": invalid, "by_reason": {}}
+        with _LOCK:
+            now = _now()
+            current = _items(bundle)
+            for index, (spec, files) in enumerate(specs):
+                if result["created"] >= ATTENTION_CAP:
+                    known = {key for item in current for key in [item["item_key"], *(
+                        version.get("item_key") for version in item["versions"])]}
+                    result["deferred"] = sum(left["item_key"] not in known for left, _files in specs[index:])
+                    break
+                outcome = _enqueue(bundle, spec, files, "service", current, now)["result"]
+                result[outcome] += 1
+                if outcome == "created":
+                    reason = str(spec["origin"].get("reason"))
+                    result["by_reason"][reason] = result["by_reason"].get(reason, 0) + 1
+        return result
+    except Exception as exc:  # noqa: BLE001 — attention never blocks the maintainer lease
+        return {"status": "failed", "error": redact(f"{type(exc).__name__}: {exc}")[:300]}
 
 
 # --- items ---------------------------------------------------------------------------

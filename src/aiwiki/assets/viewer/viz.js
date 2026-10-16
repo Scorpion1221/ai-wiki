@@ -422,7 +422,8 @@
     if (data.freshness) {
       const b = document.createElement("span");
       b.className = "badge freshness-" + String(data.freshness).toLowerCase();
-      b.textContent = data.freshness;
+      // Say where the date comes from: a declared stale_after or the 90-day default.
+      b.textContent = data.freshness_basis === "default" ? `${data.freshness} (default)` : data.freshness;
       badges.appendChild(b);
     }
 
@@ -456,7 +457,11 @@
     if (data.verified_at) verification.push(`latest ${data.verified_at}`);
     document.getElementById("detail-verified").textContent =
       verification.join(" · ") || "no verification history";
-    document.getElementById("detail-stale-after").textContent = data.stale_after || "—";
+    const staleAfter = data.stale_after
+      ? `${data.stale_after}${data.stale_on && data.stale_on !== data.stale_after ? ` (default: ${data.stale_on})` : ""}`
+      : data.stale_on ? `${data.stale_on} (default)` : "—";
+    document.getElementById("detail-stale-after").textContent = staleAfter;
+    document.getElementById("detail-freshness-basis").textContent = data.freshness_basis || "—";
 
     const sourcesEl = document.getElementById("detail-sources");
     sourcesEl.innerHTML = "";

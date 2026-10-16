@@ -26,10 +26,11 @@ PRIORITY = {
     "task_doc": 70,  # a task root's README/status/PRD/report
     "issue_signal": 60,  # an issue with a member's decision, or one that reached review or done
     "doc": 50,  # repository documentation or SQL outside the priority prefixes
+    "attention": 45,  # a concept the auditor judged unverified in its current version (service.attention)
     "delta": 40,  # any other repository or issue increment
     "tooling": 35,  # a repository topic that changed only tooling or dependency manifests
     "hygiene": 30,
-    "refresh": 20,  # refresh and attention
+    "refresh": 20,  # refresh, and a concept whose freshness elapsed (service.attention)
 }
 
 ITEM_TEXT_LIMIT = 64 * 1024

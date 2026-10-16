@@ -267,6 +267,7 @@ def health(root: Path) -> dict:
     statuses: Counter = Counter()
     trusts: Counter = Counter()
     freshness_counts: Counter = Counter()
+    bases: Counter = Counter()  # declared stale_after, the 90-day default, or neither
     total = 0
     for _path, _rel, fm, _body, _text in _concept_records(root):
         meta = concept_metadata(fm)
@@ -275,6 +276,7 @@ def health(root: Path) -> dict:
         statuses[meta["status"]] += 1
         trusts[meta["trust"]] += 1
         freshness_counts[meta["freshness"]] += 1
+        bases[meta["freshness_basis"]] += 1
     return {
         "okf_version": bundle_okf_version(root),
         "git_revision": git_revision(root),
@@ -283,6 +285,7 @@ def health(root: Path) -> dict:
         "by_status": dict(statuses),
         "by_trust": dict(trusts),
         "by_freshness": dict(freshness_counts),
+        "by_freshness_basis": dict(bases),
     }
 
 
