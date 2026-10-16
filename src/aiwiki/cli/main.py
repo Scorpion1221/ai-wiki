@@ -610,13 +610,14 @@ def main(argv=None) -> int:
     p_skill = sub.add_parser(
         "skill", help="the agent skills this ai-wiki ships: status, or install them (they move with the CLI)",
         command_path="ai-wiki skill",
-        epilog=_examples("ai-wiki skill", "ai-wiki skill install", "ai-wiki skill install --dir ~/.agents/skills"),
+        epilog=_examples("ai-wiki skill", "ai-wiki skill install", "ai-wiki skill install --dir <skills dir>"),
         **common,
     )
     p_skill.add_argument("action", nargs="?", choices=("install",), help="install (default: show status)")
     p_skill.add_argument("names", nargs="*", metavar="SKILL", help="install only these (default: all)")
     p_skill.add_argument("--dir",
-                         help="the agent's skills directory (default: $AIWIKI_SKILLS_HOME or ~/.agents/skills)")
+                         help="the agent's skills directory (default: $AIWIKI_SKILLS_HOME, else "
+                              "~/.agents/shared-skills if it exists, else ~/.agents/skills)")
     p_update = sub.add_parser(
         "update", help="install main's head with uv, then its skills (--check only reports)",
         command_path="ai-wiki update", epilog=_examples("ai-wiki update --check", "ai-wiki update"), **common,

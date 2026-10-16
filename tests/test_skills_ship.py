@@ -101,3 +101,18 @@ def test_the_wheel_carries_the_skills(tmp_path: Path) -> None:
     names = zipfile.ZipFile(wheel).namelist()
     for name in skills.NAMES:
         assert f"aiwiki/skills/{name}/SKILL.md" in names
+
+
+def test_default_dir_follows_the_host_layout(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AIWIKI_SKILLS_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert skills.default_dir() == tmp_path / ".agents" / "skills"
+    # A Multica daemon host keeps skill bodies in shared-skills; install and update must both use it.
+    (tmp_path / ".agents" / "shared-skills").mkdir(parents=True)
+    assert skills.default_dir() == tmp_path / ".agents" / "shared-skills"
+    rows = skills.install()
+    assert all(row["path"].startswith(str(tmp_path / ".agents" / "shared-skills")) for row in rows)
+    assert not (tmp_path / ".agents" / "skills").exists()
+    assert {row["status"] for row in skills.status()} == {"current"}
+    monkeypatch.setenv("AIWIKI_SKILLS_HOME", str(tmp_path / "custom"))
+    assert skills.default_dir() == tmp_path / "custom"

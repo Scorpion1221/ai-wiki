@@ -26,6 +26,14 @@ SKILLS = ("ai-wiki", "ai-wiki-maintainer", "ai-wiki-curating-maintainer", "ai-wi
 PRESERVE = {"multica-metadata.json"}
 
 
+def _default_dest() -> Path:
+    """The same rule as ``aiwiki.skills.default_dir`` (this script runs without the package installed)."""
+    if os.environ.get("AIWIKI_SKILLS_HOME"):
+        return Path(os.environ["AIWIKI_SKILLS_HOME"]).expanduser()
+    shared = Path.home() / ".agents" / "shared-skills"
+    return shared if shared.is_dir() else Path.home() / ".agents" / "skills"
+
+
 def _files(root: Path) -> dict[str, str]:
     if not root.is_dir():
         return {}
@@ -102,8 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dest",
         type=Path,
-        default=Path(os.environ.get("AIWIKI_SKILLS_HOME", "~/.agents/skills")).expanduser(),
-        help="runtime skills directory (default: ~/.agents/skills)",
+        default=_default_dest(),
+        help="runtime skills directory (default: $AIWIKI_SKILLS_HOME, else ~/.agents/shared-skills if it exists, "
+             "else ~/.agents/skills)",
     )
     # No choices= here: Python 3.11's argparse checks an empty nargs="*" default against them.
     parser.add_argument("skills", nargs="*", metavar="SKILL", help=f"subset of {', '.join(SKILLS)} (default: all)")

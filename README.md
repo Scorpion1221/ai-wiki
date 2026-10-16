@@ -182,7 +182,8 @@ version) and are installed by the CLI itself, so they move with it:
 
 ```bash
 ai-wiki skill                    # current | stale | missing | foreign, per skill (by content)
-ai-wiki skill install            # into ~/.agents/skills (--dir or $AIWIKI_SKILLS_HOME to override)
+ai-wiki skill install            # into ~/.agents/shared-skills if the host has it, else ~/.agents/skills
+                                 # (--dir or $AIWIKI_SKILLS_HOME override; update uses the same directory)
 ai-wiki update --check           # installed vs GitHub main, and skill status
 ai-wiki update                   # uv-installs main's head, then the new code installs its own skills
 ```
