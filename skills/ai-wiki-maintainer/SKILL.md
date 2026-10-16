@@ -7,7 +7,7 @@ description: >-
   retries), interprets passed versus needs_attention, and advances a durable checkpoint
   without directly editing the OKF bundle or its Git repository.
 ---
-<!-- ai-wiki:version 0.3.1 -->
+<!-- ai-wiki:version 0.3.2 -->
 
 # AI Wiki Maintainer
 

@@ -3,9 +3,11 @@
     packaged  ``aiwiki/skills/<name>/`` in a wheel (pyproject force-includes the repository's ``skills/``),
               ``skills/<name>/`` in a checkout. Each SKILL.md carries ``<!-- ai-wiki:version X.Y.Z -->`` right after
               its frontmatter; ``tests/test_skills_ship.py`` fails when a stamp is not ``VERSION``.
-    target    ``~/.agents/skills/<name>`` (``AIWIKI_SKILLS_HOME`` or ``--dir`` override). A Multica-managed
-              ``multica-metadata.json`` there is kept; every other file comes from the package, so a deleted
-              resource cannot linger. A directory whose SKILL.md names another skill is never touched.
+    target    ``--dir``, else ``$AIWIKI_SKILLS_HOME``, else ``~/.agents/shared-skills`` when the host has it (a Multica
+              daemon host keeps skill bodies there so the daemon does not scan them twice), else ``~/.agents/skills``.
+              Every command resolves the same directory, so ``ai-wiki update`` never installs a second copy.
+              A Multica-managed ``multica-metadata.json`` there is kept; every other file comes from the package,
+              so a deleted resource cannot linger. A directory whose SKILL.md names another skill is never touched.
     status    by content, not by stamp: ``main`` moves without a version bump, so equal stamps can still differ.
     update    ``ai-wiki update`` installs ``main``'s head with uv, then runs the *new* code's ``ai-wiki skill install``,
               so a skill can never lag the CLI that installed it.
@@ -46,7 +48,11 @@ def packaged_root() -> Path:
 
 
 def default_dir() -> Path:
-    return Path(os.environ.get("AIWIKI_SKILLS_HOME", "~/.agents/skills")).expanduser()
+    """Where this host's agent skills live (same rule as the control repo's sync-skill-mirror.sh)."""
+    if os.environ.get("AIWIKI_SKILLS_HOME"):
+        return Path(os.environ["AIWIKI_SKILLS_HOME"]).expanduser()
+    shared = Path.home() / ".agents" / "shared-skills"
+    return shared if shared.is_dir() else Path.home() / ".agents" / "skills"
 
 
 def stamp(text: str) -> str | None:

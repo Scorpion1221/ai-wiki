@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on your own output.
 ---
-<!-- ai-wiki:version 0.3.1 -->
+<!-- ai-wiki:version 0.3.2 -->
 
 # AI Wiki Auditor
 
