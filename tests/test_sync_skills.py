@@ -50,7 +50,8 @@ def test_sync_skills_apply_refuses_shims_an_old_cli_cannot_serve(tmp_path: Path)
     assert applied.stdout.startswith(
         "ERROR ai-wiki-maintainer: not applied; checkpoint.py, issue_delta.py, scan_reference_repos.py fail in this "
         "runtime: checkpoint: fatal: cannot import aiwiki.maint.checkpoint ")
-    assert applied.stdout.endswith("uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r\n")
+    assert applied.stdout.endswith(
+        "uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install\n")
     assert deployed.read_text(encoding="utf-8") == "# the P0 script body\n"
 
 

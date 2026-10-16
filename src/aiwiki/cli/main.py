@@ -607,6 +607,21 @@ def main(argv=None) -> int:
     p_doctor.add_argument("--state-dir", type=Path, default=_STATE_DIR, help=f"default: {_STATE_DIR}")
     p_doctor.add_argument("--skills-dir", type=Path, help="report the role's installed skills by digest")
     p_doctor.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+    p_skill = sub.add_parser(
+        "skill", help="the agent skills this ai-wiki ships: status, or install them (they move with the CLI)",
+        command_path="ai-wiki skill",
+        epilog=_examples("ai-wiki skill", "ai-wiki skill install", "ai-wiki skill install --dir ~/.agents/skills"),
+        **common,
+    )
+    p_skill.add_argument("action", nargs="?", choices=("install",), help="install (default: show status)")
+    p_skill.add_argument("names", nargs="*", metavar="SKILL", help="install only these (default: all)")
+    p_skill.add_argument("--dir",
+                         help="the agent's skills directory (default: $AIWIKI_SKILLS_HOME or ~/.agents/skills)")
+    p_update = sub.add_parser(
+        "update", help="install main's head with uv, then its skills (--check only reports)",
+        command_path="ai-wiki update", epilog=_examples("ai-wiki update --check", "ai-wiki update"), **common,
+    )
+    p_update.add_argument("--check", action="store_true", help="report installed vs latest and skill status")
     p_ws = sub.add_parser(
         "workspace", help="pull the published bundle into a local workspace; show local changes",
         command_path="ai-wiki workspace",
@@ -683,6 +698,16 @@ def main(argv=None) -> int:
     ap.command_path = _command_path(args)
     a = ap.parse_args(args)
 
+    if a.cmd in ("skill", "update"):
+        from aiwiki import skills
+        from aiwiki.cli import update
+
+        if a.cmd == "skill" and a.names and a.action != "install":
+            _fail("skill names go with `install`", help_command="ai-wiki skill --help", code=2)
+        try:
+            return update.skill_command(a) if a.cmd == "skill" else update.update_command(a)
+        except skills.SkillError as exc:
+            _fail(str(exc), help_command=exc.help_command or f"{ap.command_path} --help", code=exc.code)
     if a.cmd == "bundle":
         return _cmd_bundle(a)
     if a.cmd == "config":

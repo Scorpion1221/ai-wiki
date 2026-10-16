@@ -177,18 +177,20 @@ The canonical query, maintenance, and curation skills live in [`skills/`](skills
 - `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker and, in its
   remote maintainer mode, by the curating maintainer.
 
-Check an installed runtime for drift, then explicitly synchronize it:
+The skills ship inside the `ai-wiki` package (each SKILL.md is stamped with the package
+version) and are installed by the CLI itself, so they move with it:
 
 ```bash
-python3 scripts/sync_skills.py --check
-python3 scripts/sync_skills.py --apply
-# alternate runtime root:
-python3 scripts/sync_skills.py --check --dest /path/to/.agents/skills
+ai-wiki skill                    # current | stale | missing | foreign, per skill (by content)
+ai-wiki skill install            # into ~/.agents/skills (--dir or $AIWIKI_SKILLS_HOME to override)
+ai-wiki update --check           # installed vs GitHub main, and skill status
+ai-wiki update                   # uv-installs main's head, then the new code installs its own skills
 ```
 
-The sync preserves a platform-managed `multica-metadata.json` but replaces every other
-file in these skill directories, so stale bundled scripts cannot silently override the
-repository version. Publish the same directories to Multica and compare them against this
+Install keeps a platform-managed `multica-metadata.json` but replaces every other file in
+these skill directories, so stale bundled scripts cannot silently override the shipped
+version; a directory whose SKILL.md names another skill is never touched. From a checkout,
+`python3 scripts/sync_skills.py --check|--apply` does the same against the repository copy. Publish the same directories to Multica and compare them against this
 check before enabling its Maintainer automation. Sync `ai-wiki-maintainer` only after its
 release is on GitHub `main` and deployed to the writer and read mirror: its preflight needs
 `compatible` from `ai-wiki health --json`, and reinstalling an older client cannot supply it.
