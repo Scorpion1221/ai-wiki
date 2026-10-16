@@ -899,12 +899,15 @@ def test_audit_stamps_generation_for_substantive_correction(tmp_path: Path, monk
         ),
         _verdict(verified=["features/release.md"], corrected=["features/release.md"]),
     )
-    assert result["status"] == "done" and result["audit"]["status"] == "passed"
-    assert result["audit"]["corrected_concepts"] == ["features/release.md"]
+    # The reviewer's correction is its own generation, which it never verifies (§5.4 A4): the
+    # external backlog lists it as a ``correction`` for another review.
+    assert result["status"] == "done" and result["audit"]["status"] == "needs_attention"
+    assert result["audit"]["corrected_concepts"] == result["audit"]["unverified_concepts"] == [
+        "features/release.md"]
     text = concept.read_text(encoding="utf-8")
-    # generated keeps its quoted block style; the new verified list uses flow style.
+    # generated keeps its quoted block style.
     assert f"generated:\n  by: {audit.AUDITOR}\n  at: '{AUDIT_NOW}'\n" in text
-    assert f"verified:\n  - {{by: {audit.AUDITOR}, at: {AUDIT_NOW}}}\n" in text
+    assert "verified" not in _frontmatter(concept)
     assert "may be merged" in text
 
 
@@ -1197,13 +1200,13 @@ def test_audit_replaces_future_bookkeeping_with_trusted_time(tmp_path: Path, mon
         _rewrite(path, change)
 
     result = _review(bundle, monkeypatch, future_review, _verdict(verified=["features/release.md"]))
-    assert result["status"] == "done" and result["audit"]["status"] == "passed"
+    assert result["status"] == "done" and result["audit"]["status"] == "needs_attention"  # its own correction
     frontmatter = _frontmatter(concept)
     stamp = audit._instant(AUDIT_NOW)
     assert frontmatter["description"] == "A materially corrected claim"
     assert frontmatter["generated"]["by"] == audit.AUDITOR
     assert audit._instant(frontmatter["generated"]["at"]) == stamp
-    assert frontmatter["verified"] == [{"by": audit.AUDITOR, "at": stamp}]
+    assert "verified" not in frontmatter  # the forged 2099 event is discarded and none is added
 
 
 def test_audit_stamps_verification_with_trusted_finish_not_reviewer_time(
@@ -1457,7 +1460,7 @@ def test_audit_restores_source_retarget_before_commit(
 
     result = _review(bundle, monkeypatch, retargeting_review, _verdict(verified=["features/release.md"]))
     assert result["status"] == "done"
-    assert result["audit"]["status"] == "passed"
+    assert result["audit"]["status"] == "needs_attention"  # the body changed: its own correction
     assert result["deterministic_repairs"] == {
         "features/release.md": ["restored immutable sources provenance"]
     }

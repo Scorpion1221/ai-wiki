@@ -1193,8 +1193,9 @@ def audit_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | N
     """The concepts due for an external review (design §5.3), derived from the published revision.
 
     Each names its path, the ``base`` content hash a review cites, its generation, why it is due
-    (``generation``, ``external`` or ``seed``) and the frozen sources it cites; never a curator's
-    changeset message or hand-off text. New work comes first, oldest first.
+    (``generation``, ``external``, ``correction`` with the ``corrected_run`` that wrote it, or
+    ``seed``) and the frozen sources it cites; never a curator's changeset message or hand-off
+    text. New work comes first, oldest first.
     """
     principal = _auth(authorization, "read")
     _enabled("audit")

@@ -136,13 +136,20 @@ def current_verified(frontmatter: dict[str, Any]) -> list[dict[str, Any]]:
     OKF keeps generation and verification history separate.  Once content changes,
     earlier verification is historical evidence, not confirmation of the new revision.
     A document without ``generated.at`` retains the official v0.2 advisory behaviour.
+    The author's own event at the generation's instant confirms nothing (design §5.4 A4:
+    no reviewer verifies its own generation): it is a reviewer that corrected a concept and
+    stamped its correction verified in the same act. A later review by the same actor, in
+    another run, reviews that correction (§5.3 ``correction``), so it counts.
+    ``trust_tier`` still counts every event (§5.3).
     """
     events = normalize_verified(frontmatter)
     generated = frontmatter.get("generated")
     generated_at = _instant(generated.get("at")) if isinstance(generated, dict) else None
     if generated_at is None:
         return events
-    return [event for event in events if (at := _instant(event.get("at"))) is not None and at >= generated_at]
+    author = str(generated.get("by") or "")
+    return [event for event in events if (at := _instant(event.get("at"))) is not None and (
+        at > generated_at or (at == generated_at and (not author or str(event.get("by") or "") != author)))]
 
 
 def trust_tier(frontmatter: dict[str, Any]) -> str:

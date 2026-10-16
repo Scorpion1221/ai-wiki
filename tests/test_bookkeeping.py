@@ -152,8 +152,36 @@ def test_substantive_edit_stamps_generation_in_the_files_own_style() -> None:
     assert repairs == []
     assert f"generated:\n  by: '{AUDITOR}'\n  at: '{STAMP}'\n" in text
     assert text.endswith("Corrected claim.\n")
-    frontmatter = _assert_valid_and_current(text)
-    assert frontmatter["verified"][-1] == {"by": AUDITOR, "at": STAMP}
+    document = parse_document(text)
+    assert validate_profile_document(document.frontmatter, document.body) == []
+    assert document.frontmatter["verified"][-1] == {"by": AUDITOR, "at": STAMP}
+    # The reviewer's own event at its own generation's instant confirms nothing (§5.4 A4); the
+    # audit passes no such verdict any more, but a legacy concept that holds one reads unverified.
+    metadata = concept_metadata(document.frontmatter)
+    assert (metadata["trust"], metadata["verification_current"]) == ("machine-confirmed", False)
+
+
+def test_a_reviewer_never_confirms_its_own_generation() -> None:
+    """Design §5.4 A4 on the read side: 141 production concepts held an auditor's correction
+    stamped verified by that auditor at the same instant. Such an event stays in the history
+    (trust is OKF §5.3's), but it never makes the revision current; another actor's event
+    at that instant, or the same actor's later review in another run, does."""
+    def concept(*events: str) -> dict:
+        return parse_document(
+            "---\ntype: Metric\ntitle: T\ngenerated: {by: 'process:ai-wiki-auditor', at: '2026-10-08T23:14:12Z'}\n"
+            "verified:\n" + "".join(f"- {{by: {event}}}\n" for event in events) + "---\n# T\n").frontmatter
+
+    own = concept("process:ai-wiki-auditor, at: 2026-10-08T23:14:12Z")
+    assert (concept_metadata(own)["trust"], concept_metadata(own)["verification_current"]) == (
+        "machine-confirmed", False)
+    for confirmed in (concept("'process:ai-wiki-adversarial-audit', at: 2026-10-08T23:14:12Z"),
+                      concept("process:ai-wiki-auditor, at: 2026-10-08T23:14:12Z",
+                              "process:ai-wiki-auditor, at: 2026-10-09T23:00:00Z"),
+                      concept("'human:owner', at: 2026-10-10T00:00:00Z")):
+        assert concept_metadata(confirmed)["verification_current"] is True, confirmed["verified"]
+    authorless = parse_document("---\ntype: Metric\ntitle: T\ngenerated: {at: '2026-10-08T23:14:12Z'}\n"
+                                "verified: {by: x, at: '2026-10-08T23:14:12Z'}\n---\n# T\n").frontmatter
+    assert concept_metadata(authorless)["verification_current"] is True
 
 
 def test_generation_moves_past_skewed_history_so_old_verification_is_not_current() -> None:

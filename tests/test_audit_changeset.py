@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from gate_fixture import AI_STUDY, AIO_AB, METRIC, Gate, clone, concept, git, wait_for
@@ -346,6 +347,56 @@ def test_a4_no_reviewer_verifies_its_own_generation(gate) -> None:
     assert pushed["status"] == "would_apply"  # a push since then is someone else's version to review
 
 
+def test_a4_a_correction_is_reviewed_by_a_later_run_never_its_own(gate) -> None:
+    """A correction is the auditor's new generation, unverified (rule 2). It returns to the
+    backlog as a ``correction`` (rule 3): the run that wrote it may not judge it, another run
+    of the same auditor may, and only its verified or unverified judgement settles it."""
+    lease(gate)
+    job = submit(gate, review(gate, AIO_AB, "corrected", content=narrowed(gate.read(AIO_AB)))).json()
+    record = job["reviews"][0]
+    assert (record["outcome"], record["run"]) == ("corrected", RUN) and job["audit"]["status"] == "needs_attention"
+    assert job["audit"]["verified_concepts"] == [] and job["audit"]["corrected_concepts"] == [AIO_AB]
+    after = published(gate, AIO_AB)
+    assert after["generated"]["by"] == AUDITOR and after["verified"] == parse_document(
+        gate.read(AIO_AB)).frontmatter["verified"]  # history kept, no event of its own
+    entry = next(entry for entry in backlog(gate)["concepts"] if entry["path"] == AIO_AB)
+    assert (entry["reason"], entry["corrected_run"], entry["base"]) == ("correction", RUN, record["content_hash"])
+    assert entry["since"] == after["generated"]["at"] and entry["verification_current"] is False
+
+    again = submit(gate, review(gate, AIO_AB))  # the same run: its own edit
+    assert again.status_code == 422 and again.json()["errors"][0]["code"] == "self_verification", again.text
+    assert "in the run that wrote it" in again.json()["errors"][0]["message"]
+    gate.client.delete("/maint/lease/auditor", params={"bundle": "kb-a"}, headers=gate.headers("auditor", RUN))
+    lease(gate, run="AUD-2")
+    later = submit(gate, review(gate, AIO_AB), run="AUD-2")
+    assert later.status_code == 201 and later.json()["reviews"][0]["outcome"] == "verified", later.text
+    metadata = gate.client.get("/cat", params={"bundle": "kb-a", "path": AIO_AB},
+                               headers=gate.headers("auditor")).json()["metadata"]
+    assert metadata["verification_current"] is True and metadata["current_verified_by"] == [AUDITOR]
+    assert (AIO_AB, "correction") not in due(gate)
+
+
+def test_a_correction_without_a_receipt_is_due_and_any_run_reviews_it(gate) -> None:
+    """Legacy corrections: a Codex audit's correction left unverified, or an auditor's that
+    verified itself (rule 1 reads it unverified), has no review record naming its run; it is
+    due as a ``correction`` and any auditor run may review it, never as a ``seed``."""
+    epoch = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")  # every fixture is older
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH=epoch, AIWIKI_AUDIT_SEED_PER_DAY="0")
+    stamp = "2026-10-08T23:14:12Z"
+    selfish = re.sub(r"(?m)^generated:\n(?:  .*\n)+", f"generated:\n  by: {AUDITOR}\n  at: '{stamp}'\n",
+                     gate.read(METRIC), count=1)
+    selfish = selfish.replace("verified:\n", f"verified:\n- {{by: {AUDITOR}, at: {stamp}}}\n", 1)
+    push(gate, METRIC, selfish, "Changeset: legacy-review\n\nreview: 1 concept(s)")
+    assert published(gate, METRIC)["verified"][0]["by"] == AUDITOR
+
+    entry = next(entry for entry in backlog(gate)["concepts"] if entry["path"] == METRIC)
+    assert (entry["reason"], entry["corrected_run"], entry["verification_current"]) == ("correction", None, False)
+    assert entry["since"] == stamp and backlog(gate)["seed"]["waiting"] == 1  # AIO_AB alone waits as a seed
+    lease(gate)
+    assert submit(gate, review(gate, METRIC)).json()["reviews"][0]["outcome"] == "verified"
+    assert METRIC not in [path for path, _reason in due(gate)]
+
+
 def test_a5_sources_identity_and_freshness_are_restored_not_refused(gate) -> None:
     lease(gate)
     before = gate.read(AIO_AB)
@@ -366,8 +417,10 @@ def test_a5_sources_identity_and_freshness_are_restored_not_refused(gate) -> Non
     assert after["sources"] == frontmatter["sources"] and (after["type"], after["title"]) == ("Experiment",
                                                                                              "Redacted title")
     assert "stale_after" not in after
-    assert after["generated"]["by"] == after["verified"][-1]["by"] == AUDITOR
-    assert audit._instant(after["generated"]["at"]) == audit._instant(after["verified"][-1]["at"])  # one instant T
+    # A correction is the auditor's own generation, which it never verifies (A4): no event added.
+    assert after["generated"]["by"] == AUDITOR and after["verified"] == frontmatter["verified"]
+    assert job["audit"] == {"status": "needs_attention", "verified_concepts": [], "unverified_concepts": [AIO_AB],
+                            "corrected_concepts": [AIO_AB]}
     assert "Redacted body." in git(gate.remote, "show", f"main:{AIO_AB}")
 
 
@@ -395,7 +448,7 @@ def test_a6_a_correction_that_adds_is_downgraded_not_failed(gate, edit, code) ->
     job = response.json()
     assert job["reviews"][0] | {"content_hash": None, "note": None} == {
         "path": AIO_AB, "base": changeset.content_hash(before), "verdict": "corrected", "outcome": "unverified",
-        "downgrade": code, "content_hash": None, "note": None}
+        "downgrade": code, "content_hash": None, "note": None, "run": RUN}
     assert job["audit"]["status"] == "needs_attention" and job["audit"]["unverified_concepts"] == [AIO_AB]
     after = git(gate.remote, "show", f"main:{AIO_AB}") + "\n"
     assert parse_document(after).body == parse_document(before).body.replace(ORPHAN + "\n", "")  # HEAD kept
@@ -460,6 +513,66 @@ def test_a6_content_keys_narrow_like_the_body() -> None:
     sure = owned.replace("confidence: medium", "confidence: high")
     assert audit._narrowing(sure, sure.replace("confidence: high\n", ""), sure) is None
     assert audit._narrowing(before, before.replace("[x.md]", "[x.md, y.md]"), before) == "D_NEW_LINK"
+
+
+def test_a6_a_correction_keeps_every_caveat() -> None:
+    """D_CAVEAT_REMOVED: d0e2a12 deleted the "快照非结论" guard and stamped the rest verified.
+    A hedge may be reworded or moved, and goes with a claim deleted whole; dropping it, or its
+    hedge word alone, while the claim it bounds stays, widens the concept."""
+    before = ("---\ntype: Experiment\ntitle: T\ndescription: 2026-08-21 首读数仅为方向性快照\n---\n# Readout\n\n"
+              "Humanizer 耗时 +27.3%，p<0.001。\n\n"
+              "- **快照非结论：** 相关数值是当时的分析快照，不构成实验赢家。Cramér's V 约 0.57。\n"
+              "- 合并只证明代码进入 `main`，不证明已部署。\n"
+              "- The lift was 4.2% in a preliminary readout of `TEST_Web_X`.\n"
+              "- Only desktop users were sampled in `TEST_Web_X`.\n")
+    removed = before.replace("- **快照非结论：** 相关数值是当时的分析快照，不构成实验赢家。Cramér's V 约 0.57。\n",
+                             "- Cramér's V 约 0.57。\n")
+    assert audit._narrowing(before, removed, before) == "D_CAVEAT_REMOVED"
+    for edit in (before.replace("，不证明已部署", ""),  # the clause alone
+                 before.replace("不证明已部署", "已部署"),  # inverted: the hedge word alone
+                 before.replace(" in a preliminary readout", ""),
+                 before.replace("description: 2026-08-21 首读数仅为方向性快照", "description: 2026-08-21 首读数")):
+        assert audit._narrowing(before, edit, before) == "D_CAVEAT_REMOVED", edit
+    merged = "合并只证明代码进入 `main`，不证明已部署。\n"
+    for edit in (before.replace("不构成实验赢家", "仍不足以判定实验赢家"),  # reworded with another limit
+                 before.replace("- " + merged, "") + "\n" + merged,  # moved
+                 before.replace("- The lift was 4.2% in a preliminary readout of `TEST_Web_X`.\n", ""),  # claim too
+                 before.replace("- Only desktop users were sampled in `TEST_Web_X`.\n", ""),  # "only" scopes
+                 before.replace("Humanizer 耗时 +27.3%，p<0.001。\n\n", "")):
+        assert audit._narrowing(before, edit, before) is None, edit
+    # A hedge that states no claim bounds the whole concept; one moved into a footnote no longer bounds it.
+    bare = before.replace("- **快照非结论：** 相关数值是当时的分析快照，不构成实验赢家。Cramér's V 约 0.57。\n",
+                          "- 读数窗口未完整，不构成实验赢家。\n")
+    assert audit._narrowing(bare, bare.replace("- 读数窗口未完整，不构成实验赢家。\n", ""), bare) == "D_CAVEAT_REMOVED"
+    noted = before.replace("，不证明已部署。", "。[^m]") + "\n[^m]: 不证明已部署。\n"
+    assert audit._narrowing(noted, noted.replace("[^m]: 不证明已部署。", "[^m]: the merge log."), noted) == \
+        "D_CAVEAT_REMOVED"
+    assert audit._narrowing(before, before.replace("。[^m]", "。"), before) is None
+
+
+def test_a6_d0e2a12_replayed_is_downgraded(gate) -> None:
+    """The production correction d0e2a12 (experiments/web-undetectable-provider-experiment.md),
+    replayed on a concept holding its guard section: deleting the guard keeps the concept as it was."""
+    guard = ("# 2026-08-21 读数护栏（WAIO-158）\n\n这些是**读数纪律约束**，不是可推广的效果结论。\n\n"
+             "- **读数窗口未完整、且存在强混杂：** Cramér's V 约 **0.57**；不应宣布 treatment 胜出。\n"
+             "- **快照非结论：** 相关数值是当时的分析快照，不是可推广的效果结论，也不构成实验赢家。\n\n"
+             "## 首轮读数数值\n\n仓库报告给出了上述护栏背后的数值：Humanizer 耗时 **+27.3%**，Cramér's V=0.581。\n")
+    original = gate.read(AIO_AB)
+    (gate.writer / AIO_AB).write_text(original.replace("Redacted fixture body.", guard), encoding="utf-8")
+    head = gate.read(AIO_AB)
+    deleted = re.sub(r"# 2026-08-21 读数护栏.*?(?=## 首轮读数数值)", "", head, flags=re.DOTALL).replace(
+        "给出了上述护栏背后的数值", "给出了首轮读数")
+    request = {"schema": changeset.SCHEMA, "kind": "audit", "base_revision": gate.head(), "run": RUN, "reviews": [
+        {"path": AIO_AB, "base": changeset.content_hash(head), "verdict": "corrected", "content": deleted,
+         "note": "the guard is unsupported"}]}
+
+    judged = audit.evaluate_review(gate.writer, request, actor=AUDITOR, now=datetime.now(UTC),
+                                   scope={AIO_AB: {"reason": "generation"}}, auditors=audit.AUDITOR_ACTORS)
+    (gate.writer / AIO_AB).write_text(original, encoding="utf-8")
+
+    assert judged["status"] == "would_apply", judged
+    assert (judged["reviews"][0]["outcome"], judged["reviews"][0]["downgrade"]) == ("unverified", "D_CAVEAT_REMOVED")
+    assert "快照非结论" in judged["files"][AIO_AB] and judged["audit"]["unverified_concepts"] == [AIO_AB]
 
 
 def test_a7_a_deprecated_concept_is_never_reviewed(gate) -> None:
@@ -776,6 +889,83 @@ def test_review_evidence_never_writes_where_a_packet_header_points(tmp_path) -> 
         f"{rel}: {hashlib.sha256(text.encode()).hexdigest()}\n" for rel, text in packets.items()), encoding="utf-8")
     assert [row["status"] for row in verbs.evidence(state, "kb", "metrics/m.md", config)[1]["evidence"]][1:3] == [
         "differs", "differs"]  # the header's sha256 alone proves nothing about the frozen text
+
+
+def test_review_evidence_lists_related_sources_the_concept_does_not_cite(tmp_path) -> None:
+    """graph-jsx was re-verified against its cited source while a newer, uncited one showed
+    GraphController replacing GraphJsxController: ``related`` names frozen sources that state two
+    or more of the concept's identifiers, most first, and drops names nearly every source states."""
+    from aiwiki.cli import maint
+    from aiwiki.cli import review as verbs
+
+    ws = tmp_path / "ws"
+    (ws / "features").mkdir(parents=True)
+    (ws / "sources" / "inbox").mkdir(parents=True)
+    common = " ".join(f"`common_id_{n}`" for n in range(3))
+    sources = {
+        "sources/cited.md": "GraphJsxController serves POST /question/graph/jsx/generator\n",
+        "sources/newer.md": "refactor: replace GraphJsxController with GraphController; app/controller/graphJsx.js "
+                            "deleted; graphIndex and `type` are required\n",
+        "sources/one-hit.md": "GraphJsxController only\n",
+        "sources/drifted.md": "GraphJsxController app/controller/graphJsx.js\n",
+        **{f"sources/noise-{n}.md": f"{common} questionId_field\n" for n in range(verbs.COMMON + 1)},
+    }
+    for rel, text in sources.items():
+        (ws / rel).write_text(text, encoding="utf-8")
+    (ws / "sources" / "inbox" / "fresh.md").write_text("GraphJsxController app/controller/graphJsx.js\n",
+                                                        encoding="utf-8")
+    ledger = {rel: hashlib.sha256(text.encode()).hexdigest() for rel, text in sources.items()}
+    ledger["sources/drifted.md"] = "0" * 64
+    (ws / "sources" / ".hashes.yaml").write_text("".join(f"{rel}: {sha}\n" for rel, sha in ledger.items()),
+                                                 encoding="utf-8")
+    (ws / "features" / "graph.md").write_text(
+        "---\ntype: Feature\ntitle: Graph JSX forwarder\naliases: [graphJsx forwarder]\nsources:\n"
+        "- {id: s, resource: /sources/cited.md}\n---\n# Summary\n\n`GraphJsxController` in "
+        f"app/controller/graphJsx.js forwards `questionId_field` and {common}; see [x](../sources/newer.md).\n",
+        encoding="utf-8")
+    state = tmp_path / "state"
+    maint._write(verbs._folder(state, RUN) / "review.json",
+                 {"run": RUN, "bundle": "kb", "max": 5, "taken": ["features/graph.md"], "pending": {},
+                  "submitted": [], "dropped": [], "workspace": str(ws)})
+    maint._write(verbs._pointer(state, "kb"), {"run": RUN, "bundle": "kb"})
+
+    code, found = verbs.evidence(state, "kb", "features/graph.md", tmp_path / "missing.json")
+
+    assert code == 0 and [row["status"] for row in found["evidence"]] == ["frozen"]
+    assert found["related"] == [{"source": "sources/newer.md", "matches": 3,  # graphJsx: an alias's name
+                                 "identifiers": ["GraphJsxController", "app/controller/graphJsx.js", "graphJsx"]}]
+
+
+def test_review_next_skips_the_corrections_its_own_run_wrote(gate, capsys, monkeypatch) -> None:
+    tools = gate.tmp / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    gate.connect("auditor")
+    state = gate.tmp / "auditor-state"
+    assert wiki(capsys, "review", "begin", "--run", RUN, "--state-dir", state)[0] == 0
+    code, taken = wiki(capsys, "review", "next", "--state-dir", state)
+    assert code == 0 and taken["path"] == AIO_AB
+    concept = Path(taken["concept"])
+    concept.write_text(narrowed(concept.read_text(encoding="utf-8")), encoding="utf-8")
+    assert wiki(capsys, "review", "verdict", AIO_AB, "corrected", "--note", "overstated", "--state-dir", state)[0] == 0
+    code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
+    assert code == 0 and sent["reviews"][0]["outcome"] == "corrected", sent
+    assert (AIO_AB, "correction") in due(gate)
+    from aiwiki.cli import review as verbs
+
+    state_file = verbs._folder(state, RUN) / "review.json"
+    record = json.loads(state_file.read_text(encoding="utf-8"))
+    record["taken"] = []  # even untaken, the run's own correction is not offered again
+    state_file.write_text(json.dumps(record), encoding="utf-8")
+
+    assert wiki(capsys, "review", "next", "--state-dir", state)[0] == 10
+    code, report = wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)
+    assert code == 0 and (report["corrected"], report["verified"], report["backlog_remaining"]) == (1, 0, 1)
+    assert wiki(capsys, "review", "begin", "--run", "AUD-2", "--state-dir", state)[0] == 0
+    code, taken = wiki(capsys, "review", "next", "--state-dir", state)
+    assert code == 0 and (taken["path"], taken["reason"]) == (AIO_AB, "correction")
 
 
 def test_a_human_reviews_any_concept_through_the_cli(gate, capsys, monkeypatch) -> None:

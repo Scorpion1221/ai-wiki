@@ -564,8 +564,10 @@ def apply_bookkeeping(
     if status is not None and _value(_lines(blocks, "status")) != status:
         blocks = _put(blocks, "status", [f"status: {status}\n"], order)
     if verdict == "verified":
-        # The event confirms the current generation, so it may never predate it.
-        event_at = stamp or _not_before(trusted_now, generated_at)
+        # The event confirms the current generation, so it may never predate it; nor, by its own
+        # author, share its instant, which reads as self-verification (§5.4 A4, current_verified).
+        author = generated.get("by") if isinstance(generated, dict) else None
+        event_at = stamp or _not_before(trusted_now, generated_at, strictly=bool(author) and author == actor)
         blocks = _put(blocks, "verified", _with_event(_lines(blocks, "verified"), actor, _text(event_at)), order)
 
     spilled, body = split_body_spill(body)

@@ -64,9 +64,10 @@ AUDIT_PROMPT = (
     "- `verified`: every current durable claim is supported and no material contradiction remains. If the "
     "concept was already fully supported, leave its file byte-for-byte unchanged.\n"
     "- Otherwise remove unsupported claims or qualify them as explicit uncertainty. After such a correction, "
-    "report the concept as `verified` only if the corrected concept is fully supported, else `unverified`.\n"
+    "report the concept as `verified` only if the corrected concept is fully supported, else `unverified`; "
+    "the service leaves a correction unverified until another review confirms it.\n"
     "- Bookkeeping is SERVICE-OWNED: never edit `verified`, `generated`, `status`, or `sources`. The service "
-    "restores them, stamps the new generation and your verification with trusted time, and sets `status`; "
+    "restores them, stamps the new generation and any verification with trusted time, and sets `status`; "
     "source provenance is frozen.\n"
     "- Never move text between the body and the frontmatter. If a concept has malformed structure (for "
     "example a verification-looking line at the top of its body), leave it for the service and mention it "
@@ -767,14 +768,21 @@ def run(bundle: Path, parent_job_id: str, job_path: Path) -> None:
         for rel in concepts:
             path = bundle / rel
             try:
+                edited = path.read_text(encoding="utf-8")
                 text, repairs = bookkeeping.apply_bookkeeping(
                     before[rel],
-                    path.read_text(encoding="utf-8"),
+                    edited,
                     actor=AUDITOR,
                     trusted_now=trusted_finish,
                     stage="audit",
                     verdict="verified" if rel in verdict["verified"] else "unverified",
                 )
+                if rel in verdict["verified"] and bookkeeping.substantive_change(before[rel], text, stage="audit"):
+                    # A correction is the reviewer's own generation, which it never verifies (§5.4
+                    # A4): the external backlog lists it as a ``correction`` for another review.
+                    text, repairs = bookkeeping.apply_bookkeeping(
+                        before[rel], edited, actor=AUDITOR, trusted_now=trusted_finish, stage="audit",
+                        verdict="unverified")
             except (OSError, UnicodeError, bookkeeping.BookkeepingError) as exc:
                 syntax_errors.append(f"{rel}: {exc}")
                 continue
@@ -958,6 +966,32 @@ _LINK = re.compile(r"\]\(\s*<?([^)\s>]+)|\[\[([^\]|#]+)")
 MAX_GROWTH = 1.2  # a correction's body, and each text value, grows by at most 20%
 _CONFIDENCE = ("low", "medium", "high")
 _CAVEATS = ("contested", "contradictions")  # a recorded conflict is its curators' to add or resolve
+# A6 for hedges (D_CAVEAT_REMOVED): a sentence that limits what the evidence shows bounds the
+# claims around it, so a correction that deletes it unbounds them (d0e2a12 deleted "快照非结论"
+# and stamped the result verified). HEAD's hedges are these epistemic limits; "only" and "仅"
+# scope a claim instead, so deleting a claim that holds them still narrows. The edit may reword
+# a hedge with any limiting words (``_LIMIT``: "尚不能判定" may become "仍不足以判定"), an
+# attribution among them: "据报" (the auditor's narrowing of a reported claim) confines it to its
+# source. Tuned on the 356 corrections of the production history to 2026-10-16 (88e103f).
+_HEDGE = re.compile(
+    r"不能据此|不能证明|不证明|不代表|不等于|不构成|无法确定|尚不能|非结论|不是结论|早期快照|初步|待验证|未验证"
+    r"|不显著|方向性|(?<![A-Za-z])(?:cannot conclude|not conclusive|inconclusive|preliminary|does not prove"
+    r"|not evidence|early snapshot|directional|caveat)(?![A-Za-z])", re.IGNORECASE)
+_LIMIT = re.compile(
+    _HEDGE.pattern + r"|不能|不足以|无法|不应|不得|尚未|仍未|仍待|没有|待确认|待核实|待核验"
+    r"|未(?:检出|证实|获证实|核实|确认|覆盖|验收|证明|提供|解决)|可能|推测|不确定|前提|假设|只|仅|据报|据.{1,40}?报告"
+    r"|所述|自报|声称"
+    r"|(?<![A-Za-z])(?:not|cannot|unverified|unconfirmed|uncertain|may|might|only|assum\w*|reportedly"
+    r"|according to)(?![A-Za-z])", re.IGNORECASE)
+_SENTENCE = re.compile(r"(?<=[。！？；!?;])|(?<=\.)\s+")
+_CLAUSE = re.compile(r"[，,、：:（）()]")
+_FOOTNOTE = re.compile(r"\[\^([^\]\s]+)\](:)?")
+_TARGET = re.compile(r"\]\([^)]*\)|https?://\S+")  # a link's target names a file, not a limit
+_HEADING = re.compile(r"#{1,6}\s")
+_BOOKKEEPING = ("verified", "generated", "status")  # a note on them is the service's to keep (A5)
+_KEPT = 0.5  # the share of a hedge's word pairs, or of the claims it bounds, an edit must keep
+_KEPT_WORDS = 0.6  # or of its words, when a rewording dropped a few of them
+_KEPT_CLAUSE = 0.8  # or of a hedged clause's word pairs, kept in one limiting clause
 
 
 def backlog_settings(environ: Mapping[str, str] = os.environ) -> tuple[datetime | None, int]:
@@ -1017,22 +1051,31 @@ def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping
     return sorted(target for target in _cited(rel, frontmatter) if frozen(target))
 
 
-def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str]]:
-    """``(path, content hash)`` of every review a done audit changeset recorded, and the seed
-    paths among them. An admin-reverted audit is no review: its concepts are due again."""
+def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str], dict[tuple[str, str], str | None]]:
+    """``(path, content hash)`` of every review a done audit changeset recorded, the seed paths
+    among them, and the run that wrote each correction (by its resulting content hash). An
+    admin-reverted audit is no review: its concepts are due again. A correction is no review of
+    what it wrote: only a verified or unverified judgement settles a version, so the version a
+    correction leaves is a ``correction`` for a later run to review (§5.3, §5.4 A4)."""
     reverted = I.reverted_by(bundle)
-    reviewed, seeded = set(), set()
+    reviewed, seeded, corrected = set(), set(), {}
     for job in I.changeset_jobs(bundle):
         if job.get("kind") != "audit" or job.get("status") != "done" or job.get("id") in reverted:
             continue
         for review in job.get("reviews") or []:
             if not isinstance(review, dict) or not isinstance(review.get("path"), str):
                 continue
-            reviewed.update((review["path"], review[key]) for key in ("base", "content_hash")
-                            if isinstance(review.get(key), str))
+            if isinstance(review.get("base"), str):
+                reviewed.add((review["path"], review["base"]))
+            if not isinstance(review.get("content_hash"), str):
+                pass
+            elif review.get("outcome") == "corrected":  # receipts before records kept a run hold the job's
+                corrected[(review["path"], review["content_hash"])] = review.get("run", job.get("run"))
+            else:
+                reviewed.add((review["path"], review["content_hash"]))
             if review.get("seed") is True:
                 seeded.add(review["path"])
-    return reviewed, seeded
+    return reviewed, seeded, corrected
 
 
 def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> dict[str, tuple[int, str, bool]]:
@@ -1079,18 +1122,21 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     A concept is due when it is not deprecated, no done audit changeset reviewed its current
     content, and either a commit the service did not write changed it, or a source it cites,
     since ``AIWIKI_BACKLOG_EPOCH`` and the service's last commit to it (``external``, whoever
-    generated it), or an auditor did not
+    generated it), or an auditor generated it and it is not verified in that version
+    (``correction``: an auditor's correction, or a legacy Codex audit's, is reviewed by a later
+    run, never by the run that wrote it; its ``corrected_run`` names that run when a receipt
+    recorded one), or an auditor did not
     generate it and it has an unverified generation since the epoch (``generation``) or is
     among the oldest unverified concepts from before the epoch, released
     ``AIWIKI_AUDIT_SEED_PER_DAY`` a day (``seed``).
     Without an epoch every unverified concept is a ``generation``. Each entry's ``since`` is
     when that version became due: the newest such commit for ``external``, else its generation.
-    New work comes first, each part oldest first. ``tree`` is the checkout read (the bundle by
-    default); the review receipts and the history are the bundle's.
+    New work (corrections included) comes first, each part oldest first. ``tree`` is the
+    checkout read (the bundle by default); the review receipts and the history are the bundle's.
     """
     epoch, per_day = settings or backlog_settings()
     tree = tree or bundle
-    reviewed, seeded = review_records(bundle)
+    reviewed, seeded, corrected = review_records(bundle)
     latest = external_changes(bundle, epoch, revision) if epoch else {}
     frozen = _frozen(tree)
     fresh, older = [], []
@@ -1112,17 +1158,22 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
                 pushed.append(when)
         if pushed:  # the concept, or evidence it cites, changed past the service
             reason, since = "external", max(pushed, key=_instant)
-        elif current or by in auditors:
+        elif current:
             continue
+        elif by in auditors:
+            reason, since = "correction", at or None
         elif epoch is None or (generated_at is not None and generated_at >= epoch):
             reason, since = "generation", at or None
         else:
             reason, since = "seed", at or None
-        (older if reason == "seed" else fresh).append({
+        entry = {
             "path": rel, "base": base, **{key: None if frontmatter.get(key) is None else str(frontmatter[key])
                                           for key in ("type", "title", "status")},
             "generated": {"by": by or None, "at": at or None}, "verification_current": current,
-            "sources": _local_sources(frozen, rel, frontmatter), "reason": reason, "since": since})
+            "sources": _local_sources(frozen, rel, frontmatter), "reason": reason, "since": since}
+        if reason == "correction":
+            entry["corrected_run"] = corrected.get((rel, base))
+        (older if reason == "seed" else fresh).append(entry)
 
     def oldest(entry: dict) -> tuple:
         return _instant(entry["since"]) or datetime.min.replace(tzinfo=UTC), entry["path"]
@@ -1181,6 +1232,111 @@ def _widens(key: str, old: object, new: object) -> bool:
     return True
 
 
+def _lines(document, frozen: tuple[str, ...]) -> list[str]:
+    """The body's lines and the text content keys' (§2.4: they narrow like the body)."""
+    texts = [document.body, *(value for key, value in document.frontmatter.items()
+                              if key not in frozen and isinstance(value, str))]
+    return [line.strip() for text in texts for line in text.splitlines() if line.strip()]
+
+
+def _sentences(line: str) -> list[str]:
+    return [part.strip() for part in _SENTENCE.split(line) if part.strip()]
+
+
+def _words(text: str) -> list[str]:
+    """Words, a CJK character being one: what a rewording or a move keeps."""
+    return re.findall(r"[a-z0-9_]+|[^\W\d_a-z]", _TARGET.sub(" ", text).lower())
+
+
+def _pairs(text: str) -> set[tuple[str, ...]]:
+    words = _words(text)
+    return set(zip(words, words[1:], strict=False)) or {tuple(words)}
+
+
+def _limits(text: str) -> int:
+    return len(_LIMIT.findall(_TARGET.sub(" ", text)))
+
+
+def _shape(text: str) -> tuple[set, set, int]:
+    """A unit's word pairs, its words and its limiting words."""
+    return _pairs(text), set(_words(text)), _limits(text)
+
+
+def _holds(unit: tuple[set, set, int], other: tuple[set, set, int]) -> bool:
+    """Whether ``other`` restates ``unit`` with at least its limits: half its word pairs, or most
+    of its words in a unit at most twice as long (a rewording that dropped a few, as "是按…发的"
+    becoming "按…上报"), so that a short hedge never finds its words scattered in a long line."""
+    (pairs, words, limits), (other_pairs, other_words, other_limits) = unit, other
+    return other_limits >= limits and (len(pairs & other_pairs) >= _KEPT * len(pairs) or (
+        len(words & other_words) >= _KEPT_WORDS * len(words) and len(other_words) <= 2 * len(words)))
+
+
+def _claims(text: str) -> set[str]:
+    """The numbers and identifiers a text states (A6's tokens), footnote references aside."""
+    return {(match.group(1) or match.group(0)).rstrip(".,;:/-")
+            for match in _TOKEN.finditer(_FOOTNOTE.sub(" ", text))} - {""}
+
+
+def _caveat_removed(head, edit, frozen: tuple[str, ...]) -> str | None:
+    """The first hedged sentence of HEAD (§5.4 A6) whose limit the edit dropped while it kept the
+    claims the limit bounds, or None.
+
+    A hedged sentence (one holding a ``_HEDGE`` word) is kept when the edit restates it
+    (``_holds``) with at least as many limiting words (``_LIMIT``) in a sentence or in two
+    adjacent sentences that each hold a quarter of it (a split), restates its line in a line with
+    as many (the hedge reworded within its paragraph), or keeps each hedged clause nearly whole
+    in a limiting clause (the rest of the sentence narrowed around it), wherever it now stands.
+    Otherwise it bounds the numbers and identifiers of its hedged clauses, else of the sentence,
+    else of its line; those no other line of HEAD states when there are any (its own claim, the
+    rest being context): when less than half of them is still stated, the correction deleted the
+    claim with its hedge, which narrows. A hedge that states none bounds the whole concept, and a
+    footnote's every sentence still citing it, so dropping either widens; a footnote no sentence
+    cites any more documents nothing, and a hedge moved into a definition no longer bounds the
+    text. A heading names its section ("# Caveats") and limits nothing; a note on the concept's
+    own bookkeeping (``status: draft``, not yet ``verified``) is the service's to keep (A5).
+    """
+    lines = _lines(edit, frozen)
+    # Each unit of the edit records whether it is a footnote definition (``note``).
+    units, paragraphs, clauses = [], [], []
+    for line in lines:
+        note, split = bool(_FOOTNOTE.match(line)), _sentences(line)
+        units += [(note, _shape(sentence), [_pairs(sentence)]) for sentence in split]
+        units += [(note, _shape(first + second), [_pairs(first), _pairs(second)])
+                  for first, second in zip(split, split[1:], strict=False)]
+        paragraphs.append((note, _shape(line)))
+        clauses += [(note, _pairs(clause), _limits(clause)) for sentence in split
+                    for clause in _CLAUSE.split(sentence) if _limits(clause)]
+    cited = {label for line in lines for label, definition in _FOOTNOTE.findall(line) if not definition}
+    stated = "\n".join(line for line in lines if not _FOOTNOTE.match(line))
+    original = _lines(head, frozen)
+    for index, line in enumerate(original):
+        footnote = _FOOTNOTE.match(line)
+        definition = bool(footnote and footnote.group(2))
+        if _HEADING.match(line) or definition and footnote.group(1) not in cited:
+            continue
+        for sentence in _sentences(line):
+            hedged = [clause for clause in _CLAUSE.split(sentence) if _HEDGE.search(_TARGET.sub(" ", clause))]
+            if not hedged or any(claim.split(":")[0].strip() in _BOOKKEEPING for claim in _claims(sentence)):
+                continue
+            shape = _shape(sentence)
+            if any(note <= definition and _holds(shape, other)
+                   and all(len(shape[0] & part) >= _KEPT / 2 * len(shape[0]) for part in parts)
+                   for note, other, parts in units) \
+                    or any(note <= definition and _holds(_shape(line), other) for note, other in paragraphs) \
+                    or all(any(note <= definition and count >= _limits(clause)
+                               and len(_pairs(clause) & other) >= _KEPT_CLAUSE * len(_pairs(clause))
+                               for note, other, count in clauses) for clause in hedged):
+                continue
+            if definition:
+                return sentence
+            context = "\n".join(original[:index] + original[index + 1:])
+            bounded = set().union(*map(_claims, hedged)) or _claims(sentence) or _claims(line)
+            bounded = {token for token in bounded if not _known(token, context)} or bounded
+            if not bounded or sum(_known(token, stated) for token in bounded) >= _KEPT * len(bounded):
+                return sentence
+    return None
+
+
 def _narrowing(before: str, after: str, known: str) -> str | None:
     """Why a correction does more than narrow the concept (§5.4 A6), or None when it only narrows."""
     head, edit = parse_document(before), parse_document(after)
@@ -1196,6 +1352,8 @@ def _narrowing(before: str, after: str, known: str) -> str | None:
             _widens(key, head.frontmatter.get(key), edit.frontmatter.get(key))
             for key in (set(head.frontmatter) | set(edit.frontmatter)) - set(frozen)):
         return "D_GROWTH"
+    if _caveat_removed(head, edit, frozen) is not None:
+        return "D_CAVEAT_REMOVED"
     return None
 
 
@@ -1204,7 +1362,8 @@ def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: dateti
     """Judge one audit changeset against ``base_dir`` without changing it (design §5.4 A2-A8).
 
     ``scope`` is the backlog by path, or None for a human reviewer, whom A2 does not limit.
-    ``actor`` is stamped in ``verified`` (and ``generated`` for a correction) at ``now``. The
+    ``actor`` is stamped in ``verified`` for a verified review, and in ``generated`` (never also
+    ``verified``: A4) for a correction, at ``now``. The
     result has the curate gate's shape: ``status`` would_apply, noop or rejected; ``files`` the
     stamped bytes; ``reviews`` one record per review, which the backlog reads back; ``audit``
     the verdict summary of a Codex audit receipt. Scope, base and self-verification problems
@@ -1259,10 +1418,15 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
             errors.append(changeset._error("audit_scope", problem, rel))
             continue
         generator = generated_fields(head)[0]
-        pushed = scope is not None and scope[rel].get("reason") == "external"  # someone else wrote it since
-        if not pushed and (generator == actor or (actor in auditors and generator in auditors)):  # A4
+        reason = scope[rel].get("reason") if scope is not None else None
+        # A4: someone else pushed it since (external), or an auditor's correction that another
+        # run reviews (correction); the run that corrected it never confirms its own edit.
+        own_run = reason == "correction" and bool(request.get("run")) \
+            and scope[rel].get("corrected_run") == request.get("run")
+        if own_run or (reason not in ("external", "correction")
+                       and (generator == actor or (actor in auditors and generator in auditors))):
             errors.append(changeset._error("self_verification", f"{actor} may not review a generation of "
-                                           f"{generator}", rel))
+                                           f"{generator}" + (" in the run that wrote it" if own_run else ""), rel))
             continue
         verdict, content, downgrade = review.get("verdict"), review.get("content"), None
         if not ((verdict == "corrected" and content is not None)
@@ -1288,26 +1452,30 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
             except (bookkeeping.BookkeepingError, OKFDocumentError) as exc:
                 errors.append(changeset._yaml_error(rel, content, exc))
                 continue
+            changed = bookkeeping.substantive_change(before, kept, stage="review")
             if downgrade is None and bookkeeping.substantive_change(before, content, stage="changeset") \
-                    and not bookkeeping.substantive_change(before, kept, stage="review"):
+                    and not changed:
                 # A5 restored all the correction changed: the concept stands as it was judged wrong.
                 downgrade = "D_RESTORED"
             if downgrade is None:
                 edited = content
+                if not changed:
+                    verdict = "verified"  # it changed only what the service owns: a verdict on HEAD as it is
             else:
                 verdict = "unverified"
         try:
+            # A correction is a new generation by the reviewer, never verified by it: a later run
+            # reviews it (backlog ``correction``), so no reviewer confirms its own edit (A4).
             final, stamped = bookkeeping.apply_bookkeeping(
                 before, edited, actor=actor, trusted_now=now, stage="review",
-                verdict="unverified" if verdict == "unverified" else "verified",
+                verdict="verified" if verdict == "verified" else "unverified",
             )
         except (bookkeeping.BookkeepingError, OKFDocumentError) as exc:
             errors.append(changeset._yaml_error(rel, before, exc))
             continue
-        outcome = "unverified" if verdict == "unverified" else (
-            "corrected" if bookkeeping.substantive_change(before, final, stage="review") else "verified")
+        outcome = verdict  # verified, corrected or unverified
         record = {"path": rel, "base": current, "verdict": review.get("verdict"), "outcome": outcome,
-                  "content_hash": changeset.content_hash(final)}
+                  "content_hash": changeset.content_hash(final), "run": request.get("run")}
         if downgrade:
             record["downgrade"] = downgrade
         if scope is not None and scope[rel].get("reason") == "seed":
@@ -1333,13 +1501,14 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
     result["validation"] = {"status": "failed" if errors else "passed", "new_errors": len(errors)}
     if errors:
         return changeset._rejected(result, errors)
-    verified = [record["path"] for record in reviews if record["outcome"] != "unverified"]
+    # Only a verified outcome confirms a concept: a correction waits for a later run's review.
+    verified = [record["path"] for record in reviews if record["outcome"] == "verified"]
     result.update(
         status="would_apply" if written else "noop", http_status=200, files=written,
         deterministic_repairs=repairs,
         audit={"status": "passed" if len(verified) == len(reviews) else "needs_attention",
                "verified_concepts": verified,
-               "unverified_concepts": [record["path"] for record in reviews if record["outcome"] == "unverified"],
+               "unverified_concepts": [record["path"] for record in reviews if record["outcome"] != "verified"],
                "corrected_concepts": [record["path"] for record in reviews if record["outcome"] == "corrected"]},
     )
     return result
