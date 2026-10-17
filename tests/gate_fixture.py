@@ -28,7 +28,7 @@ from aiwiki.service import attention, auth, worker
 LIVE = Path(__file__).parent / "fixtures" / "live_bundle"
 # The seeded bundle is the production snapshot of 2026-09-19, before any audit epoch a test sets.
 BASE_DATE = "2026-09-19T00:00:00Z"
-# The writer's day for the attention collector: every fixture concept is fresh on it (90 days
+# The writer's day for the attention collector: no fixture concept is stale on it (90 days
 # from 2026-09-08 at the earliest), so a run start queues nothing until a test makes it due.
 TODAY = date(2026, 10, 1)
 METRIC = "metrics/plugin-install-first-payment-funnel-2026-09.md"

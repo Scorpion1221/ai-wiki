@@ -43,7 +43,7 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from aiwiki.cli import main as cli
@@ -681,35 +681,71 @@ def _git_evidence(bundle: str, state_dir: Path, match: re.Match, repos: object) 
          "blob": blob, **({"lines": lines} if lines else {})})
 
 
+def _source_name(rel: str) -> str:
+    """``src-<path hash>-<stem><ext>`` within the queue's 128: the stem is cut, never the extension,
+    which a one-part packet keeps when it is committed. A ``.md.source`` is Markdown: named ``.md``,
+    it commits as ``.md.source`` like any Markdown packet."""
+    name = PurePosixPath(rel).name
+    name = name.removesuffix(".source") if name.endswith(".md.source") else name
+    ext = re.sub(r"[^A-Za-z0-9.]", "", PurePosixPath(name).suffix)[:16]
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", name[:len(name) - len(PurePosixPath(name).suffix)])
+    return f"src-{hashlib.sha256(rel.encode()).hexdigest()[:8]}-{stem[:64]}{ext}"
+
+
 def _source_evidence(state: dict, rel: str) -> dict:
     """A source the bundle already froze, byte for byte: from the run's pulled workspace, else
     from the writer's published tree. The writer stores it only if its sha256 is the one
     ``sources/.hashes.yaml`` records for ``rel`` (422 otherwise), so a maintainer can cite what the
-    auditor pointed at -- the source that contradicts a claim -- and nothing the bundle never froze."""
+    auditor pointed at -- the source that contradicts a claim -- and nothing the bundle never froze.
+    Only a file directly under sources/ is a curated source (inbox/, _rejected/ and the ledger are not)."""
     from aiwiki.cli import workspace
-    from aiwiki.maint import collect_repos
     from aiwiki.runtime import changeset
 
-    parts = rel.split("/")
-    if ".." in parts or "" in parts or "inbox" in parts or parts[-1] == ".hashes.yaml":
-        raise MaintError(f"{rel}: name a frozen file under sources/", USAGE)
+    if not changeset.top_level_source(rel):
+        raise MaintError(f"{rel}: name a frozen file directly under sources/", USAGE)
     root = Path(state["workspace"])
     cached = root / workspace.META / "base" / rel
     if cached.is_file() and not cached.is_symlink():
         data = cached.read_bytes()
     else:
-        status, _headers, data = cli._http("GET", "/cat", bundle=state["bundle"], params={"path": rel})
-        if status != 200:
-            raise MaintError(f"{rel} is not in the published bundle ({status}); workspace pull", USAGE)
-        data = json.loads(data)["content"].encode("utf-8")  # /cat serves text; a binary source needs the pull
+        data = _published_source(state, rel, root)
     limit = changeset.limits()["packet_text_bytes"] - PACKET_HEADROOM
     if len(data) > limit:
         raise MaintError(f"{rel} holds {len(data)} bytes, more than one evidence packet takes ({limit})", USAGE)
     sha = hashlib.sha256(data).hexdigest()
     # Stored whole and unredacted: these are the bytes the bundle published, and only they match.
-    return {"name": f"src-{collect_repos.snapshot_name(rel)}"[:128], "data": data, "bytes": len(data),
+    return {"name": _source_name(rel), "data": data, "bytes": len(data),
             "sha256": sha, "origin": {"kind": changeset.SOURCE_KIND, "path": rel, "sha256": sha,
                                       "truncated": False, "redactions": 0}}
+
+
+def _published_source(state: dict, rel: str, root: Path) -> bytes:
+    """A source frozen after the run's pull, through ``/cat``. That serves text with its line ends
+    normalised, so the bytes are checked against the writer's ledger here: a CRLF or non-UTF-8
+    source needs the pull, rather than a POST the writer is sure to refuse."""
+    import yaml
+
+    def cat(path: str) -> tuple[int, str | None]:
+        status, _headers, body = cli._http("GET", "/cat", bundle=state["bundle"], params={"path": path})
+        try:
+            return status, json.loads(body)["content"] if status == 200 else None
+        except (ValueError, KeyError, TypeError):
+            return status, None
+
+    (status, text), (_status, ledger) = cat(rel), cat("sources/.hashes.yaml")
+    try:
+        recorded = yaml.safe_load(ledger or "")
+    except yaml.YAMLError:
+        recorded = None
+    recorded = recorded.get(rel) if isinstance(recorded, dict) else None
+    pull = f"run ai-wiki workspace pull --dir {root}, then add it again"
+    if text is None or recorded is None:
+        raise MaintError(f"{rel} is not a frozen source the writer serves as text ({status}); {pull}", USAGE)
+    data = text.encode("utf-8")
+    if hashlib.sha256(data).hexdigest() != recorded:
+        raise MaintError(f"{rel}: the writer serves it as text that differs from the bytes sources/.hashes.yaml "
+                         f"records (line ends or encoding); {pull}", USAGE)
+    return data
 
 
 def add_evidence(state_dir: Path, bundle: str | None, item_id: str, ref: str, config: Path) -> tuple[int, dict]:
@@ -857,12 +893,14 @@ def export_manifest(bundle: str, path: Path) -> dict:
     not fit one packet become one source each. Each identity names its item: ``maintain``
     treats sources of one identity as versions and would supersede the older of two
     unfinished items of one topic unread. More unfinished items than one listing returns
-    fail the export rather than leave some out.
+    fail the export rather than leave some out. An attention notice is no source P0 may
+    ingest: it is left out, and an item of nothing else is counted as ``attention_only``
+    (the next writer run start derives it again).
     """
     from aiwiki.runtime import changeset
 
     folder = path.with_name(path.stem + "-files")
-    sources, items = [], []
+    sources, items, attention_only = [], [], 0
     for state in UNFINISHED:
         listing = _call("GET", "/maint/items", bundle=bundle, params={"status": state, "limit": LIST_LIMIT})[1]
         if listing.get("truncated"):
@@ -872,11 +910,16 @@ def export_manifest(bundle: str, path: Path) -> dict:
     for item in sorted(items, key=lambda item: (item["created_at"], item["id"])):
         files = []
         for entry in item["files"]:
+            if (entry.get("origin") or {}).get("kind") == changeset.NOTICE_KIND:
+                continue
             status, _headers, data = cli._http(
                 "GET", f"/maint/items/{item['id']}/files/{quote(entry['name'], safe='')}", bundle=bundle)
             if status != 200 or hashlib.sha256(data).hexdigest() != entry["sha256"]:
                 raise MaintError(f"{item['id']}/{entry['name']} could not be fetched intact ({status})")
             files.append(changeset.EvidenceFile(f"{item['id']}/{entry['name']}", data, entry.get("origin") or {}))
+        if not files:
+            attention_only += 1
+            continue
         packet, errors = changeset.build_packet({"id": item["id"], "item_files": [file.name for file in files]}, files)
         identity = f"{item['topic_key']}@{item['id']}"
         parts = [(identity, packet.filename, packet.data)] if packet and not errors else [
@@ -888,7 +931,8 @@ def export_manifest(bundle: str, path: Path) -> dict:
             sources.append({"identity": identity, "path": str(target.resolve()),
                             "sha256": hashlib.sha256(data).hexdigest()})
     _write(path, {"sources": sources})
-    return {"manifest": str(path), "items": len(items), "sources": len(sources)}
+    return {"manifest": str(path), "items": len(items) - attention_only, "sources": len(sources),
+            "attention_only": attention_only}
 
 
 def _settled(job: dict) -> bool:

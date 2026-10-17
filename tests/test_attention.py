@@ -1,9 +1,10 @@
 """Attention work items (design §5.3, W18): the maintainer learns about concepts nobody is fixing.
 
 A maintainer run start queues one item per concept whose current version the auditor judged
-unverified, or whose effective freshness elapsed. The notice it carries is not evidence: the
-gate refuses a changeset that cites it, and ``maint add-evidence source:`` freezes a source the
-bundle already holds, at the bytes its ledger records.
+unverified, or whose effective freshness elapsed. The notice it carries holds facts only and is
+not evidence: the gate leaves it out of a packet and refuses a packet of nothing else, and
+``maint add-evidence source:`` freezes a source the bundle already holds, at the bytes its
+ledger records, which never extends a concept's stale_after.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from gate_fixture import AIO_AB, TODAY, Gate, cite, git
 
 from aiwiki.cli import main as cli
 from aiwiki.cli import maint
+from aiwiki.engine.document import parse_document
 from aiwiki.maint import planner
 from aiwiki.runtime import changeset
 from aiwiki.service import attention
@@ -45,14 +47,15 @@ def end(gate: Gate, run: str) -> None:
     gate.client.delete("/maint/lease/maintainer", params={"bundle": "kb-a"}, headers=gate.headers(run=run))
 
 
-def unverify(gate: Gate, rel: str, note: str = "S1 says the lift was 3%, not 12%") -> dict:
-    """The auditor reviews ``rel`` (in its backlog) and concludes unverified."""
+def unverify(gate: Gate, rel: str, note: str = "S1 says the lift was 3%, not 12%", **review) -> dict:
+    """The auditor reviews ``rel`` (in its backlog) and the gate concludes unverified: the
+    auditor's own verdict, or (``verdict``/``content`` in ``review``) a downgraded request."""
     run = f"AUD-{len(gate.jobs())}"
     leased = gate.client.post("/maint/lease/auditor", params={"bundle": "kb-a"}, headers=gate.headers("auditor", run))
     assert leased.status_code == 200, leased.text
     base = changeset.content_hash(git(gate.remote, "show", f"main:{rel}"))
     job = gate.post({"schema": changeset.SCHEMA, "kind": "audit", "base_revision": gate.head(), "reviews": [
-        {"path": rel, "base": base, "verdict": "unverified", "note": note}]}, token="auditor", run=run).json()
+        {"path": rel, "base": base, "verdict": "unverified", "note": note, **review}]}, token="auditor", run=run).json()
     gate.client.delete("/maint/lease/auditor", params={"bundle": "kb-a"}, headers=gate.headers("auditor", run))
     assert job["status"] == "done" and job["reviews"][0]["outcome"] == "unverified", job
     return job
@@ -94,15 +97,19 @@ def test_an_unverified_review_of_the_current_version_queues_one_attention_item(g
     [item] = items(gate)
     base = changeset.content_hash(gate.read(AIO_AB))
     assert item["topic_key"] == f"attention:{AIO_AB}" and item["priority"] == planner.PRIORITY["attention"] == 45
-    assert item["origin"] | {"note": None} == {
+    assert item["origin"] == {
         "kind": "attention", "path": AIO_AB, "reason": "audit_unverified", "base": base, "review": job["id"],
-        "reviewed_at": job["finished"], "downgrade": None, "note": None}
+        "reviewed_at": job["finished"], "verdict": "unverified", "downgrade": None,
+        "note": "S1 says the lift was 3%, not 12%"}
     assert [(f["name"], f["origin"]["kind"]) for f in item["files"]] == [("notice.md", "attention")]
     text = notice(gate, item)
-    assert f"- review: {job['id']} at {job['finished']}" in text
-    assert "> S1 says the lift was 3%, not 12%" in text and "maint add-evidence" in text
+    assert f"- review: {job['id']} at {job['finished']}" in text and "- requested verdict: unverified" in text
+    assert "- outcome: unverified (the auditor's own verdict)" in text and "> S1 says the lift was 3%, not 12%" in text
     cited = re.findall(r"resource: (/sources/\S+)", gate.read(AIO_AB))
-    assert cited and all(f"- `{rel.lstrip('/')}`" in text for rel in cited)
+    assert cited and all(f"  - `{rel.lstrip('/')}`" in text for rel in cited)
+    # The notice is facts; what to do is the brief, which no item key depends on.
+    assert "add-evidence" not in text and "skip" not in text
+    assert item["brief"].startswith("The auditor judged this version unverified") and "add-evidence" in item["brief"]
 
 
 def test_a_repeated_run_start_is_a_duplicate_and_a_new_version_a_new_item(gate) -> None:
@@ -184,7 +191,12 @@ def test_freshness_past_the_default_queues_a_refresh_item(gate, monkeypatch) -> 
     assert item["priority"] == planner.PRIORITY["refresh"] == 20
     assert item["origin"] | {"base": None} == {"kind": "attention", "path": visitors, "reason": "stale",
                                                "base": None, "stale_on": "2026-12-07", "basis": "default"}
-    assert "90 or more days old" in notice(gate, item) and "set `stale_after`" in notice(gate, item)
+    text = notice(gate, item)
+    assert "- stale on: 2026-12-07\n- basis: default\n" in text
+    # Never advice to renew freshness: that takes evidence newer than the generation.
+    assert "stale_after" not in text and "stale_after" not in item["brief"]
+    assert item["brief"].startswith("Stale since 2026-12-07 (90 days after generation, the default)")
+    assert "newer than the generation" in item["brief"]
 
 
 def test_a_deprecated_concept_needs_no_attention(gate, monkeypatch) -> None:
@@ -213,6 +225,7 @@ def test_an_unverified_review_outranks_elapsed_freshness(gate, monkeypatch) -> N
 
 
 def test_the_cap_creates_the_oldest_first_and_reports_the_rest(gate, monkeypatch) -> None:
+    assert M.ATTENTION_CAP == 20
     monkeypatch.setattr(attention, "today", lambda: TODAY + timedelta(days=400))
     monkeypatch.setattr(M, "ATTENTION_CAP", 2)
 
@@ -247,6 +260,105 @@ def test_the_auditor_lease_collects_nothing(gate) -> None:
                               headers=gate.headers("auditor", "AUD-x"))
 
     assert "attention" not in leased.json() and items(gate) == []
+
+
+def test_a_downgraded_correction_says_the_gate_refused_the_edit(gate) -> None:
+    """A correction the gate downgraded (it added a number no source holds) ends unverified, but
+    the notice and brief must not present the auditor's rejected edit as the finding."""
+    before = git(gate.remote, "show", f"main:{AIO_AB}") + "\n"
+    edit = before.replace("Redacted fixture body.", "Redacted body. Lift was 12.5%.")
+    job = unverify(gate, AIO_AB, note="the lift was really 12.5%", verdict="corrected", content=edit)
+    assert (job["reviews"][0]["verdict"], job["reviews"][0]["downgrade"]) == ("corrected", "D_NOVEL_TOKEN")
+
+    assert begin(gate, "WAIO-1")["attention"]["by_reason"] == {"audit_unverified": 1}
+
+    [item] = items(gate)
+    assert (item["origin"]["verdict"], item["origin"]["downgrade"]) == ("corrected", "D_NOVEL_TOKEN")
+    text = notice(gate, item)
+    assert "- requested verdict: corrected\n" in text
+    assert "- outcome: unverified (the gate refused the requested correction: D_NOVEL_TOKEN)\n" in text
+    assert "- note, describing the edit the gate rejected:\n\n> the lift was really 12.5%\n" in text
+    assert "the auditor's own verdict" not in text
+    assert item["brief"].startswith("The gate refused the auditor's correction (D_NOVEL_TOKEN: ")
+    assert "never apply it without new evidence" in item["brief"] and len(item["brief"]) <= 300
+
+
+def test_rewording_the_guidance_never_makes_a_new_item(gate, monkeypatch) -> None:
+    """The item key is the notice's facts: a later deploy that rewords what to do (the brief)
+    brings back no skipped item and queues no new one."""
+    unverify(gate, AIO_AB)
+    begin(gate, "WAIO-1")
+    [item] = items(gate)
+    M.next_item(gate.writer, principal=CURATOR, run="WAIO-1")
+    M.resolve(gate.writer, item["id"], {"outcome": "skipped", "reason": "insufficient_evidence"},
+              principal=CURATOR, run="WAIO-1")
+    end(gate, "WAIO-1")
+    spec = attention.plan(gate.writer, today=attention.today())[0]
+    monkeypatch.setattr(attention, "_brief", lambda origin: "Reworded guidance: do something else entirely.")
+    reworded = attention.plan(gate.writer, today=attention.today())[0]
+    assert reworded["brief"] != spec["brief"] and reworded["files"] == spec["files"]
+    assert M._spec(reworded)[0]["item_key"] == M._spec(spec)[0]["item_key"] == item["item_key"]
+
+    second = begin(gate, "WAIO-2")["attention"]
+
+    assert (second["created"], second["merged"], second["duplicate"]) == (0, 0, 1), second
+    assert [i["status"] for i in items(gate)] == ["skipped"]
+
+
+def test_an_unverified_restamp_never_makes_a_concept_fresh(gate) -> None:
+    """An unverified verdict on a verified version restamps generated.at (the gate dates the
+    generation anew), which restarts the 90-day default. That may delay staleness but never
+    lift the concept into a fresh read tier: it reads unspecified and gets an audit_unverified
+    item instead."""
+    visitors = "metrics/web-landing-new-visitor-distribution-2026-09.md"
+    first = gate.client.get("/cat", params={"bundle": "kb-a", "path": visitors}, headers=gate.headers()).json()
+    # /cat judges on the real day: unspecified until 2026-12-07, stale after; never fresh.
+    assert first["metadata"]["freshness"] != "fresh" and first["metadata"]["verification_current"] is True
+    # A push to its cited source puts it in the backlog (external), so the auditor may review it.
+    source = next(iter(re.findall(r"resource: /(sources/\S+)", gate.read(visitors))))
+    other = gate.tmp / "pusher"
+    git(gate.tmp, "clone", "-q", str(gate.remote), str(other))
+    (other / source).write_text("frozen evidence, revised\n", encoding="utf-8")
+    git(other, "-c", "user.email=t@local", "-c", "user.name=t", "commit", "-qam", "revise source")
+    git(other, "push", "-q", "origin", "main")
+    git(gate.writer, "fetch", "-q")
+
+    job = unverify(gate, visitors, note="the source no longer says so")
+
+    after = gate.client.get("/cat", params={"bundle": "kb-a", "path": visitors}, headers=gate.headers()).json()
+    meta = after["metadata"]
+    assert job["reviews"][0]["outcome"] == "unverified"
+    assert meta["generated_at"] != first["metadata"]["generated_at"]  # the restamp
+    assert (meta["freshness"], meta["freshness_basis"], meta["verification_current"]) == (
+        "unspecified", "default", False)
+    assert parse_document(gate.read(visitors)).frontmatter.get("stale_after") is None
+    begin(gate, "WAIO-1")
+    assert [(i["origin"]["path"], i["origin"]["reason"]) for i in items(gate)] == [(visitors, "audit_unverified")]
+
+
+def test_merges_past_the_cap_still_happen(gate, monkeypatch) -> None:
+    """Past the cap only new items wait: a waiting item still takes the newer notice."""
+    unverify(gate, AIO_AB)
+    begin(gate, "WAIO-1")
+    end(gate, "WAIO-1")
+    [waiting] = items(gate)
+    regenerate(gate, AIO_AB, "The lift held in October.")
+    unverify(gate, AIO_AB, note="the new version is unsupported too")
+    # A concept whose declared stale_after passed before today's review sorts first and takes the cap.
+    metric = "metrics/plugin-install-first-payment-funnel-2026-09.md"
+    expired = gate.read(metric).replace("\nsources:\n", "\nstale_after: 2026-09-30\nsources:\n", 1)
+    assert "stale_after: 2026-09-30" in expired
+    assert gate.post(gate.request(gate.put(metric, cite(expired, claim="Seeded.")))).status_code == 201
+    monkeypatch.setattr(M, "ATTENTION_CAP", 1)
+    due = attention.plan(gate.writer, today=attention.today())
+    assert [spec["origin"]["reason"] for spec in due] == ["stale", "audit_unverified"]
+
+    begun = begin(gate, "WAIO-2")["attention"]
+
+    assert (begun["created"], begun["merged"], begun["deferred"]) == (1, 1, 0), begun
+    merged = M.get_item(gate.writer, waiting["id"])
+    assert merged["origin"]["base"] == changeset.content_hash(gate.read(AIO_AB))
+    assert "> the new version is unsupported too" in notice(gate, merged)
 
 
 # --- a notice is not evidence -------------------------------------------------------------------------
@@ -306,6 +418,116 @@ def test_the_ledger_decides_which_bundle_sources_an_item_may_freeze(gate) -> Non
     assert [f["name"] for f in M.get_item(gate.writer, item_id)["files"]] == ["S1-status.md", "src-a"]
 
 
+def test_an_old_cli_that_lists_the_notice_still_proposes_once_evidence_is_added(gate) -> None:
+    """The CLI of origin/main (0.3.1) puts every file of the item, notice.md included, into
+    evidence.item_files. The writer leaves the notice out of the packet, so that client still
+    proposes once real evidence sits beside it; with the notice alone it is told to add some."""
+    unverify(gate, AIO_AB)
+    begin(gate, "WAIO-1")
+    item = M.next_item(gate.writer, principal=CURATOR, run="WAIO-1")["item"]
+    request = gate.request(gate.put(AIO_AB, cite(gate.read(AIO_AB), "attention-fix",
+                                                 claim="The October readout puts the lift at 3%.")),
+                           work_items=[item["id"]])
+    request["evidence"] = {"id": "attention-fix", "item_files": [f"{item['id']}/notice.md"]}
+    alone = gate.post(request, run="WAIO-1", dry_run=True)
+    assert alone.status_code == 422 and alone.json()["errors"][0]["code"] == "notice_not_evidence", alone.text
+    added = gate.client.post(f"/maint/items/{item['id']}/files", params={"bundle": "kb-a"},
+                             headers=gate.headers(run="WAIO-1"), json={
+        "name": "S2-readout.md", "content_b64": base64.b64encode(b"# October readout\n\nLift: 3%.\n").decode(),
+        "origin": {"kind": "git-file", "remote": "https://code.example/web.git", "commit": "1a2b3c4d",
+                   "path": "docs/readout.md"}})
+    assert added.status_code == 200, added.text
+    request["evidence"]["item_files"] = [f"{item['id']}/notice.md", f"{item['id']}/S2-readout.md"]  # as 0.3.1 sends
+
+    done = gate.post(request, run="WAIO-1")
+
+    assert done.status_code == 201, done.text
+    receipt = done.json()
+    assert receipt["status"] == "done" and receipt["evidence"] == {
+        "id": "attention-fix", "parts": 1, "origin_kinds": ["git-file"]}, receipt
+    [packet] = [rel for rel in receipt["changed_files"] if rel.startswith("sources/") and "attention-fix" in rel]
+    assert (gate.writer / packet).read_bytes() == b"# October readout\n\nLift: 3%.\n"  # never the notice
+    assert M.get_item(gate.writer, item["id"])["status"] == "curated"
+
+
+def bundle_source_item(gate: Gate, rel: str, run: str = "WAIO-1") -> tuple[str, str]:
+    """A claimed item holding, beside a notice, a copy of the source ``rel`` cites: (item, file)."""
+    cited = re.findall(r"resource: /(sources/\S+)", gate.read(rel))[0]
+    data = (gate.writer / cited).read_bytes()
+    queued = gate.client.post("/maint/items", params={"bundle": "kb-a"}, headers=gate.headers(), json={"items": [{
+        "origin": {"kind": "attention", "path": rel, "reason": "stale"}, "topic_key": f"attention:{rel}",
+        "priority": 999, "brief": "x", "files": [
+            {"name": "notice.md", "content_b64": base64.b64encode(b"# Attention\n").decode(),
+             "origin": {"kind": "attention", "path": rel}},
+            {"name": "src-copy.md", "content_b64": base64.b64encode(data).decode(),
+             "origin": {"kind": changeset.SOURCE_KIND, "path": cited}}]}]})
+    assert queued.status_code == 200, queued.text
+    assert gate.client.post("/maint/lease/maintainer", params={"bundle": "kb-a"},
+                            headers=gate.headers(run=run)).status_code == 200
+    claimed = gate.client.post("/maint/items/next", params={"bundle": "kb-a"}, headers=gate.headers(run=run))
+    return claimed.json()["item"]["id"], "src-copy.md"
+
+
+@pytest.mark.parametrize(("before", "after"), [
+    (None, "2099-01-01"),  # added
+    ("2026-09-30", "2026-12-31"),  # moved later
+    ("2026-09-30", None),  # dropped once passed: the default from this generation is later
+])
+def test_a_copy_of_a_bundle_source_never_extends_stale_after(gate, before, after) -> None:
+    """Freshness is extended only on evidence from outside the bundle: a packet made only of
+    bytes the bundle already holds may fix claims, never renew stale_after."""
+    visitors = "metrics/web-landing-new-visitor-distribution-2026-09.md"
+    if before:
+        text = gate.read(visitors).replace("confidence: medium\n", f"confidence: medium\nstale_after: {before}\n")
+        assert gate.post(gate.request(gate.put(visitors, cite(text, claim="Seeded."))),
+                         token="operator").status_code == 201
+    item_id, name = bundle_source_item(gate, visitors)
+    text = gate.read(visitors)
+    text = re.sub(r"(?m)^stale_after: .*\n", "", text)
+    if after:
+        text = text.replace("confidence: medium\n", f"confidence: medium\nstale_after: {after}\n")
+    request = gate.request(gate.put(visitors, cite(text, "attention-fix", claim="Still holds.")),
+                           work_items=[item_id])
+    request["evidence"] = {"id": "attention-fix", "item_files": [f"{item_id}/notice.md", f"{item_id}/{name}"]}
+    head = gate.head()
+
+    refused = gate.post(request, run="WAIO-1")
+
+    assert refused.status_code == 422, refused.text
+    [error] = refused.json()["errors"]
+    assert (error["code"], error["path"]) == ("stale_after_needs_new_evidence", visitors), error
+    assert "outside the bundle" in error["hint"]
+    gate.assert_untouched(head)
+    # The same packet may still fix the claims, and keep or shorten stale_after.
+    kept = re.sub(r"(?m)^stale_after: .*\n", "", gate.read(visitors))
+    if before:
+        kept = kept.replace("confidence: medium\n", f"confidence: medium\nstale_after: {before}\n")
+    request["files"] = [gate.put(visitors, cite(kept, "attention-fix", claim="Still holds."))]
+    assert gate.post(request, run="WAIO-1", dry_run=True).json()["status"] == "would_apply"
+
+
+def test_only_a_file_directly_under_sources_is_a_bundle_source(gate) -> None:
+    """inbox/, _rejected/ and other subfolders hold no curated source, even when the ledger
+    lists them; nor is the ledger itself one."""
+    rejected = "sources/_rejected/README.md.source"
+    (gate.writer / rejected).parent.mkdir(parents=True, exist_ok=True)
+    (gate.writer / rejected).write_bytes(b"not curated\n")
+    ledger = gate.writer / attention.LEDGER
+    ledger.write_text(ledger.read_text(encoding="utf-8")
+                      + f"{rejected}: {hashlib.sha256(b'not curated' + bytes([10])).hexdigest()}\n", encoding="utf-8")
+    assert attention.ledger(gate.writer)[rejected]
+    item_id = gate.item(run="WAIO-1")
+    for rel, data in ((rejected, b"not curated\n"), (attention.LEDGER, ledger.read_bytes())):
+        refused = gate.client.post(f"/maint/items/{item_id}/files", params={"bundle": "kb-a"},
+                                   headers=gate.headers(run="WAIO-1"), json={
+            "name": "src-x", "content_b64": base64.b64encode(data).decode(),
+            "origin": {"kind": changeset.SOURCE_KIND, "path": rel}})
+        assert refused.status_code == 422 and refused.json()["detail"]["code"] == "not_frozen", (rel, refused.text)
+    assert [changeset.top_level_source(rel) for rel in (
+        "sources/a.md.source", "sources/inbox/a.md", "sources/_rejected/a", "sources/.hashes.yaml", "sources/",
+        "sources/..", "metrics/a.md", "sources/a/b")] == [True] + [False] * 7
+
+
 # --- the CLI ---------------------------------------------------------------------------------------------
 
 
@@ -321,7 +543,7 @@ def wiki(capsys, *args) -> tuple[int, dict]:
 
 @pytest.fixture
 def loop(gate, tmp_path, monkeypatch):
-    gate.connect()
+    gate.calls = gate.connect()
     config = tmp_path / "maint.json"
     config.write_text(json.dumps({"audits": {"resubmit": False}}), encoding="utf-8")
     monkeypatch.setattr("aiwiki.cli.doctor.run", lambda *args, **kwargs: {"ok": True, "checks": []})
@@ -356,7 +578,7 @@ def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, 
     assert stored["origin"] | {"sha256": None} == {"kind": "bundle-source", "path": cited, "sha256": None,
                                                     "truncated": False, "redactions": 0}
     for ref in ("source:sources/../index.md", "source:sources/inbox/x.md", "source:sources/.hashes.yaml",
-                "source:sources/absent.md"):
+                "source:sources/_rejected/README.md.source", "source:sources/absent.md"):
         assert wiki(capsys, "maint", "add-evidence", item_id, ref, "--state-dir", st)[0] == 2, ref
 
     # The proposal cites the source, never the notice, and the gate takes it.
@@ -371,6 +593,7 @@ def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, 
     assert receipt["evidence"] == {"id": "attention-fix", "parts": 1, "origin_kinds": ["bundle-source"]}, receipt
     committed = [rel for rel in receipt["changed_files"] if rel.startswith("sources/") and "attention-fix" in rel]
     assert [(gate.writer / rel).read_bytes() for rel in committed] == [(gate.writer / cited).read_bytes()], receipt
+    assert committed[0].endswith(".md.source")  # committed as Markdown evidence, like the source it copies
     assert M.get_item(gate.writer, item_id)["status"] == "curated"
 
 
@@ -407,9 +630,67 @@ def test_a_source_the_workspace_lacks_is_read_from_the_writer(loop, capsys) -> N
     assert code == 0 and Path(added["path"]).read_bytes() == data, added
 
 
+def test_a_source_the_writer_serves_with_other_line_ends_needs_the_pull(loop, capsys) -> None:
+    """/cat serves text with CRLF normalised, so a CRLF source frozen after the pull cannot
+    match the ledger that way: the client checks and says to pull, rather than POST bytes the
+    writer is sure to refuse."""
+    gate, st = loop["gate"], loop["st"]
+    gate.item(run="WAIO-0")
+    end(gate, "WAIO-0")
+    code, begun = wiki(capsys, "maint", "begin", "--run", "WAIO-1", "--only", "inbox", "--state-dir", st,
+                       "--config", loop["config"])
+    assert code == 0, begun
+    item_id = wiki(capsys, "maint", "next", "--state-dir", st)[1]["item"]
+    rel, data = "sources/crlf-notes.md.source", b"line one\r\nline two\r\n"
+    (gate.writer / rel).write_bytes(data)  # frozen after the run's pull
+    ledger = gate.writer / attention.LEDGER
+    ledger.write_text(ledger.read_text(encoding="utf-8") + f"{rel}: {hashlib.sha256(data).hexdigest()}\n",
+                      encoding="utf-8")
+    sent = len(gate.calls)
+
+    code, refused = wiki(capsys, "maint", "add-evidence", item_id, f"source:{rel}", "--state-dir", st)
+
+    assert code == 2 and "workspace pull" in refused["error"] and "line ends" in refused["error"], refused
+    assert [(method, route) for method, route, *_ in gate.calls[sent:]] == [("GET", "/cat"), ("GET", "/cat")]
+    assert [f["name"] for f in M.get_item(gate.writer, item_id)["files"]] == ["S1-status.md"]
+
+
+@pytest.mark.parametrize(("rel", "ext"), [
+    ("sources/funnel-2026-09.md.source", ".md.source"),
+    ("sources/" + "aio-prompt-gpt6-sol-final-routing-2026-09-29-" * 3 + "a" * 64 + ".md.source", ".md.source"),
+    ("sources/chart-" + "b" * 150 + ".png", ".png"),
+    ("sources/config.json", ".json"),
+    ("sources/" + "c" * 140, ".source"),
+])
+def test_a_bundle_source_keeps_its_extension_in_the_committed_packet(rel, ext) -> None:
+    """The item file name keeps the source's extension within the queue's 128 characters, so
+    the one-part packet commits under it (a .md.source as Markdown evidence, .md.source)."""
+    from aiwiki.service import ingest
+
+    name = maint._source_name(rel)
+    assert len(name) <= 128 and M._NAME.fullmatch(name), name
+    assert maint._source_name(rel) == name != maint._source_name(rel + "x")  # the path hash tells twins apart
+    packet, errors = changeset.build_packet({"id": "attention-fix", "item_files": [f"it_1/{name}"]}, [
+        changeset.EvidenceFile(f"it_1/{name}", b"bytes\n", {"kind": changeset.SOURCE_KIND, "path": rel})])
+    assert errors == [] and ingest.source_name(packet.data, packet.filename).endswith(
+        f"{hashlib.sha256(b'bytes' + bytes([10])).hexdigest()}{ext}")
+
+
 def test_the_planner_ranks_attention_between_delta_and_doc() -> None:
     assert planner.PRIORITY["delta"] < planner.PRIORITY["attention"] < planner.PRIORITY["doc"]
     assert maint._SOURCE_REF.fullmatch("source:sources/a b.md") is None
+
+
+def test_a_default_out_of_the_calendar_queues_nothing_and_breaks_nothing(tmp_path) -> None:
+    bundle = tmp_path / "kb"
+    (bundle / "metrics").mkdir(parents=True)
+    for name, at in (("far", "9999-12-30T00:00:00Z"), ("early", "0001-01-01T00:00:00+05:00")):
+        (bundle / "metrics" / f"{name}.md").write_text(
+            f"---\ntype: Metric\ntitle: {name}\ndescription: X.\ntags: [x]\nstatus: stable\n"
+            f"generated: {{by: process:a, at: '{at}'}}\nsources:\n  - {{id: s, resource: /sources/s.md.source}}\n"
+            "---\n# Summary\nX.\n", encoding="utf-8")
+
+    assert attention.plan(bundle, today=date(9999, 12, 31)) == []
 
 
 def test_notice_bytes_depend_only_on_path_version_reason_and_review(tmp_path) -> None:

@@ -64,7 +64,7 @@ ADMIN_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conve
 REOPENABLE = frozenset({"needs_human", "skipped", "duplicate", "needs_access", "needs_conversion", "parked"})
 MAX_FILES = 64
 MAX_CHILDREN = 20
-ATTENTION_CAP = 100  # attention items one run start creates; the oldest go first, the rest wait
+ATTENTION_CAP = 20  # new attention items one run start creates; the oldest go first, the rest wait
 MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
 REQUEUEABLE = frozenset({"ready", "parked", "needs_human"})  # member items the inbox rollback hands to Codex
 _ID = re.compile(r"it_[0-9a-f]{12}")
@@ -358,7 +358,9 @@ def acquire_lease(bundle: Path, role: str, *, principal: str, run: str | None,
         swept = {"interrupted": [], "unparked": [], "build_retry": []} if live else _begin_run(bundle, now)
     if attention is None:
         return {"lease": lease, **swept}
-    # Outside the lock: reading the bundle takes a while, and the lease is already the run's.
+    # Outside maint_state's _LOCK, so item calls are not held up while the bundle is read; the
+    # lease is already the run's. The lease route still holds the writer's lifecycle lock
+    # (worker.serialized_lifecycle, via app._maint), so commits and intake wait for the collection.
     return {"lease": lease, **swept, "attention": {"status": "not_run", "reason": "the run already held the lease"}
             if live else _attention(bundle, attention)}
 
@@ -414,8 +416,9 @@ def _attention(bundle: Path, collect: Callable[[], list[dict]]) -> dict:
     """Queue the attention items due, the oldest first, until ATTENTION_CAP of them are new.
 
     A duplicate (a notice already queued or closed for that version) or a merge into a waiting
-    item costs nothing, so a backlog of skipped notices never starves the rest; the notices the
-    cap leaves are ``deferred`` to the next run. Nothing here may stop the run: a failure is
+    item costs nothing and still happens past the cap, so a backlog of skipped notices never
+    starves the rest and a waiting item always takes the newer notice; only the new items past
+    the cap are ``deferred`` to the next run. Nothing here may stop the run: a failure is
     reported in the answer instead.
     """
     try:
@@ -430,13 +433,9 @@ def _attention(bundle: Path, collect: Callable[[], list[dict]]) -> dict:
         with _LOCK:
             now = _now()
             current = _items(bundle)
-            for index, (spec, files) in enumerate(specs):
-                if result["created"] >= ATTENTION_CAP:
-                    known = {key for item in current for key in [item["item_key"], *(
-                        version.get("item_key") for version in item["versions"])]}
-                    result["deferred"] = sum(left["item_key"] not in known for left, _files in specs[index:])
-                    break
-                outcome = _enqueue(bundle, spec, files, "service", current, now)["result"]
+            for spec, files in specs:
+                outcome = _enqueue(bundle, spec, files, "service", current, now,
+                                   create=result["created"] < ATTENTION_CAP)["result"]
                 result[outcome] += 1
                 if outcome == "created":
                     reason = str(spec["origin"].get("reason"))
@@ -498,7 +497,8 @@ def _blob(bundle: Path, item_id: str, meta: dict) -> bytes:
 
 
 def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principal: str, items: list[dict],
-             now: datetime) -> dict:
+             now: datetime, *, create: bool = True) -> dict:
+    """``create`` False still dedupes and merges, but answers ``deferred`` for a new item."""
     key = spec["item_key"]
     for item in items:
         if key == item["item_key"] or any(v.get("item_key") == key for v in item["versions"]):
@@ -522,6 +522,8 @@ def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principa
                       collected_at=_iso(now))
         _save(bundle, target, now)
         return {"id": target["id"], "item_key": key, "result": "merged", "status": target["status"]}
+    if not create:
+        return {"id": None, "item_key": key, "result": "deferred", "status": None}
     item_id = "it_" + key[:12]
     if (_item_dir(bundle, item_id) / "item.json").exists():
         raise MaintError(500, "internal", f"item id collision: {item_id}")

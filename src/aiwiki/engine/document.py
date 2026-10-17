@@ -3,7 +3,8 @@
 This module is deliberately small: it parses one concept and derives the two
 read-side signals defined by OKF v0.2.  Freshness is derived, never written: a concept
 without a valid ``stale_after`` goes stale ``DEFAULT_STALE_DAYS`` after its generation, so
-the default churns neither Git nor the audit backlog.  Validation policy lives in
+the default churns neither Git nor the audit backlog.  The default is a negative signal
+only: before it, such a concept reads ``unspecified``, never ``fresh``.  Validation policy lives in
 ``aiwiki.engine.validate`` so consumers can remain available even when a bundle
 contains an invalid document.
 """
@@ -27,8 +28,8 @@ FRESHNESS_FRESH = "fresh"
 FRESHNESS_STALE = "stale"
 FRESHNESS_UNSPECIFIED = "unspecified"
 
-# The owner's one default for every type: a generation is current for 90 days unless the
-# concept declares its own ``stale_after``.
+# The owner's one default for every type: a generation without its own ``stale_after`` goes
+# stale 90 days after it. Only a declared date makes a concept read ``fresh``.
 DEFAULT_STALE_DAYS = 90
 BASIS_DECLARED, BASIS_DEFAULT, BASIS_NONE = "declared", "default", "none"
 
@@ -185,7 +186,10 @@ def declared_stale_date(frontmatter: dict[str, Any]) -> date | None:
 def _default_stale_date(frontmatter: dict[str, Any]) -> date | None:
     generated = frontmatter.get("generated")
     at = _instant(generated.get("at")) if isinstance(generated, dict) else None
-    return at.astimezone(UTC).date() + timedelta(days=DEFAULT_STALE_DAYS) if at is not None else None
+    try:
+        return at.astimezone(UTC).date() + timedelta(days=DEFAULT_STALE_DAYS) if at is not None else None
+    except (OverflowError, ValueError):  # a valid time near year 1 or 9999: no default, never a crash
+        return None
 
 
 def freshness_basis(frontmatter: dict[str, Any]) -> str:
@@ -209,11 +213,15 @@ def is_stale(frontmatter: dict[str, Any], today: date | None = None) -> bool:
 
 
 def freshness(frontmatter: dict[str, Any], today: date | None = None) -> str:
-    """Derive ``fresh``, ``stale``, or ``unspecified`` from the effective stale date."""
+    """``stale`` on and after the effective stale date; before it ``fresh`` only under a declared
+    ``stale_after``. Before the default date a concept stays ``unspecified``: the default is a
+    bookkeeping stamp, not a curator's judgment, so it never lifts one into a fresh read tier."""
     deadline = stale_date(frontmatter)
     if deadline is None:
         return FRESHNESS_UNSPECIFIED
-    return FRESHNESS_STALE if (today or date.today()) >= deadline else FRESHNESS_FRESH
+    if (today or date.today()) >= deadline:
+        return FRESHNESS_STALE
+    return FRESHNESS_FRESH if declared_stale_date(frontmatter) is not None else FRESHNESS_UNSPECIFIED
 
 
 def generated_fields(frontmatter: dict[str, Any]) -> tuple[str, str]:

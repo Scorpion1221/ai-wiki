@@ -7,12 +7,15 @@ declared ``stale_after``, else 90 days after its generation) still reads stable 
 consumer. When a maintainer run starts, ``maint_state.acquire_lease`` queues one item per such
 concept through the ordinary enqueue path, from the specs ``plan`` returns.
 
-Each item carries exactly one file, ``notice.md``, whose bytes depend on (path, content hash,
-reason, review id) and, for ``stale``, the day freshness elapsed: never a collection time. So a
-repeated run start is a duplicate (a notice the maintainer skipped stays skipped), a new version
-of the concept is a new item, a concept that goes stale again after a new generation of the same
-content is too, and a waiting item of the same topic absorbs the newer notice. The notice is not
-evidence: its origin kind is ``attention``, and the curate gate refuses a packet citing one.
+Each item carries exactly one file, ``notice.md``, which holds only facts: path, content hash,
+reason, the review (id, time, requested verdict, downgrade, note) or the stale date and its
+basis, and the cited sources. Never a collection time and never guidance: what to do is the
+item's ``brief`` (and the maintainer skill), which is not part of the item key. So a repeated
+run start is a duplicate (a notice the maintainer skipped stays skipped, whatever the guidance
+says by then), a new version of the concept is a new item, a concept that goes stale again
+after a new generation of the same content is too, and a waiting item of the same topic absorbs
+the newer notice. The notice is not evidence: its origin kind is ``attention``, and the curate
+gate leaves it out of a packet and refuses a packet of nothing else.
 """
 from __future__ import annotations
 
@@ -79,34 +82,62 @@ def unverified_reviews(bundle: Path) -> dict[tuple[str, str], dict]:
     return {key: review for key, review in newest.items() if review.get("outcome") == "unverified"}
 
 
-def _notice(rel: str, base: str, reason: str, frontmatter: dict, review: dict | None, sources: list[str]) -> bytes:
-    """What is wrong, the auditor's words, the cited sources and what to do; no time but the review's."""
-    lines = [f"# Attention: {rel}", "", f"- concept: `{rel}`", f"- content hash: `{base}`", f"- reason: {reason}"]
-    if review is not None:
-        lines += [f"- review: {review['review']} at {review.get('at')}",
-                  f"- downgrade: {review.get('downgrade') or 'none (the auditor judged it unverified)'}", "",
-                  "The auditor judged this exact version unsupported by the evidence it cites. It stays",
-                  "stable but unverified, and no audit looks at it again until its content changes.", "",
-                  "The auditor's note:", ""]
-        lines += [f"> {line}" if line.strip() else ">" for line in str(review.get("note") or "(none)").splitlines()]
-    elif freshness_basis(frontmatter) == BASIS_DECLARED:
-        lines += ["", f"Its declared `stale_after` ({stale_date(frontmatter).isoformat()}) has passed: its claims",
-                  "may no longer hold."]
+# What each service downgrade (runtime.audit, design §5.4) means: the brief's words, never the
+# notice's. A correction downgraded for adding (or for removing a hedge) is an edit the gate
+# rejected, so its note describes what must not be applied without new evidence.
+DOWNGRADES = {
+    "D_NOVEL_TOKEN": "it added words or numbers no cited source holds",
+    "D_NEW_LINK": "it added a link",
+    "D_GROWTH": "it grew the concept instead of narrowing it",
+    "D_CAVEAT_REMOVED": "it removed a caveat",
+    "D_RESTORED": "it changed only what a review may not change",
+    "D_INVALID_VERDICT": "the verdict was unusable",
+    "D_NO_EVIDENCE": "the concept cites no frozen source",
+}
+REJECTED_EDITS = frozenset({"D_NOVEL_TOKEN", "D_NEW_LINK", "D_GROWTH", "D_CAVEAT_REMOVED"})
+
+
+def _asked(verdict: object) -> str:
+    return {"corrected": "correction", "verified": "verification"}.get(str(verdict), "verdict")
+
+
+def _notice(rel: str, base: str, origin: dict, sources: list[str]) -> bytes:
+    """Facts only, in fixed lines: these bytes are the item key, so no guidance lives here."""
+    lines = [f"# Attention: {rel}", "", f"- concept: `{rel}`", f"- content hash: `{base}`",
+             f"- reason: {origin['reason']}"]
+    if origin["reason"] == AUDIT_UNVERIFIED:
+        verdict, downgrade = origin.get("verdict"), origin.get("downgrade")
+        lines += [f"- review: {origin['review']} at {origin.get('reviewed_at')}",
+                  f"- requested verdict: {verdict}",
+                  f"- outcome: unverified (the gate refused the requested {_asked(verdict)}: {downgrade})"
+                  if downgrade else "- outcome: unverified (the auditor's own verdict)",
+                  "- note, describing the edit the gate rejected:" if downgrade in REJECTED_EDITS else "- note:", ""]
+        lines += [f"> {line}" if line.strip() else ">" for line in str(origin.get("note") or "(none)").splitlines()]
+        lines += [""]
     else:
-        lines += ["", f"It declares no `stale_after`, and its generation is {DEFAULT_STALE_DAYS} or more days old",
-                  f"(the default freshness; stale since {stale_date(frontmatter).isoformat()}): its claims may",
-                  "no longer hold."]
-    lines += ["", "Cited sources:", ""]
-    lines += [f"- `{source}`" for source in sources] or ["- none of the bundle's sources/"]
-    lines += ["", "What to do:", "",
-              "1. Gather evidence: `ai-wiki maint add-evidence <item> source:sources/<file>` freezes a source",
-              "   the bundle already holds (one cited above, or a newer one); a Git file or an issue works too.",
-              "2. Fix the claims the evidence does not support, cite it, then `ai-wiki propose`."
-              + (" If they all still hold, set `stale_after` to when they should next be checked."
-                 if review is None else ""),
-              "3. Or skip it with a reason: `ai-wiki maint skip <item> --reason insufficient_evidence`.", "",
-              "This notice is not evidence: a changeset citing it is refused. Add evidence first.", ""]
-    return "\n".join(lines).encode("utf-8")
+        lines += [f"- stale on: {origin['stale_on']}", f"- basis: {origin['basis']}"]
+    lines += ["- cited sources:"] + ([f"  - `{source}`" for source in sources] or ["  - none of the bundle's sources/"])
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _brief(origin: dict) -> str:
+    """What to do, front-loaded (``maint next`` shows 300 characters); not part of the item key."""
+    tail = "cite it, propose. Else skip insufficient_evidence."
+    if origin["reason"] == STALE:
+        why = "its declared stale_after" if origin["basis"] == BASIS_DECLARED else \
+            f"{DEFAULT_STALE_DAYS} days after generation, the default"
+        return (f"Stale since {origin['stale_on']} ({why}). Check the claims against evidence newer than the "
+                f"generation (maint add-evidence: a Git file or an issue); fix what it contradicts, {tail}")
+    downgrade = origin.get("downgrade")
+    if not downgrade:
+        return ("The auditor judged this version unverified; notice.md quotes why. Add evidence (maint "
+                "add-evidence: a Git file, an issue or source:sources/<file>); fix or remove only what it "
+                f"shows wrong or unsupported, {tail}")
+    rejected = " The note describes that rejected edit: never apply it without new evidence." \
+        if downgrade in REJECTED_EDITS else ""
+    return (f"The gate refused the auditor's {_asked(origin.get('verdict'))} ({downgrade}: "
+            f"{DOWNGRADES.get(downgrade, 'a service downgrade')}).{rejected} Add evidence (maint add-evidence); "
+            f"fix only what it shows, {tail}")
 
 
 def plan(bundle: Path, *, today: date, tree: Path | None = None) -> list[dict]:
@@ -132,21 +163,19 @@ def plan(bundle: Path, *, today: date, tree: Path | None = None) -> list[dict]:
         deadline = stale_date(frontmatter)
         if review is not None:
             since = _instant(review.get("at"))
+            # ``verdict`` is what the auditor asked for; with a ``downgrade`` the gate refused it.
             origin = {"kind": KIND, "path": rel, "reason": AUDIT_UNVERIFIED, "base": base,
-                      "review": review["review"], "reviewed_at": review.get("at"),
+                      "review": review["review"], "reviewed_at": review.get("at"), "verdict": review.get("verdict"),
                       "downgrade": review.get("downgrade"), "note": review.get("note")}
-            brief = f"{rel}: the auditor judged this version unverified" + (
-                f" ({review['downgrade']})" if review.get("downgrade") else "")
         elif deadline is not None and today >= deadline:
             since = datetime(deadline.year, deadline.month, deadline.day, tzinfo=UTC)
             origin = {"kind": KIND, "path": rel, "reason": STALE, "base": base, "stale_on": deadline.isoformat(),
                       "basis": freshness_basis(frontmatter)}
-            brief = f"{rel}: stale since {deadline.isoformat()}"
         else:
             continue
-        notice = _notice(rel, base, origin["reason"], frontmatter, review, sorted(_cited(rel, frontmatter)))
+        notice = _notice(rel, base, origin, sorted(_cited(rel, frontmatter)))
         found.append((since or datetime.min.replace(tzinfo=UTC), rel, {
-            "origin": origin, "topic_key": f"{KIND}:{rel}", "brief": brief,
+            "origin": origin, "topic_key": f"{KIND}:{rel}", "brief": _brief(origin),
             "priority": planner.PRIORITY[KIND if review is not None else "refresh"],
             "files": [{"name": NOTICE, "content_b64": base64.b64encode(notice).decode(),
                        "origin": {"kind": KIND, "path": rel, "reason": origin["reason"]}}]}))

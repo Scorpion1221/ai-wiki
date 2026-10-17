@@ -308,6 +308,7 @@ def _search_row(result: dict) -> dict:
         "verified_at": result.get("verified_at"),
         "current_verified_at": result.get("current_verified_at"),
         "stale_on": result.get("stale_on") or "",
+        "basis": result.get("freshness_basis") or "",
         "score": result.get("score"),
         "phrase": bool(match.get("phrase")),
         "coverage": match.get("coverage"),
@@ -838,10 +839,12 @@ def main(argv=None) -> int:
                         "verified_at": item.get("verified_at"),
                         "current_verified_at": item.get("current_verified_at"),
                         "stale_on": item.get("stale_on") or "",  # an older writer sends none
+                        # declared | default | none: a table tells "stale (default)" from a declared date
+                        "basis": item.get("freshness_basis") or "",
                         "summary": _ls_summary(item),
                     } for item in concepts),
                     ("path", "status", "trust", "freshness", "verification_current",
-                     "generated_at", "verified_at", "current_verified_at", "stale_on", "summary"),
+                     "generated_at", "verified_at", "current_verified_at", "stale_on", "basis", "summary"),
                 ))
             if entries:
                 groups.append(table_lines(
@@ -903,7 +906,8 @@ def main(argv=None) -> int:
                       table_lines(
                           "results", rows,
                           ("path", "title", "status", "trust", "freshness", "verification_current",
-                           "generated_at", "verified_at", "current_verified_at", "stale_on", "score", "phrase",
+                           "generated_at", "verified_at", "current_verified_at", "stale_on", "basis", "score",
+                           "phrase",
                            "coverage", "fields", "terms", "context"),
                       )]
             if isinstance(total, int) and len(results) < total:

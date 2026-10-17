@@ -1088,9 +1088,10 @@ def _attention(path: Path) -> list[dict]:
 
 
 def _frozen_sources(path: Path, files: object) -> None:
-    """A ``bundle-source`` file must hold the bytes ``sources/.hashes.yaml`` records for its
-    ``origin.path`` (design §5.6): the label says the bundle froze them, so the writer checks it
-    before storing. Anything malformed is left to maint_state, which answers 400."""
+    """A ``bundle-source`` file must name a file directly under ``sources/`` (never inbox/,
+    _rejected/ or another folder, nor the ledger itself) and hold the bytes
+    ``sources/.hashes.yaml`` records for it (design §5.6): the label says the bundle froze them,
+    so the writer checks it before storing. Anything malformed is left to maint_state (400)."""
     ledger = None
     for raw in files if isinstance(files, list) else ():
         origin = raw.get("origin") if isinstance(raw, dict) else None
@@ -1102,7 +1103,8 @@ def _frozen_sources(path: Path, files: object) -> None:
             continue
         ledger = attention.ledger(path) if ledger is None else ledger
         rel = origin.get("path")
-        if not isinstance(rel, str) or hashlib.sha256(data).hexdigest() != ledger.get(rel):
+        if not isinstance(rel, str) or not changeset.top_level_source(rel) \
+                or hashlib.sha256(data).hexdigest() != ledger.get(rel):
             raise M.MaintError(422, "not_frozen", f"{rel!r} is not a source of this bundle at these bytes "
                                                   "(sources/.hashes.yaml); workspace pull and cite it again")
 
