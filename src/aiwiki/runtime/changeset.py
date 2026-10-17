@@ -796,7 +796,7 @@ def _evaluate_in(
     before_errors = validate(workspace)
     before_concepts = policy._concept_snapshot(workspace)
     sources_before = policy._source_snapshot(workspace)
-    tree_before = policy._agent_tree_snapshot(workspace)
+    tree_before = policy._agent_tree_snapshot(workspace, digests=True)  # only compared, in G10
     links_before = policy._agent_symlink_snapshot(workspace)
     names = _concept_names(workspace)
     deprecating = {entry["path"] for entry in files if entry["op"] == "deprecate"}

@@ -433,7 +433,22 @@ def _run() -> None:
             event = _finished.pop(job_path, None)
             if event is not None:
                 event.set()
+            _pack_after_push(bundle, job_path)
             _q.task_done()
+
+
+def _pack_after_push(bundle: Path, job_path: Path) -> None:
+    """``git gc --auto`` after a job that pushed (``curate.GC_AUTO``). Its waiter is already
+    released, so no request waits for it, and the worker that runs every transaction runs it
+    under the writer lock, so none snapshots .git meanwhile. Reads need neither: gc leaves the
+    working tree alone, and an object stays readable while it moves into a pack."""
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        if job.get("status") == "done" and (job.get("git") or {}).get("pushed"):
+            with _mutation_lock:
+                curate._gc_auto(bundle)
+    except Exception:  # noqa: BLE001 — housekeeping: a failed gc only waits for the next push
+        pass
 
 
 def _run_intake(bundle: Path, job_path: Path) -> None:

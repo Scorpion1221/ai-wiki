@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -343,8 +344,25 @@ def _cleanup_recovery_source(bundle: Path, job: dict) -> None:
 
 # --- git transaction helpers -------------------------------------------------------------
 
+# Every writer commit leaves ~10 loose objects, which Git packs only at gc.auto's 6,700 (~800 MB
+# here), and every transaction fingerprints them all (_git_metadata_snapshot) and holds each by
+# its digest alone: it cannot restore an object a gc moved into a pack. So the writer's own Git
+# never packs (a commit, fetch or rebase would detach a gc into the transaction), and the worker
+# packs between transactions instead (_gc_auto).
+_NO_AUTO_GC = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
+# Git estimates the loose count from one of its 256 object directories, so no threshold below 256
+# acts sooner: a pack every 25-50 commits, 1.4-1.8 s and ~150 MB of child memory in the production
+# image (a thread per CPU took 330 MB). autoPackLimit folds those packs into one now and then.
+GC_AUTO = ("-c", "gc.auto=256", "-c", "gc.autoPackLimit=10", "-c", "gc.autoDetach=false", "-c", "pack.threads=1")
+
+
 def _git(root: Path, *args: str, t: int = GIT_TIMEOUT_S) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=t)
+    return subprocess.run(["git", *_NO_AUTO_GC, "-C", str(root), *args], capture_output=True, text=True, timeout=t)
+
+
+def _gc_auto(root: Path) -> None:
+    """``git gc --auto`` in the foreground, between transactions only (``_NO_AUTO_GC``)."""
+    _git(root, *GC_AUTO, "gc", "--auto", "--quiet")
 
 
 def _repo_root(path: Path) -> Path | None:
@@ -481,7 +499,7 @@ def _restore_agent_tree(
     links: dict[str, str],
 ) -> None:
     """Restore knowledge content without touching concurrent .okf/inbox state."""
-    current = _agent_tree_snapshot(bundle)
+    current = _agent_tree_snapshot(bundle, digests=True)  # only its paths are read
     current_links = _agent_symlink_snapshot(bundle)
     for rel in sorted(set(current_links) | set(links)):
         path = bundle / rel
@@ -700,15 +718,32 @@ def _changed_concepts(
     )
 
 
+# Content-addressed object files: a loose object is named by its own hash, and a pack with its
+# index files is written once and renamed into place. Git never rewrites either in place.
+_GIT_OBJECT_FILE = re.compile(
+    r"\.git/objects/(?:[0-9a-f]{2}/(?:[0-9a-f]{38}|[0-9a-f]{62})"
+    r"|pack/pack-(?:[0-9a-f]{40}|[0-9a-f]{64})\.(?:pack|idx|rev|bitmap|mtimes))"
+)
+
+
 @dataclass(frozen=True)
 class _MetadataEntry:
     kind: str
     mode: int
     payload: bytes | str | None = None
+    sha256: str | None = None  # an object file's digest, held instead of its bytes
 
 
 def _git_metadata_snapshot(bundle: Path) -> dict[str, _MetadataEntry]:
-    """Capture lexical ``.git`` metadata without following any symlink."""
+    """Capture lexical ``.git`` metadata without following any symlink.
+
+    Mutable metadata (HEAD, config, refs, index, hooks, info, logs) keeps its bytes for a restore.
+    An object file keeps only its streamed sha256: holding the object store cost the writer up to
+    1.5 GB once ~4,700 loose objects (~800 MB) had piled up. Hashing those takes ~0.35 s in the
+    production runtime image, ~0.1 s more than reading them did. A stat fingerprint would be no
+    cheaper fix: Git freshens the mtime of an object or pack it writes again, so every service
+    commit undone by a rollback would read as a tampered object that cannot be restored.
+    """
     git_path = bundle / ".git"
     if not git_path.exists() and not git_path.is_symlink():
         return {}
@@ -722,6 +757,9 @@ def _git_metadata_snapshot(bundle: Path) -> dict[str, _MetadataEntry]:
             entries[rel] = _MetadataEntry("symlink", mode, os.readlink(path))
         elif path.is_dir():
             entries[rel] = _MetadataEntry("dir", mode)
+        elif path.is_file() and _GIT_OBJECT_FILE.fullmatch(rel):
+            with path.open("rb") as handle:
+                entries[rel] = _MetadataEntry("file", mode, sha256=hashlib.file_digest(handle, "sha256").hexdigest())
         elif path.is_file():
             entries[rel] = _MetadataEntry("file", mode, path.read_bytes())
         else:
@@ -739,12 +777,33 @@ def _git_metadata_snapshot(bundle: Path) -> dict[str, _MetadataEntry]:
 
 
 def _restore_git_metadata(bundle: Path, snapshot: dict[str, _MetadataEntry]) -> None:
-    """Restore trusted Git metadata without invoking Git or hooks/config."""
-    git_path = bundle / ".git"
-    if git_path.is_symlink() or git_path.is_file():
-        git_path.unlink()
-    elif git_path.is_dir():
-        shutil.rmtree(git_path)
+    """Restore trusted Git metadata without invoking Git or hooks/config.
+
+    Everything is removed and rebuilt from the snapshot, but for the object files that still hold
+    their snapshot digest: an object has no bytes to rebuild from. One that was modified or
+    deleted stays missing, so the verification after every restore fails closed (better a
+    missing object than a wrong one), and new object files are removed like any new file, unless
+    a snapshot object is gone: a gc may have moved it into one of them (only the worker packs,
+    between transactions, but an operator can run one), so they are kept for that verification
+    to stop on.
+    """
+    current = _git_metadata_snapshot(bundle)
+    kept = {  # a mode change alone is restored below
+        rel for rel, entry in snapshot.items()
+        if entry.sha256 is not None and getattr(current.get(rel), "sha256", None) == entry.sha256
+    }
+    damaged = any(entry.sha256 is not None and rel not in kept for rel, entry in snapshot.items())
+    for rel in sorted(current, reverse=True):  # children first
+        path = bundle / rel
+        if rel in kept or (damaged and rel not in snapshot and current[rel].sha256 is not None):
+            continue
+        if current[rel].kind == "dir":
+            try:
+                path.rmdir()
+            except OSError:
+                pass  # still holds a kept object
+        else:
+            path.unlink()
     if not snapshot:
         return
     directories = sorted(
@@ -756,7 +815,9 @@ def _restore_git_metadata(bundle: Path, snapshot: dict[str, _MetadataEntry]) -> 
         path.chmod(entry.mode)
     for rel, entry in sorted(snapshot.items()):
         path = bundle / rel
-        if entry.kind == "file":
+        if rel in kept:
+            path.chmod(entry.mode)
+        elif entry.kind == "file" and entry.sha256 is None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(entry.payload if isinstance(entry.payload, bytes) else b"")
             path.chmod(entry.mode)
@@ -1067,8 +1128,9 @@ def _transaction(
                     agent_tree_before,
                     agent_links_before or {},
                 )
+                restored = _agent_tree_snapshot(bundle, digests=True)  # only compared
                 if (
-                    _agent_tree_snapshot(bundle) != agent_tree_before
+                    restored != {rel: hashlib.sha256(data).hexdigest() for rel, data in agent_tree_before.items()}
                     or _agent_symlink_snapshot(bundle) != (agent_links_before or {})
                 ):
                     raise RuntimeError("agent tree restore verification failed")
