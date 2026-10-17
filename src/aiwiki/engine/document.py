@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 FRONTMATTER_DELIMITER = "---"
+# Design §5.4 A4: a process's event confirms its own generation only from a later session, this
+# long after it (the gate refuses such a review sooner, and in the run that wrote it).
+SELF_REVIEW_DELAY = timedelta(hours=12)
 
 TRUST_UNVERIFIED = "unverified"
 TRUST_MACHINE_CONFIRMED = "machine-confirmed"
@@ -130,17 +133,19 @@ def _instant(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def current_verified(frontmatter: dict[str, Any]) -> list[dict[str, Any]]:
+def current_verified(frontmatter: dict[str, Any], *,
+                     own_after: timedelta | None = SELF_REVIEW_DELAY) -> list[dict[str, Any]]:
     """Verification events that confirm the current generated revision.
 
     OKF keeps generation and verification history separate.  Once content changes,
     earlier verification is historical evidence, not confirmation of the new revision.
     A document without ``generated.at`` retains the official v0.2 advisory behaviour.
-    The author's own event at the generation's instant confirms nothing (design §5.4 A4:
-    no reviewer verifies its own generation): it is a reviewer that corrected a concept and
-    stamped its correction verified in the same act. A later review by the same actor, in
-    another run, reviews that correction (§5.3 ``correction``), so it counts.
-    ``trust_tier`` still counts every event (§5.3).
+    A process's event on its own generation counts only ``own_after`` past it (design §5.4
+    A4: no reviewer verifies its own generation): the 141 auditor corrections stamped verified
+    in the act read unverified, and a new run label in the same session confirms nothing; a
+    later session's review of that correction (§5.3 ``correction``) counts. A person's
+    correction is verified in the act (§5.5), as ever. ``own_after`` None is OKF v0.2's own
+    rule, which an older reader applies; ``trust_tier`` still counts every event (§5.3).
     """
     events = normalize_verified(frontmatter)
     generated = frontmatter.get("generated")
@@ -148,8 +153,10 @@ def current_verified(frontmatter: dict[str, Any]) -> list[dict[str, Any]]:
     if generated_at is None:
         return events
     author = str(generated.get("by") or "")
-    return [event for event in events if (at := _instant(event.get("at"))) is not None and (
-        at > generated_at or (at == generated_at and (not author or str(event.get("by") or "") != author)))]
+    own = generated_at + own_after if own_after is not None and author and not author.startswith("human:") \
+        else generated_at
+    return [event for event in events if (at := _instant(event.get("at"))) is not None
+            and at >= (own if str(event.get("by") or "") == author else generated_at)]
 
 
 def trust_tier(frontmatter: dict[str, Any]) -> str:

@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +30,7 @@ import yaml
 
 from ..engine import append_log, bookkeeping
 from ..engine.document import (
+    SELF_REVIEW_DELAY,
     OKFDocumentError,
     _instant,
     current_verified,
@@ -978,20 +981,34 @@ _HEDGE = re.compile(
     r"|不显著|方向性|(?<![A-Za-z])(?:cannot conclude|not conclusive|inconclusive|preliminary|does not prove"
     r"|not evidence|early snapshot|directional|caveat)(?![A-Za-z])", re.IGNORECASE)
 _LIMIT = re.compile(
-    _HEDGE.pattern + r"|不能|不足以|无法|不应|不得|尚未|仍未|仍待|没有|待确认|待核实|待核验"
+    _HEDGE.pattern + r"|不能|不足以|无法|不应|不得|尚未|仍未|仍待|没有证据|无证据|没有|待确认|待核实|待核验"
     r"|未(?:检出|证实|获证实|核实|确认|覆盖|验收|证明|提供|解决)|可能|推测|不确定|前提|假设|只|仅|据报|据.{1,40}?报告"
     r"|所述|自报|声称"
-    r"|(?<![A-Za-z])(?:not|cannot|unverified|unconfirmed|uncertain|may|might|only|assum\w*|reportedly"
-    r"|according to)(?![A-Za-z])", re.IGNORECASE)
+    r"|(?<![A-Za-z])(?:no evidence|not|cannot|unverified|unconfirmed|uncertain|may|might|only|assum\w*"
+    r"|reportedly|according to)(?![A-Za-z])", re.IGNORECASE)
+# A hedge's stand-in must be another limit, never scope or filler: "，没有例外" or "only" kept
+# the limit count of a flipped "不证明…" (review of 8859461).
+_WEAK = frozenset({"没有", "只", "仅", "not", "only"})
+# The claim each negating hedge denies: a correction that keeps the clause but states it bare
+# ("不证明…已部署" becoming "证明…已部署") flips it, whatever limit it adds elsewhere.
+_DENIES = {"不能据此": "据此", "不能证明": "证明", "不证明": "证明", "不代表": "代表", "不等于": "等于",
+           "不构成": "构成", "无法确定": "确定", "非结论": "结论", "不是结论": "是结论", "不显著": "显著",
+           "待验证": "验证", "未验证": "验证", "cannot conclude": "conclude", "not conclusive": "conclusive",
+           "inconclusive": "conclusive", "does not prove": "prove", "not evidence": "evidence"}
+# A date or an issue id names what a guard is about ("2026-08-21 的读数…", "WAIO-158 的读数…"),
+# never a claim it bounds: deleting the guard with its date leaves the readout it limited.
+_DATE = re.compile(r"\d{4}-\d{2}(?:-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?Z?)?)?")
+_ISSUE = re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*-\d+(?![A-Za-z0-9_])")
 _SENTENCE = re.compile(r"(?<=[。！？；!?;])|(?<=\.)\s+")
 _CLAUSE = re.compile(r"[，,、：:（）()]")
 _FOOTNOTE = re.compile(r"\[\^([^\]\s]+)\](:)?")
 _TARGET = re.compile(r"\]\([^)]*\)|https?://\S+")  # a link's target names a file, not a limit
-_HEADING = re.compile(r"#{1,6}\s")
+_HEADING = re.compile(r"(#{1,6})\s")
 _BOOKKEEPING = ("verified", "generated", "status")  # a note on them is the service's to keep (A5)
 _KEPT = 0.5  # the share of a hedge's word pairs, or of the claims it bounds, an edit must keep
 _KEPT_WORDS = 0.6  # or of its words, when a rewording dropped a few of them
-_KEPT_CLAUSE = 0.8  # or of a hedged clause's word pairs, kept in one limiting clause
+_KEPT_CLAUSE = 0.8  # or of a hedged clause's word pairs, kept in one limiting clause (or flipped in a bare one)
+_CAVEAT_BUDGET = 200_000  # unit comparisons in one review; past them a correction fails closed
 
 
 def backlog_settings(environ: Mapping[str, str] = os.environ) -> tuple[datetime | None, int]:
@@ -1051,30 +1068,45 @@ def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping
     return sorted(target for target in _cited(rel, frontmatter) if frozen(target))
 
 
-def review_records(bundle: Path) -> tuple[set[tuple[str, str]], set[str], dict[tuple[str, str], str | None]]:
-    """``(path, content hash)`` of every review a done audit changeset recorded, the seed paths
-    among them, and the run that wrote each correction (by its resulting content hash). An
-    admin-reverted audit is no review: its concepts are due again. A correction is no review of
-    what it wrote: only a verified or unverified judgement settles a version, so the version a
-    correction leaves is a ``correction`` for a later run to review (§5.3, §5.4 A4)."""
+def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], dict[tuple[str, str], dict]]:
+    """For each ``(path, content hash)`` a done audit changeset judged, the order of its newest
+    judgement; the seed paths among them; and the newest correction that wrote each, ``{run,
+    at, order, legacy}``. Jobs are ordered by finish, then start and id (the writer runs them
+    one at a time), never by the order their files are listed in. An admin-reverted audit is
+    no review: its concepts are due again. A correction judges nothing it wrote, nor does an
+    older judgement of the same bytes settle it: only a verified or unverified review after the
+    correction does, so the version a correction leaves is a ``correction`` for a later run
+    (§5.3, §5.4 A4). A correction is ``legacy`` when no receipt written under that rule (a
+    record that names its ``run``) recorded it: a Codex audit's, or an external auditor's from
+    before, which stamped itself verified."""
     reverted = I.reverted_by(bundle)
-    reviewed, seeded, corrected = set(), set(), {}
-    for job in I.changeset_jobs(bundle):
-        if job.get("kind") != "audit" or job.get("status") != "done" or job.get("id") in reverted:
-            continue
+    reviewed: dict[tuple[str, str], int] = {}
+    seeded: set[str] = set()
+    corrected: dict[tuple[str, str], dict] = {}
+    receipted: set[tuple[str, str]] = set()
+    jobs = sorted((job for job in I.changeset_jobs(bundle) if job.get("kind") == "audit"
+                   and job.get("status") == "done" and job.get("id") not in reverted),
+                  key=lambda job: tuple(str(job.get(key) or "") for key in ("finished", "started", "id")))
+    for order, job in enumerate(jobs):  # oldest first: the newest record of a version wins
         for review in job.get("reviews") or []:
             if not isinstance(review, dict) or not isinstance(review.get("path"), str):
                 continue
             if isinstance(review.get("base"), str):
-                reviewed.add((review["path"], review["base"]))
+                reviewed[(review["path"], review["base"])] = order
             if not isinstance(review.get("content_hash"), str):
                 pass
-            elif review.get("outcome") == "corrected":  # receipts before records kept a run hold the job's
-                corrected[(review["path"], review["content_hash"])] = review.get("run", job.get("run"))
+            elif review.get("outcome") == "corrected":
+                key = (review["path"], review["content_hash"])
+                corrected[key] = {"run": review.get("run", job.get("run")), "at": _instant(job.get("finished")),
+                                  "order": order}
+                if "run" in review:
+                    receipted.add(key)
             else:
-                reviewed.add((review["path"], review["content_hash"]))
+                reviewed[(review["path"], review["content_hash"])] = order
             if review.get("seed") is True:
                 seeded.add(review["path"])
+    for key, correction in corrected.items():
+        correction["legacy"] = key not in receipted
     return reviewed, seeded, corrected
 
 
@@ -1123,23 +1155,25 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     content, and either a commit the service did not write changed it, or a source it cites,
     since ``AIWIKI_BACKLOG_EPOCH`` and the service's last commit to it (``external``, whoever
     generated it), or an auditor generated it and it is not verified in that version
-    (``correction``: an auditor's correction, or a legacy Codex audit's, is reviewed by a later
-    run, never by the run that wrote it; its ``corrected_run`` names that run when a receipt
-    recorded one), or an auditor did not
+    (``correction``: an auditor's correction, or a legacy Codex audit's, is reviewed by another
+    run from ``reviewable_at``, ``SELF_REVIEW_DELAY`` past the correction; ``corrected_run``
+    names the run that wrote it when a receipt recorded one), or an auditor did not
     generate it and it has an unverified generation since the epoch (``generation``) or is
     among the oldest unverified concepts from before the epoch, released
     ``AIWIKI_AUDIT_SEED_PER_DAY`` a day (``seed``).
     Without an epoch every unverified concept is a ``generation``. Each entry's ``since`` is
     when that version became due: the newest such commit for ``external``, else its generation.
-    New work (corrections included) comes first, each part oldest first. ``tree`` is the
-    checkout read (the bundle by default); the review receipts and the history are the bundle's.
+    New work (a receipted correction among it) comes first, then ``legacy`` corrections (no
+    receipt under A4's rule: the self-verified and Codex corrections from before it), then
+    seeds, each part oldest first. ``tree`` is the checkout read (the bundle by default); the
+    review receipts and the history are the bundle's.
     """
     epoch, per_day = settings or backlog_settings()
     tree = tree or bundle
     reviewed, seeded, corrected = review_records(bundle)
     latest = external_changes(bundle, epoch, revision) if epoch else {}
     frozen = _frozen(tree)
-    fresh, older = [], []
+    fresh, legacy, older = [], [], []
     for rel, text in _concepts(tree):
         try:
             frontmatter = parse_document(text).frontmatter
@@ -1147,7 +1181,9 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
             continue  # a concept that does not parse is its curator's to fix first
         by, at = generated_fields(frontmatter)
         base = changeset.content_hash(text)
-        if frontmatter.get("status") == "deprecated" or (rel, base) in reviewed:
+        judged, correction = reviewed.get((rel, base)), corrected.get((rel, base))
+        if frontmatter.get("status") == "deprecated" or (
+                judged is not None and (correction is None or judged > correction["order"])):
             continue
         current = bool(current_verified(frontmatter))
         generated_at = _instant(at)
@@ -1172,8 +1208,13 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
             "generated": {"by": by or None, "at": at or None}, "verification_current": current,
             "sources": _local_sources(frozen, rel, frontmatter), "reason": reason, "since": since}
         if reason == "correction":
-            entry["corrected_run"] = corrected.get((rel, base))
-        (older if reason == "seed" else fresh).append(entry)
+            # A4 on the write side: no auditor confirms a correction in its run or within
+            # SELF_REVIEW_DELAY of it (current_verified holds its author's event to the same).
+            written = max(filter(None, [generated_at, correction and correction["at"]]), default=None)
+            entry.update(corrected_run=correction and correction["run"], legacy=correction is None
+                         or correction["legacy"], reviewable_at=written and (written + SELF_REVIEW_DELAY).astimezone(
+                             UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        (older if reason == "seed" else legacy if entry.get("legacy") else fresh).append(entry)
 
     def oldest(entry: dict) -> tuple:
         return _instant(entry["since"]) or datetime.min.replace(tzinfo=UTC), entry["path"]
@@ -1183,7 +1224,7 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
         days = (now.astimezone(UTC).date() - epoch.astimezone(UTC).date()).days
         released = max(0, per_day * max(0, days + 1) - len(seeded))
     older.sort(key=oldest)
-    return {"concepts": sorted(fresh, key=oldest) + older[:released],
+    return {"concepts": sorted(fresh, key=oldest) + sorted(legacy, key=oldest) + older[:released],
             "epoch": epoch.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if epoch else None,
             "seed": {"per_day": per_day, "waiting": len(older), "released": min(released, len(older)),
                      "reviewed": len(seeded)}}
@@ -1253,21 +1294,20 @@ def _pairs(text: str) -> set[tuple[str, ...]]:
     return set(zip(words, words[1:], strict=False)) or {tuple(words)}
 
 
-def _limits(text: str) -> int:
-    return len(_LIMIT.findall(_TARGET.sub(" ", text)))
+def _shape(text: str) -> tuple[set, set, int, int]:
+    """A unit's word pairs, its words, its limiting words, and how many of them are strong (all
+    but ``_WEAK``)."""
+    limits = _LIMIT.findall(_TARGET.sub(" ", text))
+    return _pairs(text), set(_words(text)), len(limits), sum(limit.lower() not in _WEAK for limit in limits)
 
 
-def _shape(text: str) -> tuple[set, set, int]:
-    """A unit's word pairs, its words and its limiting words."""
-    return _pairs(text), set(_words(text)), _limits(text)
-
-
-def _holds(unit: tuple[set, set, int], other: tuple[set, set, int]) -> bool:
-    """Whether ``other`` restates ``unit`` with at least its limits: half its word pairs, or most
-    of its words in a unit at most twice as long (a rewording that dropped a few, as "是按…发的"
-    becoming "按…上报"), so that a short hedge never finds its words scattered in a long line."""
-    (pairs, words, limits), (other_pairs, other_words, other_limits) = unit, other
-    return other_limits >= limits and (len(pairs & other_pairs) >= _KEPT * len(pairs) or (
+def _holds(unit: tuple[set, set, int, int], other: tuple[set, set, int, int]) -> bool:
+    """Whether ``other`` restates ``unit`` with at least its limits, as many of them strong: half
+    its word pairs, or most of its words in a unit at most twice as long (a rewording that
+    dropped a few, as "是按…发的" becoming "按…上报"), so that a short hedge never finds its words
+    scattered in a long line."""
+    (pairs, words, limits, strong), (other_pairs, other_words, other_limits, other_strong) = unit, other
+    return other_limits >= limits and other_strong >= strong and (len(pairs & other_pairs) >= _KEPT * len(pairs) or (
         len(words & other_words) >= _KEPT_WORDS * len(words) and len(other_words) <= 2 * len(words)))
 
 
@@ -1277,62 +1317,197 @@ def _claims(text: str) -> set[str]:
             for match in _TOKEN.finditer(_FOOTNOTE.sub(" ", text))} - {""}
 
 
+def _bounds(text: str) -> set[str]:
+    """The claims a hedge in ``text`` bounds: its claims but the dates and issue ids it names."""
+    return {claim for claim in _claims(_ISSUE.sub(" ", text)) if not _DATE.fullmatch(claim)}
+
+
+def _labels(text: str) -> set[str]:
+    """The dates and issue ids a text names, a footnote's label aside (``[^delta-2026-09-13]``)."""
+    text = _FOOTNOTE.sub(" ", text)
+    return set(_DATE.findall(text)) | set(_ISSUE.findall(text))
+
+
+class _Units:
+    """The edit's units by word pair and word, so a hedge meets only those that could restate
+    it: a unit holding a share s of n keys holds one of the n - ceil(s * n) + 1 rarest (prefix
+    filtering). Identical units are one row."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple] = []
+        self._seen: set = set()
+        self._postings: dict = {}
+
+    def add(self, key: object, row: tuple, keys: set) -> None:
+        if key not in self._seen:
+            self._seen.add(key)
+            for token in keys:
+                self._postings.setdefault(token, []).append(len(self.rows))
+            self.rows.append(row)
+
+    def near(self, keys: set, share: float) -> set[int]:
+        rarest = sorted(keys, key=lambda token: len(self._postings.get(token, ())))
+        return {index for token in rarest[:len(rarest) - math.ceil(share * len(rarest)) + 1]
+                for index in self._postings.get(token, ())}
+
+
+def _counter(text: str) -> Callable[[str], int]:
+    """How often ``text`` states a token as a whole word (``_known``): the runs of word
+    characters counted once, a token that is one run read off them, any other (a URL, a
+    backticked phrase) scanned for; never a regex compiled per token (a 3000-line concept took
+    79 s)."""
+    runs = Counter(re.findall(rf"[{_WORD}]+", text))
+    counts: dict[str, int] = {}
+
+    def count(token: str) -> int:
+        if re.fullmatch(rf"[{_WORD}]+", token):
+            return runs[token]
+        if token not in counts:
+            counts[token], start = 0, text.find(token)
+            while start >= 0:
+                end = start + len(token)
+                if (start == 0 or not re.match(f"[{_WORD}]", text[start - 1])) and (
+                        end == len(text) or not re.match(f"[{_WORD}]", text[end])):
+                    counts[token] += 1
+                start = text.find(token, start + 1)
+        return counts[token]
+    return count
+
+
 def _caveat_removed(head, edit, frozen: tuple[str, ...]) -> str | None:
     """The first hedged sentence of HEAD (§5.4 A6) whose limit the edit dropped while it kept the
     claims the limit bounds, or None.
 
     A hedged sentence (one holding a ``_HEDGE`` word) is kept when the edit restates it
-    (``_holds``) with at least as many limiting words (``_LIMIT``) in a sentence or in two
-    adjacent sentences that each hold a quarter of it (a split), restates its line in a line with
-    as many (the hedge reworded within its paragraph), or keeps each hedged clause nearly whole
-    in a limiting clause (the rest of the sentence narrowed around it), wherever it now stands.
-    Otherwise it bounds the numbers and identifiers of its hedged clauses, else of the sentence,
-    else of its line; those no other line of HEAD states when there are any (its own claim, the
-    rest being context): when less than half of them is still stated, the correction deleted the
-    claim with its hedge, which narrows. A hedge that states none bounds the whole concept, and a
-    footnote's every sentence still citing it, so dropping either widens; a footnote no sentence
-    cites any more documents nothing, and a hedge moved into a definition no longer bounds the
-    text. A heading names its section ("# Caveats") and limits nothing; a note on the concept's
-    own bookkeeping (``status: draft``, not yet ``verified``) is the service's to keep (A5).
+    (``_holds``) with at least as many limiting words (``_LIMIT``), as many of them strong, in a
+    sentence or in two adjacent sentences that each hold a quarter of it (a split), restates its
+    line in a line with as many (the hedge reworded within its paragraph), or keeps each hedged
+    clause nearly whole in a clause with its limits (the rest of the sentence narrowed around
+    it), wherever it now stands; a new clause that states what a negating hedge denied, with no
+    limit of its own (``_DENIES``), flips it, which no filler elsewhere keeps. Otherwise it
+    bounds the claims (``_bounds``: dates and issue ids aside) of its hedged clauses, else of the
+    sentence, else of its line; those no other line of HEAD states when there are any (its own
+    claim, the rest being context): when less than half of them is still stated, the correction
+    deleted the claim with its hedge, which narrows. A hedge that states only dates or issue ids
+    bounds what HEAD's lines naming them state; one that states nothing bounds the whole
+    concept, so dropping it widens.
+
+    A hedged footnote definition HEAD cites bounds the claims of the lines that cite it: an edit
+    keeps it in the body, or in that definition or a newly labelled one while a line cites it
+    (another footnote's copy bounds other lines; a footnote no line cites documents nothing). A
+    hedge moved into a definition no longer bounds the text. A hedged heading bounds its
+    section. A hedge on the concept's own bookkeeping (``status: draft``, not yet ``verified``),
+    in a heading or a sentence, is the service's to keep (A5). The edit's units are indexed
+    (``_Units``); past ``_CAVEAT_BUDGET`` comparisons the check fails closed.
     """
-    lines = _lines(edit, frozen)
-    # Each unit of the edit records whether it is a footnote definition (``note``).
-    units, paragraphs, clauses = [], [], []
-    for line in lines:
-        note, split = bool(_FOOTNOTE.match(line)), _sentences(line)
-        units += [(note, _shape(sentence), [_pairs(sentence)]) for sentence in split]
-        units += [(note, _shape(first + second), [_pairs(first), _pairs(second)])
-                  for first, second in zip(split, split[1:], strict=False)]
-        paragraphs.append((note, _shape(line)))
-        clauses += [(note, _pairs(clause), _limits(clause)) for sentence in split
-                    for clause in _CLAUSE.split(sentence) if _limits(clause)]
+    lines, body = _lines(edit, frozen), len([line for line in head.body.splitlines() if line.strip()])
     cited = {label for line in lines for label, definition in _FOOTNOTE.findall(line) if not definition}
-    stated = "\n".join(line for line in lines if not _FOOTNOTE.match(line))
-    original = _lines(head, frozen)
-    for index, line in enumerate(original):
+    units, paragraphs, clauses, bare = _Units(), _Units(), _Units(), _Units()
+    verbatim: dict[str, set[str | None]] = {}  # each sentence of the edit, by where it stands
+    for line in lines:
         footnote = _FOOTNOTE.match(line)
-        definition = bool(footnote and footnote.group(2))
-        if _HEADING.match(line) or definition and footnote.group(1) not in cited:
-            continue
+        label = footnote.group(1) if footnote and footnote.group(2) else None  # a definition's
+        split = _sentences(line)
+        for sentence in split:
+            verbatim.setdefault(sentence, set()).add(label)
+        for text, parts in [*((sentence, [sentence]) for sentence in split),
+                            *((first + second, [first, second]) for first, second in zip(split, split[1:],
+                                                                                         strict=False))]:
+            shape = _shape(text)
+            units.add((label, text), (label, shape, [_pairs(part) for part in parts]), shape[0] | shape[1])
+        shape = _shape(line)
+        paragraphs.add((label, line), (label, shape, line), shape[0] | shape[1])
+        for clause in (clause.strip() for sentence in split for clause in _CLAUSE.split(sentence)):
+            shape = _shape(clause)
+            if shape[2]:
+                clauses.add((label, clause), (label, shape), shape[0])
+            elif not _HEDGE.search(clause):
+                bare.add(clause, (clause, shape[0]), shape[0])
+    original = _lines(head, frozen)
+    head_lines = set(original)
+    head_cited = {label for line in original for label, definition in _FOOTNOTE.findall(line) if not definition}
+    head_clauses = {clause.strip() for line in original for sentence in _sentences(line)
+                    for clause in _CLAUSE.split(sentence)}
+    full = _counter("\n".join(original))
+    stated = _counter("\n".join(line for line in lines if not _FOOTNOTE.match(line)))
+    spent = 0
+
+    def rows(index: _Units, found: set[int]) -> list[tuple]:
+        nonlocal spent
+        spent += len(found)
+        return [index.rows[row] for row in found]
+
+    def flipped(clause: str) -> bool:
+        """A new bare clause restates ``clause`` with its hedge's predicate and no limit: "不证明 X"
+        became "证明 X" (an enumeration's "、Y" continues the hedge, never flips it)."""
+        for match in _HEDGE.finditer(clause):
+            denied = _DENIES.get(match.group(0).lower())
+            pairs = _pairs(clause[:match.start()] + denied + clause[match.end():]) if denied else set()
+            if pairs and any(denied in text.lower() and text not in head_clauses
+                             and len(pairs & other) >= max(_KEPT_CLAUSE * len(pairs), _KEPT * len(other))
+                             for text, other in rows(bare, bare.near(pairs, _KEPT_CLAUSE))):
+                return True
+        return False
+
+    for index, line in enumerate(original):
+        footnote, heading = _FOOTNOTE.match(line), _HEADING.match(line) if index < body else None
+        definition = footnote.group(1) if footnote and footnote.group(2) else None
+        if definition is not None and definition not in head_cited:
+            continue  # an orphan in HEAD documents nothing
+
+        def keeps(label: str | None, definition: str | None = definition) -> bool:
+            """A body hedge stays in the body; a definition's in the body, or in its own definition
+            or a new one (a renamed label) still cited: another footnote's copy bounds other lines."""
+            return label is None or (definition is not None and label in cited
+                                     and (label == definition or label not in head_cited))
+
         for sentence in _sentences(line):
             hedged = [clause for clause in _CLAUSE.split(sentence) if _HEDGE.search(_TARGET.sub(" ", clause))]
             if not hedged or any(claim.split(":")[0].strip() in _BOOKKEEPING for claim in _claims(sentence)):
                 continue
-            shape = _shape(sentence)
-            if any(note <= definition and _holds(shape, other)
-                   and all(len(shape[0] & part) >= _KEPT / 2 * len(shape[0]) for part in parts)
-                   for note, other, parts in units) \
-                    or any(note <= definition and _holds(_shape(line), other) for note, other in paragraphs) \
-                    or all(any(note <= definition and count >= _limits(clause)
-                               and len(_pairs(clause) & other) >= _KEPT_CLAUSE * len(_pairs(clause))
-                               for note, other, count in clauses) for clause in hedged):
-                continue
-            if definition:
+            if spent > _CAVEAT_BUDGET or any(flipped(clause) for clause in hedged):
                 return sentence
-            context = "\n".join(original[:index] + original[index + 1:])
-            bounded = set().union(*map(_claims, hedged)) or _claims(sentence) or _claims(line)
-            bounded = {token for token in bounded if not _known(token, context)} or bounded
-            if not bounded or sum(_known(token, stated) for token in bounded) >= _KEPT * len(bounded):
+            if any(keeps(label) for label in verbatim.get(sentence, ())):
+                continue  # kept as it was: the common case, at no comparison
+            shape = _shape(sentence)
+            if any(keeps(label) and _holds(shape, other)
+                   and all(len(shape[0] & part) >= _KEPT / 2 * len(shape[0]) for part in parts)
+                   for label, other, parts in rows(units, units.near(shape[0], _KEPT)
+                                                   | units.near(shape[1], _KEPT_WORDS))):
+                continue
+            whole = _shape(line)  # another line HEAD holds as it was restates nothing of this one
+            if any(keeps(label) and (text == line or text not in head_lines) and _holds(whole, other)
+                   for label, other, text in rows(paragraphs, paragraphs.near(whole[0], _KEPT)
+                                                  | paragraphs.near(whole[1], _KEPT_WORDS))):
+                continue
+            if all(any(keeps(label) and other[2] >= mine[2] and other[3] >= mine[3]
+                       and len(mine[0] & other[0]) >= _KEPT_CLAUSE * len(mine[0])
+                       for label, other in rows(clauses, clauses.near(mine[0], _KEPT_CLAUSE)))
+                   for mine in map(_shape, hedged)):
+                continue
+            if definition is not None:  # it bounds what cites it
+                own = [text for later, text in enumerate(original) if later != index and f"[^{definition}]" in text]
+                bounded = set().union(*map(_bounds, own))
+            elif heading:  # it bounds its section
+                end = next((later for later in range(index + 1, body) if (match := _HEADING.match(original[later]))
+                            and len(match.group(1)) <= len(heading.group(1))), body)
+                own = original[index:end]
+                bounded = set().union(*map(_bounds, own))
+            else:  # the narrowest scope with a claim only this line states; what a date or id
+                # the hedge names labels ("下述 2026-09-24 结果…"); else any claim, else any label
+                own, mention, labels = [line], _counter(line), _labels(" ".join(hedged))
+                bounded = set() if labels else next(filter(None, (
+                    {token for token in _bounds(scope) if full(token) <= mention(token)}
+                    for scope in (" ".join(hedged), sentence, line))), set())
+                bounded = bounded or (set() if labels else _bounds(line))
+                labels = labels if labels or bounded else _labels(line)
+                if not bounded and labels:
+                    own = [text for text in original if not _FOOTNOTE.match(text)
+                           and any(label in text for label in labels)]
+                    bounded = set().union(*map(_bounds, own))
+            mention = _counter("\n".join(own))
+            bounded = {token for token in bounded if full(token) <= mention(token)} or bounded
+            if not bounded or sum(stated(token) > 0 for token in bounded) >= _KEPT * len(bounded):
                 return sentence
     return None
 
@@ -1362,8 +1537,8 @@ def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: dateti
     """Judge one audit changeset against ``base_dir`` without changing it (design §5.4 A2-A8).
 
     ``scope`` is the backlog by path, or None for a human reviewer, whom A2 does not limit.
-    ``actor`` is stamped in ``verified`` for a verified review, and in ``generated`` (never also
-    ``verified``: A4) for a correction, at ``now``. The
+    ``actor`` is stamped in ``verified`` for a verified review, and in ``generated`` for a
+    correction (a process's never also in ``verified``: A4), at ``now``. The
     result has the curate gate's shape: ``status`` would_apply, noop or rejected; ``files`` the
     stamped bytes; ``reviews`` one record per review, which the backlog reads back; ``audit``
     the verdict summary of a Codex audit receipt. Scope, base and self-verification problems
@@ -1391,7 +1566,7 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
                scope: Mapping[str, Mapping] | None, auditors: frozenset[str]) -> dict:
     before_errors = validate_bundle(workspace)
     frozen = _frozen(workspace)
-    errors, conflicts, reviews, written, repairs = [], [], [], {}, {}
+    errors, conflicts, reviews, written, repairs, verified = [], [], [], {}, {}, []
     for review in sorted(request["reviews"], key=lambda item: unicodedata.normalize("NFC", item["path"])):
         rel = unicodedata.normalize("NFC", review["path"])
         target = workspace / rel
@@ -1417,16 +1592,27 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
         if problem:
             errors.append(changeset._error("audit_scope", problem, rel))
             continue
-        generator = generated_fields(head)[0]
-        reason = scope[rel].get("reason") if scope is not None else None
-        # A4: someone else pushed it since (external), or an auditor's correction that another
-        # run reviews (correction); the run that corrected it never confirms its own edit.
-        own_run = reason == "correction" and bool(request.get("run")) \
-            and scope[rel].get("corrected_run") == request.get("run")
-        if own_run or (reason not in ("external", "correction")
-                       and (generator == actor or (actor in auditors and generator in auditors))):
+        generator, generated_at = generated_fields(head)
+        entry = scope[rel] if scope is not None else {}
+        reason, own = entry.get("reason"), ""
+        # A4: someone else pushed it since (external), or an auditor's correction (correction)
+        # that another run reviews once SELF_REVIEW_DELAY has passed by the writer's clock: a
+        # new run label in the same session confirms nothing, as current_verified reads it, and
+        # neither does the author's review of a push its generation still names. A human
+        # reviewer (no scope) is not held to either.
+        due = _instant(entry.get("reviewable_at")) if reason == "correction" else (
+            _instant(generated_at) + SELF_REVIEW_DELAY if scope is not None and generator == actor
+            and _instant(generated_at) else None)
+        if reason == "correction" and entry.get("corrected_run") is not None \
+                and request.get("run") in (None, entry["corrected_run"]):
+            own = " in the run that wrote it"
+        elif due is not None and due > now:
+            own = (f" before {due.strftime('%Y-%m-%dT%H:%M:%SZ')}, {SELF_REVIEW_DELAY.total_seconds() / 3600:g} h "
+                   "after its generation")
+        if own or (reason not in ("external", "correction")
+                   and (generator == actor or (actor in auditors and generator in auditors))):
             errors.append(changeset._error("self_verification", f"{actor} may not review a generation of "
-                                           f"{generator}" + (" in the run that wrote it" if own_run else ""), rel))
+                                           f"{generator}{own}", rel))
             continue
         verdict, content, downgrade = review.get("verdict"), review.get("content"), None
         if not ((verdict == "corrected" and content is not None)
@@ -1463,12 +1649,14 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
                     verdict = "verified"  # it changed only what the service owns: a verdict on HEAD as it is
             else:
                 verdict = "unverified"
+        # A process's correction is its new generation, never verified by it: another run reviews
+        # it (backlog ``correction``), so no auditor confirms its own edit (A4). A person's is
+        # verified in the act, human-reviewed (§5.5), as the read side counts it.
+        confirmed = verdict == "verified" or (verdict == "corrected" and actor.startswith("human:"))
         try:
-            # A correction is a new generation by the reviewer, never verified by it: a later run
-            # reviews it (backlog ``correction``), so no reviewer confirms its own edit (A4).
             final, stamped = bookkeeping.apply_bookkeeping(
                 before, edited, actor=actor, trusted_now=now, stage="review",
-                verdict="verified" if verdict == "verified" else "unverified",
+                verdict="verified" if confirmed else "unverified",
             )
         except (bookkeeping.BookkeepingError, OKFDocumentError) as exc:
             errors.append(changeset._yaml_error(rel, before, exc))
@@ -1483,6 +1671,8 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
         if review.get("note"):
             record["note"] = secrets.redact(review["note"])[0]
         reviews.append(record)
+        if confirmed:
+            verified.append(rel)
         if stamped:
             repairs[rel] = stamped
         if final != before:
@@ -1501,14 +1691,13 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
     result["validation"] = {"status": "failed" if errors else "passed", "new_errors": len(errors)}
     if errors:
         return changeset._rejected(result, errors)
-    # Only a verified outcome confirms a concept: a correction waits for a later run's review.
-    verified = [record["path"] for record in reviews if record["outcome"] == "verified"]
+    # Only a review stamped verified confirms a concept: an auditor's correction waits for a later run.
     result.update(
         status="would_apply" if written else "noop", http_status=200, files=written,
         deterministic_repairs=repairs,
         audit={"status": "passed" if len(verified) == len(reviews) else "needs_attention",
                "verified_concepts": verified,
-               "unverified_concepts": [record["path"] for record in reviews if record["outcome"] != "verified"],
+               "unverified_concepts": [record["path"] for record in reviews if record["path"] not in verified],
                "corrected_concepts": [record["path"] for record in reviews if record["outcome"] == "corrected"]},
     )
     return result

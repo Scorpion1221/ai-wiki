@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -158,9 +159,12 @@ def next_concept(state_dir: Path, bundle: str | None, path: str | None = None) -
         entry = _chosen(root, path)
     else:
         found = _backlog(state["bundle"])
-        # A correction this run wrote is another run's to review (design §5.4 A4).
+        # A correction is another run's to review, from its reviewable_at (design §5.4 A4); the
+        # writer judges by its own clock, so this only saves a review it would refuse.
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         entry = next((row for row in found.get("concepts") or [] if row["path"] not in state["taken"]
-                      and row.get("corrected_run") != state["run"]), None)
+                      and row.get("corrected_run") != state["run"] and (row.get("reviewable_at") or "") <= now),
+                     None)
         if entry is None:
             return EMPTY, {"stopped": "backlog_empty", "pending": len(state["pending"]),
                            "next": f"ai-wiki -b {state['bundle']} review submit" if state["pending"] else

@@ -1180,8 +1180,10 @@ def maint_status(bundle: str | None = None, authorization: str | None = Header(d
             status["audit"]["error"] = str(exc)[:300]
         else:
             # Age from when each version became due: a push to an old concept waits since the push.
-            due = [entry["since"] for entry in found["concepts"]
-                   if entry["reason"] != "seed" and audit_runtime._instant(entry["since"])]
+            # Seeds and legacy corrections are the pre-rule backlog, drained behind new work: an
+            # age of weeks at deploy is no stalled auditor (design §5.2).
+            due = [entry["since"] for entry in found["concepts"] if entry["reason"] != "seed"
+                   and not entry.get("legacy") and audit_runtime._instant(entry["since"])]
             status["audit"].update(pending=len(found["concepts"]), seed=found["seed"], epoch=found["epoch"],
                                    oldest_finished=min(due, key=audit_runtime._instant, default=None))
     return status
@@ -1193,9 +1195,11 @@ def audit_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | N
     """The concepts due for an external review (design §5.3), derived from the published revision.
 
     Each names its path, the ``base`` content hash a review cites, its generation, why it is due
-    (``generation``, ``external``, ``correction`` with the ``corrected_run`` that wrote it, or
-    ``seed``) and the frozen sources it cites; never a curator's changeset message or hand-off
-    text. New work comes first, oldest first.
+    (``generation``, ``external``, ``correction`` with the ``corrected_run`` that wrote it, the
+    ``reviewable_at`` before which no auditor reviews it, and ``legacy`` when no receipt under
+    A4's rule recorded it, or ``seed``) and the frozen sources it cites; never a curator's
+    changeset message or hand-off text. New work comes first, then legacy corrections, then
+    seeds, each oldest first.
     """
     principal = _auth(authorization, "read")
     _enabled("audit")
