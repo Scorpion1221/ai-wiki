@@ -80,9 +80,10 @@ def test_cli_skill_commands(tmp_path: Path, capsys, monkeypatch) -> None:
     assert wrong.value.code == 2
 
 
-def test_update_check_reports_without_installing(monkeypatch, capsys) -> None:
+def test_update_check_reports_without_installing(monkeypatch, tmp_path, capsys) -> None:
     from aiwiki.cli import update
 
+    monkeypatch.setattr(update, "CACHE", tmp_path / "latest.json")      # never the real ~/.cache
     monkeypatch.setattr(update, "_latest", lambda: "f" * 40)
     monkeypatch.setattr(update, "_receipt", lambda: {"commit": "a" * 40})
     called = []
@@ -116,3 +117,20 @@ def test_default_dir_follows_the_host_layout(tmp_path: Path, monkeypatch) -> Non
     assert {row["status"] for row in skills.status()} == {"current"}
     monkeypatch.setenv("AIWIKI_SKILLS_HOME", str(tmp_path / "custom"))
     assert skills.default_dir() == tmp_path / "custom"
+
+
+def test_home_shows_a_cached_update_notice_only_while_it_still_applies(monkeypatch, tmp_path, capsys) -> None:
+    from aiwiki.cli import update
+
+    monkeypatch.setattr(update, "CACHE", tmp_path / "latest.json")
+    monkeypatch.setattr(update, "_latest", lambda: "f" * 40)
+    monkeypatch.setattr(update, "_receipt", lambda: {"commit": "a" * 40})
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "missing-config.json")
+    assert update.cached_notice() is None                     # never checked: no notice, no network
+    assert cli.main(["update", "--check"]) == 0
+    capsys.readouterr()
+    assert cli.main([]) == 0
+    assert "update: \"main ffffffffffff is newer than this install (aaaaaaaaaaaa): run `ai-wiki update`\"" \
+        in capsys.readouterr().out
+    monkeypatch.setattr(update, "_receipt", lambda: {"commit": "f" * 40})     # updated since the check
+    assert update.cached_notice() is None

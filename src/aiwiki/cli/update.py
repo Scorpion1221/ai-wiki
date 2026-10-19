@@ -20,6 +20,30 @@ from aiwiki.version import VERSION
 
 REPO = os.environ.get("AIWIKI_UPDATE_REPO", "https://github.com/Scorpion1221/ai-wiki")
 BRANCH = "main"
+CACHE = Path(os.environ.get("AIWIKI_CACHE_DIR") or Path.home() / ".cache" / "ai-wiki") / "latest.json"
+
+
+def _remember(installed: str | None, latest: str) -> None:
+    """What this check saw, for the home view (which never touches the network)."""
+    try:
+        CACHE.parent.mkdir(parents=True, exist_ok=True)
+        CACHE.write_text(json.dumps({"installed": installed, "latest": latest}))
+    except OSError:
+        pass
+
+
+def cached_notice() -> str | None:
+    """'update available' when the last check saw main ahead of the commit installed now, else None."""
+    try:
+        seen = json.loads(CACHE.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(seen, dict) or not isinstance(seen.get("latest"), str):
+        return None
+    installed = _receipt().get("commit")
+    if not installed or installed != seen.get("installed") or seen["latest"] == installed:
+        return None      # updated since the check, or nothing newer: never a stale nag
+    return f"main {seen['latest'][:12]} is newer than this install ({installed[:12]})"
 
 
 def _receipt() -> dict:
@@ -85,6 +109,7 @@ def skill_command(args) -> int:
 def update_command(args) -> int:
     installed = _receipt()
     latest = _latest()
+    _remember(installed.get("commit"), latest)
     rows = skills.status()
     data = {"installed": f"{VERSION} ({(installed.get('commit') or 'unknown')[:12]})", "latest": latest[:12],
             "available": installed.get("commit") != latest, "skills": _summary(rows)}

@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.3 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -23,10 +23,13 @@ ai-wiki bundle list        # bundles hosted by this server
 ```
 
 If the binary is missing, install it once with
-`uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`. Keep it current with `ai-wiki update` (it installs the latest CLI and this skill
-together; re-read this file afterwards; never copy skills by hand; an ai-wiki without `update` needs the
-install command above). If it is unconfigured, ask
-the owner for the endpoint and token, then run:
+`uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`.
+Before the first lookup of a task, run `ai-wiki update --check` (one read of `main`). A `help`
+row (`ai-wiki update`) → run it, then re-read this file: it installs the latest CLI and this skill
+together. No `help` → go on. A failed check (offline, no git) → say so in one line and continue.
+The home view (`ai-wiki`) repeats an `update:` line while the last check saw a newer `main`.
+Never copy skills by hand; an ai-wiki without `update` needs the install command above.
+If it is unconfigured, ask the owner for the endpoint and token, then run:
 
 ```sh
 ai-wiki config set --endpoint <url> --token <token>
@@ -56,18 +59,20 @@ ai-wiki grep "<regex>"                   # regex across concepts
 ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
 ```
 
-TOON list output separates semantic `concepts` from structural `entries`; only concepts expose
-`status`, `trust`, `freshness`, `generated_at`, `verified_at`, and `verification_current`.
-`ls --json` returns the complete raw entry array. Search results expose the same concept
-evidence fields and explain their lexical match with `phrase`, `coverage`,
-`fields`, and `terms`. It normalizes punctuation/separators, preserves Latin word boundaries
+TOON list output separates semantic `concepts` from structural `entries`. By default `ls` concepts
+show `path,status,trust,freshness,verification_current,summary` and search results show
+`path,title,status,trust,freshness,verification_current,coverage`: enough for the evidence gate
+below. Add columns with `--fields a,b` or `--fields all` (`generated_at`, `verified_at`,
+`current_verified_at`; search also `score`, `phrase`, `fields`, `terms`, `context`).
+`ls --json` returns the complete raw entry array; `search --json` the complete results. Search
+explains its lexical match with `phrase`, `coverage`, `fields`, and `terms`. It normalizes punctuation/separators, preserves Latin word boundaries
 and CJK bigrams, searches every concept regardless of directory depth, and ranks exact phrase
 plus full query coverage ahead of repeated partial tokens. Trust/freshness only break close
 textual ties; apply the evidence gate after retrieval rather than silently hiding weak or
 historical evidence.
 
-Run one well-formed search first. Read the top candidates when `phrase: true` or
-`coverage: 1.0` makes the match clear. Rewrite the query at most once when results are empty,
+Run one well-formed search first. Read the top candidates when `coverage: 1.0` makes the match
+clear. Rewrite the query at most once when results are empty,
 coverage is partial, or matches are scattered across weak fields; use the user's alternative
 wording, a concise paraphrase, or the other language. Do not mechanically fan out several
 queries. Exact identifiers still belong to `grep --fixed`.
@@ -113,7 +118,7 @@ Use this order for **current facts**:
 5. `stale` or `deprecated` — historical context only, not a current answer
 
 `freshness: unspecified` is not proof of freshness. State the latest `generated_at` and
-`verified_at` available and narrow the claim. If two usable concepts disagree, report the
+`verified_at` available (`cat <path> --json` metadata, or `--fields` on ls/search) and narrow the claim. If two usable concepts disagree, report the
 conflict and follow `contested`/`contradictions` rather than choosing silently.
 
 ### Fail closed for high-risk claims

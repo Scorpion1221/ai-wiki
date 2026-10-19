@@ -44,21 +44,58 @@ _VERSION_FLAGS = {"-v", "-V", "--version"}
 _DEFAULT_CAT_CHARS = 8000
 _DEFAULT_GREP_LIMIT = 100
 _STATE_DIR = Path("~/.ai-wiki/state")  # expanded when used, so help and tests never pin a home
+_COMMANDS = ("bundle", "config", "health", "ls", "cat", "grep", "search", "links", "log", "ingest", "audit",
+             "jobs", "maintain", "admin", "maint", "review", "doctor", "skill", "update", "workspace",
+             "concept", "validate", "propose")
+# Default row schemas keep what the Skill's evidence gate reads (status/trust/freshness/current verification);
+# `--fields` adds the rest. Each tuple lists every field the command can show, defaults first.
+_SEARCH_DEFAULT = ("path", "title", "status", "trust", "freshness", "verification_current", "coverage")
+_SEARCH_FIELDS = _SEARCH_DEFAULT + ("score", "phrase", "fields", "terms", "generated_at", "verified_at",
+                                    "current_verified_at", "context")
+_LS_DEFAULT = ("path", "status", "trust", "freshness", "verification_current", "summary")
+_LS_FIELDS = _LS_DEFAULT + ("generated_at", "verified_at", "current_verified_at")
 
 
 class _AxiParser(argparse.ArgumentParser):
-    """Argparse with agent-readable usage failures on stdout."""
+    """Argparse with agent-readable usage failures on stdout.
+
+    Abbreviated flags are refused (``--top`` is not ``--top-k``): a silently accepted guess
+    returns plausible output for a flag the caller never meant."""
 
     def __init__(self, *args, command_path: str = "ai-wiki", **kwargs):
         self.command_path = command_path
+        kwargs.setdefault("allow_abbrev", False)
         super().__init__(*args, **kwargs)
 
+    def flags(self) -> list[str]:
+        return sorted({flag for action in self._actions for flag in action.option_strings if flag.startswith("--")})
+
+    def leaf(self, args: list[str]) -> _AxiParser:
+        """The subcommand parser `args` names: argparse reports a subcommand's unknown flag from the root."""
+        parser, skip = self, False
+        for arg in args:
+            if skip:
+                skip = False
+                continue
+            if arg.startswith("-"):
+                action = parser._option_string_actions.get(arg)
+                skip = action is not None and action.nargs != 0      # `-b kb`: kb is a value, not a command
+                continue
+            choices = next((action.choices for action in parser._actions
+                            if isinstance(action, argparse._SubParsersAction)), None)
+            if not choices or arg not in choices:
+                break
+            parser = choices[arg]
+        return parser
+
     def error(self, message: str) -> None:
+        owner = getattr(self, "owner", self)
         emit_error(
             message,
             kind="usage",
-            usage=self.format_usage(),
-            commands=(f"{self.command_path} --help",),
+            usage=owner.format_usage(),
+            flags=owner.flags(),
+            commands=(f"{owner.command_path} --help",),
         )
         raise SystemExit(2)
 
@@ -133,8 +170,8 @@ def _command_path(args: list[str]) -> str:
             continue
         if not arg.startswith("-"):
             positionals.append(arg)
-    if not positionals:
-        return "ai-wiki"
+    if not positionals or positionals[0] not in _COMMANDS:
+        return "ai-wiki"     # an unknown command: its own `--help` does not exist
     depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint", "review") \
         and len(positionals) > 1 else 1
     return "ai-wiki " + " ".join(positionals[:depth])
@@ -325,6 +362,21 @@ def _count_lines(shown: int, total: int | None = None) -> list[str]:
     return object_lines("count", values)
 
 
+def _fields(raw: str | None, default: tuple[str, ...], valid: tuple[str, ...], command: str) -> tuple[str, ...]:
+    """`--fields a,b` / `--fields all` -> the columns to print; an unknown name is a usage error."""
+    if raw is None:
+        return default
+    if raw.strip() == "all":
+        return valid
+    chosen = tuple(dict.fromkeys(name.strip() for name in raw.split(",") if name.strip()))
+    unknown = [name for name in chosen if name not in valid]
+    if unknown or not chosen:
+        emit_error(f"unknown field(s) for {command}: {', '.join(unknown) or '(none given)'}", kind="usage",
+                   commands=(f"{command} --fields {','.join(valid)}", f"{command} --fields all"))
+        raise SystemExit(2)
+    return chosen
+
+
 LARK_TIMEOUT = "lark-cli timed out"
 
 
@@ -357,7 +409,11 @@ def _lark_fetch(url: str, identity: str | None = None) -> tuple[dict | None, str
 
 
 def _home() -> int:
-    identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION})
+    from aiwiki.cli.update import cached_notice
+
+    notice = cached_notice()          # from the last `ai-wiki update [--check]`; no network here
+    identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION,
+                                   **({"update": f"{notice}: run `ai-wiki update`"} if notice else {})})
     print("\n".join(identity))
     cfg = _normalize(_load())
     if not cfg.get("endpoint") or not _token(cfg):
@@ -486,12 +542,15 @@ def main(argv=None) -> int:
     p_health.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
     p_ls = sub.add_parser(
         "ls", help="list a level (like ls); -R recurse, -a hidden", command_path="ai-wiki ls",
-        epilog=_examples("ai-wiki ls", "ai-wiki ls metrics", "ai-wiki ls -R -a"), **common,
+        epilog=_examples("ai-wiki ls", "ai-wiki ls metrics", "ai-wiki ls metrics --fields path,status,generated_at"),
+        **common,
     )
     p_ls.add_argument("dir", nargs="?")
     p_ls.add_argument("-R", "--recursive", action="store_true", help="recurse, flat (like ls -R)")
     p_ls.add_argument("-a", "--all", action="store_true", help="include dotfiles (like ls -a)")
     p_ls.add_argument("--json", action="store_true", help="emit the complete entry array as JSON")
+    p_ls.add_argument("--fields", metavar="A,B|all",
+                      help=f"concept columns (default: {','.join(_LS_DEFAULT)}; all: {','.join(_LS_FIELDS)})")
     p_cat = sub.add_parser(
         "cat", help="print a concept; large files are previewed by default", command_path="ai-wiki cat",
         epilog=_examples("ai-wiki cat metrics/subscription-rate.md", "ai-wiki cat SCHEMA.md --full"), **common,
@@ -516,12 +575,16 @@ def main(argv=None) -> int:
     p_grep.add_argument("--json", action="store_true", help="emit hits and truncation counts as JSON")
     p_search = sub.add_parser(
         "search", help="ranked lexical search (CJK-aware)", command_path="ai-wiki search",
-        epilog=_examples("ai-wiki search \"subscription rate\"", "ai-wiki search \"订阅率\" --top-k 20"),
+        epilog=_examples("ai-wiki search \"subscription rate\"", "ai-wiki search \"订阅率\" --top-k 20",
+                         "ai-wiki search \"订阅率\" --fields path,title,score,context"),
         **common,
     )
     p_search.add_argument("query")
     p_search.add_argument("--top-k", type=_positive, default=10, help="maximum results (default: 10)")
     p_search.add_argument("--json", action="store_true", help="emit results and truncation counts as JSON")
+    p_search.add_argument("--fields", metavar="A,B|all",
+                          help=f"result columns (default: {','.join(_SEARCH_DEFAULT)}; "
+                               f"all: {','.join(_SEARCH_FIELDS)})")
     p_links = sub.add_parser(
         "links", help="link graph of a concept: outbound + inbound (backlinks)", command_path="ai-wiki links",
         epilog=_examples("ai-wiki links metrics/subscription-rate.md"), **common,
@@ -697,6 +760,7 @@ def main(argv=None) -> int:
         parser.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
 
     ap.command_path = _command_path(args)
+    ap.owner = ap.leaf(args)
     a = ap.parse_args(args)
 
     if a.cmd in ("skill", "update"):
@@ -813,31 +877,24 @@ def main(argv=None) -> int:
                                           for name, count in (d.get("by_freshness") or {}).items()), ("name", "count")),
             )
     elif a.cmd == "ls":
+        columns = _fields(a.fields, _LS_DEFAULT, _LS_FIELDS, "ai-wiki ls")
         d = _api("/ls", bundle=bsel, dir=a.dir,
                  recursive=("true" if a.recursive else None), show_all=("true" if a.all else None))
         items = d.get("items") or []
         if a.json:
             print(json.dumps(items, ensure_ascii=False, indent=2))
+        elif not items:
+            where = f"{a.dir}" if a.dir else "the bundle root"
+            emit(object_lines("ls", {"result": f"0 entries in {where}"}),
+                 table_lines("help", ({"command": "ai-wiki ls", "purpose": "list the bundle root"},),
+                             ("command", "purpose")))
         else:
             concepts = [item for item in items if item.get("kind") == "concept"]
             entries = [item for item in items if item.get("kind") != "concept"]
             groups = [_count_lines(len(items), len(items))]
             if concepts:
                 groups.append(table_lines(
-                    "concepts",
-                    ({
-                        "path": item.get("path"),
-                        "status": item.get("status"),
-                        "trust": item.get("trust"),
-                        "freshness": item.get("freshness"),
-                        "verification_current": item.get("verification_current"),
-                        "generated_at": item.get("generated_at"),
-                        "verified_at": item.get("verified_at"),
-                        "current_verified_at": item.get("current_verified_at"),
-                        "summary": _ls_summary(item),
-                    } for item in concepts),
-                    ("path", "status", "trust", "freshness", "verification_current",
-                     "generated_at", "verified_at", "current_verified_at", "summary"),
+                    "concepts", ({**item, "summary": _ls_summary(item)} for item in concepts), columns,
                 ))
             if entries:
                 groups.append(table_lines(
@@ -874,6 +931,12 @@ def main(argv=None) -> int:
                 "total": len(hits),
                 "truncated": len(shown) < len(hits),
             }, ensure_ascii=False, indent=2))
+        elif not hits:
+            scope = f" under {a.dir}" if a.dir else ""
+            emit(object_lines("grep", {"result": f"0 lines match {json.dumps(a.pattern, ensure_ascii=False)}{scope}"}),
+                 table_lines("help", ({"command": "ai-wiki search \"<words>\"",
+                                       "purpose": "ranked search tolerates wording differences"},),
+                             ("command", "purpose")))
         else:
             groups = [_count_lines(len(shown), len(hits)), table_lines("hits", shown, ("path", "line", "text"))]
             if len(shown) < len(hits):
@@ -883,6 +946,7 @@ def main(argv=None) -> int:
                 },), ("command", "purpose")))
             emit(*groups)
     elif a.cmd == "search":
+        columns = _fields(a.fields, _SEARCH_DEFAULT, _SEARCH_FIELDS, "ai-wiki search")
         d = _api("/search", bundle=bsel, q=a.query, top_k=a.top_k)
         results = d.get("results") or []
         total = d.get("total") if isinstance(d.get("total"), int) else len(results)
@@ -893,18 +957,17 @@ def main(argv=None) -> int:
                 "total": total,
                 "truncated": len(results) < total,
             }, ensure_ascii=False, indent=2))
+        elif not results:
+            emit(object_lines("search", {"result": f"0 concepts match {json.dumps(a.query, ensure_ascii=False)}"}),
+                 table_lines("help", ({"command": "ai-wiki search \"<other wording or language>\"",
+                                       "purpose": "rewrite the query once"},), ("command", "purpose")))
         else:
             rows = (_search_row(result) for result in results)
-            groups = [_count_lines(len(results), total),
-                      table_lines(
-                          "results", rows,
-                          ("path", "title", "status", "trust", "freshness", "verification_current",
-                           "generated_at", "verified_at", "current_verified_at", "score", "phrase",
-                           "coverage", "fields", "terms", "context"),
-                      )]
+            groups = [_count_lines(len(results), total), table_lines("results", rows, columns)]
             if isinstance(total, int) and len(results) < total:
+                more = f" --fields {','.join(columns)}" if a.fields else ""
                 groups.append(table_lines("help", ({
-                    "command": f'ai-wiki search {json.dumps(a.query, ensure_ascii=False)} --top-k {total}',
+                    "command": f'ai-wiki search {json.dumps(a.query, ensure_ascii=False)} --top-k {total}{more}',
                     "purpose": f"show all {total} matches",
                 },), ("command", "purpose")))
             emit(*groups)
