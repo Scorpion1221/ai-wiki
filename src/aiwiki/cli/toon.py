@@ -74,10 +74,12 @@ def emit(*groups: Iterable[str]) -> None:
 
 
 def emit_error(message: str, *, kind: str = "error", usage: str | None = None,
-               commands: Sequence[str] = ()) -> None:
-    values = {"kind": kind, "message": message}
+               flags: Sequence[str] = (), commands: Sequence[str] = ()) -> None:
+    values: dict[str, Any] = {"kind": kind, "message": message}
     if usage:
         values["usage"] = " ".join(usage.split())
+    if flags:
+        values["valid_flags"] = list(flags)
     groups: list[list[str]] = [object_lines("error", values)]
     if commands:
         groups.append(table_lines("help", ({"command": command} for command in commands), ("command",)))

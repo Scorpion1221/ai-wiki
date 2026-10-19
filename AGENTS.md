@@ -56,12 +56,13 @@ root documents do not pretend to have status/trust fields. `ls --json` remains t
 raw entry array. JSON `search`/`grep`/`log` output is an envelope containing the rows plus
 `shown`, `total`, and `truncated`; inspect those counts before treating a result as complete.
 
-Structured results expose `status`, derived `trust` and `freshness`, `generated_at`,
-`verified_at`, and `verification_current`. Trust follows OKF §5.3 across all verification
+Structured results expose `status`, derived `trust` and `freshness`, and
+`verification_current` by default; `--fields all` (or `--json`) adds `generated_at`,
+`verified_at` and `current_verified_at`. Trust follows OKF §5.3 across all verification
 history; `verification_current` separately says whether an event confirms the current
 generated revision. For current-fact decisions, treat `verification_current: false` like
-unverified regardless of the historical trust tier. Search returns explainable `phrase`,
-`coverage`, `fields`, and `terms`; exact phrases and full query coverage rank ahead of
+unverified regardless of the historical trust tier. Search shows `coverage` by default and
+explains its match with `phrase`, `fields`, and `terms` under `--fields all`; exact phrases and full query coverage rank ahead of
 repeated partial tokens. Trust/freshness remain tie-breakers. Run one search first and
 rewrite it at most once only when results are empty or coverage is partial; apply this
 current-fact gate after retrieval even when a weak hit ranks highly:

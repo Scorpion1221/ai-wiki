@@ -283,16 +283,28 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
 
     assert cli.main(["ls"]) == 0
     ls_out = capsys.readouterr().out
-    assert "concepts[1]{path,status,trust,freshness,verification_current" in ls_out
-    assert "generated_at,verified_at,current_verified_at,summary" in ls_out
+    assert "concepts[1]{path,status,trust,freshness,verification_current,summary}:" in ls_out
     assert '"machine-confirmed","fresh",true' in ls_out
+    assert "generated_at" not in ls_out
+
+    assert cli.main(["ls", "--fields", "all"]) == 0
+    ls_all = capsys.readouterr().out
+    assert "verification_current,summary,generated_at,verified_at,current_verified_at}:" in ls_all
+    assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in ls_all
 
     assert cli.main(["search", "x"]) == 0
     search_out = capsys.readouterr().out
-    assert "verification_current,generated_at,verified_at,current_verified_at" in search_out
-    assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_out
-    assert "score,phrase,coverage,fields,terms,context" in search_out
-    assert '8,true,1.0,"title|body","x"' in search_out
+    assert "results[1]{path,title,status,trust,freshness,verification_current,coverage}:" in search_out
+    assert '"x.md","X","stable","machine-confirmed","fresh",true,1.0' in search_out
+
+    assert cli.main(["search", "x", "--fields", "all"]) == 0
+    search_all = capsys.readouterr().out
+    assert ("results[1]{path,title,status,trust,freshness,verification_current,coverage,score,phrase,fields,terms,"
+            "generated_at,verified_at,current_verified_at,context}:") in search_all
+    assert '1.0,8,true,"title|body","x","2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_all
+
+    assert cli.main(["search", "x", "--fields", "path,score"]) == 0
+    assert "results[1]{path,score}:" in capsys.readouterr().out
 
 
 def test_ls_separates_structural_entries_from_concepts_without_null_columns(monkeypatch, capsys) -> None:
@@ -310,7 +322,7 @@ def test_ls_separates_structural_entries_from_concepts_without_null_columns(monk
     assert cli.main(["ls"]) == 0
 
     out = capsys.readouterr().out
-    assert "concepts[1]{path,status,trust,freshness,verification_current" in out
+    assert "concepts[1]{path,status,trust,freshness,verification_current,summary}:" in out
     assert "entries[2]{path,kind,summary}:" in out
     assert '"features/","dir","1 concepts — Product features"' in out
     assert '"SCHEMA.md","doc","document — read first"' in out
@@ -430,3 +442,65 @@ def test_aiwiki_token_env_wins_and_stays_out_of_the_config(monkeypatch, tmp_path
 
     monkeypatch.delenv("AIWIKI_TOKEN")
     assert cli._conn() == ("https://h/", "saved")
+
+
+def test_unknown_and_abbreviated_flags_fail_with_the_commands_valid_flags(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("must validate before API call"))
+    for argv in (["search", "x", "--top", "2"], ["-b", "kb", "search", "x", "--bogus"]):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert 'kind: "usage"' in out
+        assert 'valid_flags[4]: "--fields","--help","--json","--top-k"' in out
+        assert '"ai-wiki search --help"' in out
+
+
+def test_unknown_command_never_suggests_its_own_help(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["frobnicate"])
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert '"ai-wiki --help"' in out and "frobnicate --help" not in out
+
+
+def test_unknown_fields_are_a_usage_error_listing_valid_ones(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("must validate before API call"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["search", "x", "--fields", "path,nope"])
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "unknown field(s) for ai-wiki search: nope" in out
+    assert '"ai-wiki search --fields all"' in out
+
+
+def test_empty_results_say_zero_explicitly(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda route, **kw: {"/search": {"results": [], "total": 0},
+                                                          "/grep": {"hits": []},
+                                                          "/ls": {"items": []}}[route])
+    assert cli.main(["search", "nothing here"]) == 0
+    assert 'result: "0 concepts match \\"nothing here\\""' in capsys.readouterr().out
+    assert cli.main(["grep", "zz", "metrics/"]) == 0
+    assert 'result: "0 lines match \\"zz\\" under metrics/"' in capsys.readouterr().out
+    assert cli.main(["ls", "empty/"]) == 0
+    assert 'result: "0 entries in empty/"' in capsys.readouterr().out
+
+
+def test_fields_are_validated_before_the_api_and_normalized(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("must validate before API call"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["ls", "--fields", "nope"])
+    assert exc.value.code == 2 and "unknown field(s) for ai-wiki ls: nope" in capsys.readouterr().out
+
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: {"results": [{"path": "x.md", "score": 1}], "total": 3})
+    assert cli.main(["search", "x", "--fields", "path, score,path"]) == 0
+    out = capsys.readouterr().out
+    assert "results[1]{path,score}:" in out
+    assert '"ai-wiki search \\"x\\" --top-k 3 --fields path,score"' in out
+
+
+def test_nested_usage_error_points_at_the_leaf_commands_help(capsys) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["admin", "cursor", "import", "r.json", "--bogus"])
+    out = capsys.readouterr().out
+    assert '"ai-wiki admin cursor import --help"' in out
