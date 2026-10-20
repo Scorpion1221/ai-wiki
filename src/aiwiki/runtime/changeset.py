@@ -20,13 +20,19 @@ import shutil
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 
 from ..engine import bookkeeping
-from ..engine.document import OKFDocumentError, has_symlink_component, parse_document
+from ..engine.document import (
+    OKFDocumentError,
+    declared_stale_date,
+    has_symlink_component,
+    parse_document,
+    stale_date,
+)
 from ..engine.lint import lint
 from ..engine.update_concept import SHRINK_RATIO
 from ..engine.validate import OKF_RESERVED, PROFILE_STRUCTURAL, parse_doc, should_check, validate, validate_changed
@@ -40,6 +46,20 @@ HASH_PREFIX = "ch1:"
 # Keys the service stamps. They never count toward a concept's content hash.
 SERVICE_KEYS = frozenset(bookkeeping.SERVICE_KEYS["changeset"])
 VERDICTS = ("verified", "corrected", "unverified")
+# Stored origin kinds of work-item files (service.attention, maint add-evidence source:): an
+# attention notice says what is wrong and is never evidence; a bundle source is a file directly
+# under the bundle's sources/ whose bytes the writer matched against sources/.hashes.yaml before
+# storing. Bytes the bundle already holds never extend a concept's stale_after.
+NOTICE_KIND = "attention"
+SOURCE_KIND = "bundle-source"
+
+
+def top_level_source(rel: str) -> bool:
+    """``sources/<file>``: what a ``bundle-source`` may name, on client and writer alike. A
+    subfolder (inbox/, _rejected/, intake copies) holds no curated source; the ledger is none."""
+    parts = rel.split("/")
+    return len(parts) == 2 and parts[0] == "sources" and parts[1] not in ("", ".", "..", ".hashes.yaml")
+
 
 # name -> (environment variable, default)
 _LIMITS = {
@@ -60,6 +80,7 @@ CODES = {
     "duplicate_title": 422, "body_shrink": 422, "identity_locked": 422, "path_forbidden": 422,
     "service_owned_path": 422, "delete_forbidden": 422, "restructure_new_source": 422,
     "secret_detected": 422, "validation": 422, "audit_scope": 422, "self_verification": 422,
+    "notice_not_evidence": 422, "stale_after_needs_new_evidence": 422,
 }
 HINTS = {
     "missing_key": "add the key to the frontmatter",
@@ -83,6 +104,11 @@ HINTS = {
     "audit_scope": "review only what GET /audit/backlog lists; drop this review",
     "self_verification": "no reviewer verifies its own generation, nor an auditor another auditor's (a "
                          "correction is a later run's to review); drop it",
+    "notice_not_evidence": "add evidence first (ai-wiki maint add-evidence <item> source:sources/<file>, a Git "
+                           "file or an issue) and cite that file, never the notice",
+    "stale_after_needs_new_evidence": "freshness is extended only on evidence from outside the bundle: add a Git "
+                                      "file or an issue (ai-wiki maint add-evidence) and cite it, or keep "
+                                      "stale_after as it was",
 }
 # Validator, policy and lint messages -> error code; the first match wins.
 _MESSAGE_CODES = (
@@ -514,6 +540,8 @@ def _label(part: Mapping) -> str:
         return f"{repository}@{str(part['commit'])[:7]}:{part['path']}"
     if kind == "multica-comment" and part.get("issue"):
         return f"{part['issue']}#{part['comment']}" if part.get("comment") else str(part["issue"])
+    if kind == SOURCE_KIND and part.get("path"):
+        return str(part["path"])
     return f"{part['item']}/{part['file']}" if part.get("item") else str(part.get("file"))
 
 
@@ -539,8 +567,16 @@ def build_packet(
         missing = [name for name in evidence["item_files"] if name not in provided]
         if missing:
             return None, [_error("input", f"evidence file(s) not provided: {', '.join(missing)}")]
+        # By the origin the writer stored with the file, never its name: a notice is no source.
+        # It is left out, so a CLI that lists every file of the item (0.3.1 and older) still
+        # proposes once evidence sits beside it; a packet of notices alone is refused.
+        named = [name for name in evidence["item_files"] if provided[name].origin.get("kind") != NOTICE_KIND]
+        if not named:
+            return None, [_error("notice_not_evidence", f"{', '.join(evidence['item_files'])}: an attention "
+                                                        "notice says what is wrong with a concept, not why a "
+                                                        "claim holds, and the packet holds nothing else")]
         members = []
-        for index, name in enumerate(evidence["item_files"], start=1):
+        for index, name in enumerate(named, start=1):
             item, file = name.split("/", 1)
             data = provided[name].data
             ours = {"ref": f"S{index}", "item": item, "file": file, "sha256": _sha(data)}
@@ -801,6 +837,8 @@ def _evaluate_in(
     links_before = policy._agent_symlink_snapshot(workspace)
     names = _concept_names(workspace)
     deprecating = {entry["path"] for entry in files if entry["op"] == "deprecate"}
+    # A copy of a source the bundle already holds says nothing new about whether a claim still holds.
+    bundle_only = all(part.get("kind") == SOURCE_KIND for part in packet.parts)
 
     # G7: the packet lands where closeout will move it, under its content-addressed name.
     inbox_rel, packet_sha = write_source(workspace, packet.data, packet.filename)
@@ -912,6 +950,13 @@ def _evaluate_in(
         if stamped:
             repairs[rel] = stamped
         after = _frontmatter(final) or {}
+        if bundle_only and not deprecate:
+            was, will = declared_stale_date(head), declared_stale_date(after)
+            # Adding stale_after, or moving it later, renews the concept; so does dropping it when
+            # the default counted from this new generation falls later (none at all: never stale).
+            if will != was and (was is None or (stale_date(after) or date.max) > was):
+                errors.append(_error("stale_after_needs_new_evidence", f"stale_after {was or 'unset'} -> "
+                                     f"{will or 'unset'} on a packet of sources the bundle already holds", rel))
         preview[rel] = ["generated stamped"] + (
             [f"status={after.get('status')}"] if before is None or deprecate else []
         )

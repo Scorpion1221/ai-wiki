@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import time
+from datetime import date
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -22,11 +23,14 @@ from fastapi.testclient import TestClient
 from aiwiki.engine import scan_sources
 from aiwiki.engine.gen_indexes import generate_indexes
 from aiwiki.runtime import changeset
-from aiwiki.service import auth, worker
+from aiwiki.service import attention, auth, worker
 
 LIVE = Path(__file__).parent / "fixtures" / "live_bundle"
 # The seeded bundle is the production snapshot of 2026-09-19, before any audit epoch a test sets.
 BASE_DATE = "2026-09-19T00:00:00Z"
+# The writer's day for the attention collector: no fixture concept is stale on it (90 days
+# from 2026-09-08 at the earliest), so a run start queues nothing until a test makes it due.
+TODAY = date(2026, 10, 1)
 METRIC = "metrics/plugin-install-first-payment-funnel-2026-09.md"
 AI_STUDY = "experiments/ai-study-deferred-login-ab.md"
 AIO_AB = "experiments/web-landing-page-aio-ab.md"
@@ -104,6 +108,7 @@ class Gate:
         self.audits: list[str] = []
         monkeypatch.setattr(worker.audit, "run", lambda _bundle, parent, _job_path: self.audits.append(parent))
         monkeypatch.setattr(worker, "DEFER_POLL_S", 0.05)
+        monkeypatch.setattr(attention, "today", lambda: TODAY)
         # The app installs its own; undo that.
         for name in ("COMMIT_BUNDLES", "AUDIT_BUNDLES", "INTAKE", "actor_of", "may_submit", "auditors"):
             monkeypatch.setattr(worker, name, getattr(worker, name))

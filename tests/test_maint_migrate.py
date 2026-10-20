@@ -107,7 +107,8 @@ def test_export_v4_hands_unfinished_items_back_to_maintain(gate, capsys, tmp_pat
     code, exported = wiki_json(capsys, "maint", "export-v4", "--output", tmp_path / "v4.json", "--repo-root", "/r",
                                "--pending-manifest", manifest)
 
-    assert code == 0 and exported["manifest"] == {"manifest": str(manifest), "items": 3, "sources": 3}
+    assert code == 0 and exported["manifest"] == {"manifest": str(manifest), "items": 3, "sources": 3,
+                                                  "attention_only": 0}
     sources = json.loads(manifest.read_text(encoding="utf-8"))["sources"]
     by_identity = {source["identity"]: source for source in sources}
     assert sorted(by_identity) == sorted([f"repo:x#tasks/a@{single}", f"repo:x#tasks/a@{newer}",
@@ -129,6 +130,35 @@ def test_export_v4_hands_unfinished_items_back_to_maintain(gate, capsys, tmp_pat
     code, error = wiki_json(capsys, "maint", "export-v4", "--output", tmp_path / "v4.json", "--repo-root", "/r",
                             "--pending-manifest", manifest)
     assert code == 1 and "2 ready items" in error["error"], error
+
+
+def test_export_v4_hands_no_attention_notice_to_maintain(gate, capsys, tmp_path) -> None:
+    """A notice is not evidence on the rollback path either: P0 ``maintain`` would freeze it under
+    sources/ and curate the auditor's quoted note. It is left out; an item of nothing else is
+    counted apart (the next writer run start derives it again)."""
+    v4(tmp_path / "find.json")
+    assert wiki_json(capsys, "maint", "import-v4", tmp_path / "find.json")[0] == 0
+    notice = {"name": "notice.md", "content_b64": base64.b64encode(b"# Attention: x\n").decode(),
+              "origin": {"kind": "attention", "path": "metrics/x.md", "reason": "stale"}}
+    evidence = {"name": "S2-readout.md", "content_b64": base64.b64encode(b"# Readout\n\nLift: 3%.\n").decode(),
+                "origin": {"kind": "git-file"}}
+    response = gate.client.post("/maint/items", params={"bundle": "kb-a"}, headers=gate.headers(), json={"items": [
+        {"origin": {"kind": "attention", "path": f"metrics/{name}.md"}, "topic_key": f"attention:metrics/{name}.md",
+         "brief": name, "files": files} for name, files in (("x", [notice]), ("y", [notice, evidence]))]})
+    assert response.status_code == 200, response.text
+    alone, beside = (row["id"] for row in response.json()["items"])
+    manifest = tmp_path / "rollback" / "sources.json"
+    manifest.parent.mkdir()
+
+    code, exported = wiki_json(capsys, "maint", "export-v4", "--output", tmp_path / "v4.json", "--repo-root", "/r",
+                               "--pending-manifest", manifest)
+
+    assert code == 0 and exported["manifest"] == {"manifest": str(manifest), "items": 1, "sources": 1,
+                                                  "attention_only": 1}, exported
+    [source] = json.loads(manifest.read_text(encoding="utf-8"))["sources"]
+    assert source["identity"] == f"attention:metrics/y.md@{beside}" and alone not in source["identity"]
+    assert Path(source["path"]).read_bytes() == b"# Readout\n\nLift: 3%.\n"  # the evidence alone, verbatim
+    assert not [path for path in Path(source["path"]).parent.iterdir() if b"Attention" in path.read_bytes()]
 
 
 def ledger_entry(root: Path, identity: str, data: bytes, status: str = "pending", **extra) -> dict:

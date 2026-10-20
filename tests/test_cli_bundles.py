@@ -248,10 +248,11 @@ def test_cat_truncates_with_full_escape_hatch(monkeypatch, capsys) -> None:
 
 def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> None:
     metadata = {
-        "status": "stable", "trust": "machine-confirmed", "freshness": "fresh",
+        "status": "stable", "trust": "machine-confirmed", "freshness": "stale",
         "verification_current": True,
         "generated_at": "2026-08-13T10:00:00Z", "verified_at": "2026-08-13T11:00:00Z",
-        "current_verified_at": "2026-08-13T11:00:00Z",
+        "current_verified_at": "2026-08-13T11:00:00Z", "stale_after": "", "stale_on": "2026-11-11",
+        "freshness_basis": "default",  # stale by the 90-day default: a table must tell it from a declared date
     }
 
     def fake_api(route, **_kwargs):
@@ -284,12 +285,13 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
     assert cli.main(["ls"]) == 0
     ls_out = capsys.readouterr().out
     assert "concepts[1]{path,status,trust,freshness,verification_current" in ls_out
-    assert "generated_at,verified_at,current_verified_at,summary" in ls_out
-    assert '"machine-confirmed","fresh",true' in ls_out
+    assert "generated_at,verified_at,current_verified_at,stale_on,basis,summary" in ls_out
+    assert '"machine-confirmed","stale",true' in ls_out and '"2026-11-11","default","stable — X"' in ls_out
 
     assert cli.main(["search", "x"]) == 0
     search_out = capsys.readouterr().out
-    assert "verification_current,generated_at,verified_at,current_verified_at" in search_out
+    assert "verification_current,generated_at,verified_at,current_verified_at,stale_on,basis,score" in search_out
+    assert '"2026-11-11","default",8' in search_out
     assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_out
     assert "score,phrase,coverage,fields,terms,context" in search_out
     assert '8,true,1.0,"title|body","x"' in search_out
