@@ -1395,6 +1395,41 @@ def test_git_metadata_snapshot_restores_worktree_git_file(tmp_path: Path) -> Non
     assert git_file.read_text(encoding="utf-8") == "gitdir: ../trusted/worktrees/bundle\n"
 
 
+def test_git_metadata_snapshot_holds_objects_by_digest_and_fails_closed(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "purpose.md").write_text("# Purpose\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "main", str(bundle)], check=True, capture_output=True)
+    commit = ["git", "-C", str(bundle), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q"]
+    subprocess.run(["git", "-C", str(bundle), "add", "purpose.md"], check=True)
+    subprocess.run([*commit, "-m", "initial"], check=True)
+    before = curate._git_metadata_snapshot(bundle)
+    objects = sorted(rel for rel, entry in before.items() if entry.sha256 is not None)
+    assert len(objects) == 3 and all(before[rel].payload is None for rel in objects)
+    assert before[".git/HEAD"].payload == b"ref: refs/heads/main\n"
+
+    # An Agent's own commit and config edit are discarded; the object store it left alone stays.
+    config = bundle / ".git" / "config"
+    original_config = config.read_bytes()
+    (bundle / "purpose.md").write_text("# Changed\n", encoding="utf-8")
+    subprocess.run([*commit, "-am", "agent"], check=True)
+    config.write_text("[core]\n\thooksPath = /tmp/attacker\n", encoding="utf-8")
+    assert ".git/config" in {error.split(":", 1)[0] for error in curate._git_metadata_errors(bundle, before)}
+    curate._restore_git_metadata(bundle, before)
+    assert curate._git_metadata_errors(bundle, before) == []
+    assert config.read_bytes() == original_config
+
+    # A modified object has no bytes to restore from: it stays missing, and verification fails closed.
+    forged = bundle / objects[0]
+    forged.chmod(0o644)
+    forged.write_bytes(b"forged")
+    error = [f"{objects[0]}: curation modified protected Git metadata"]
+    assert curate._git_metadata_errors(bundle, before) == error
+    curate._restore_git_metadata(bundle, before)
+    assert not forged.exists()
+    assert curate._git_metadata_errors(bundle, before) == error
+
+
 def test_curation_restores_git_config_and_hook_before_rollback(
     tmp_path: Path, monkeypatch,
 ) -> None:

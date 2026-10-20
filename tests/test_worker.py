@@ -67,6 +67,31 @@ def test_serial_fifo_and_survives_failure(monkeypatch) -> None:
     assert order == ["s0", "s1", "boom", "s2", "s3"]  # FIFO; queue kept going past the failure
 
 
+def test_a_pushed_job_packs_loose_objects_after_its_waiter_is_released(tmp_path: Path, monkeypatch) -> None:
+    """Loose objects never pile up to Git's own gc.auto: the worker runs `git gc --auto` after a
+    job that pushed, under the writer lock but once the request waiting on the job is answered."""
+    seen: list[tuple] = []
+
+    def fake_changeset(bundle: Path, job_path: Path) -> None:
+        pushed = job_path.stem == "pushed"
+        job_path.write_text(json.dumps({"status": "done" if pushed else "rejected", "git": {"pushed": pushed}}))
+
+    def gc_auto(root: Path) -> None:
+        seen.append((root.name, worker._mutation_lock.locked(), all(event.is_set() for event in waiters)))
+
+    monkeypatch.setattr(worker, "_run_changeset", fake_changeset)
+    monkeypatch.setattr(worker.curate, "_gc_auto", gc_auto)
+    worker.ensure_started()
+    jobs = [tmp_path / "rejected.json", tmp_path / "pushed.json"]
+    waiters = [worker._finished.setdefault(job, threading.Event()) for job in jobs]
+    for job in jobs:
+        worker.submit_changeset(tmp_path, job)
+    worker._q.join()
+
+    assert seen == [(tmp_path.name, True, True)]
+    assert worker.curate._git(tmp_path, "config", "gc.auto").stdout.strip() == "0"  # no gc inside a transaction
+
+
 @pytest.mark.parametrize("audits", ["auto", "manual", "off"])
 def test_one_serial_queue_runs_changesets_then_audits_then_ingests(monkeypatch, audits: str) -> None:
     # Codex audits go ahead of Codex ingests only in a bundle whose changesets commit (the flag)

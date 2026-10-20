@@ -657,7 +657,9 @@ def test_keys_yaml_reads_under_another_name_are_rejected(bundle: Path, rel: str,
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        ("2026-02-30", "day is out of range for month"),
+        # datetime's own words, which Python 3.14 made specific.
+        ("2026-02-30", "day 30 must be in range 1..28 for month 2 in year 2026" if sys.version_info >= (3, 14)
+         else "day is out of range for month"),
         ("!!bool maybe", "its tag does not fit the value"),
         ("!!timestamp soon", "its tag does not fit the value"),
     ],
