@@ -81,7 +81,8 @@ HINTS = {
     "conflict": "workspace pull, then re-apply the change to the current version",
     "validation": "fix the reported problem",
     "audit_scope": "review only what GET /audit/backlog lists; drop this review",
-    "self_verification": "no reviewer verifies its own generation, nor an auditor another auditor's; drop it",
+    "self_verification": "no reviewer verifies its own generation, nor an auditor another auditor's (a "
+                         "correction is a later run's to review); drop it",
 }
 # Validator, policy and lint messages -> error code; the first match wins.
 _MESSAGE_CODES = (
