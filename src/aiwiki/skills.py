@@ -23,7 +23,10 @@ from pathlib import Path
 
 from aiwiki.version import VERSION
 
-NAMES = ("ai-wiki", "ai-wiki-maintainer", "ai-wiki-curating-maintainer", "ai-wiki-auditor", "okf-knowledge-curator")
+NAMES = ("ai-wiki", "ai-wiki-curating-maintainer", "ai-wiki-auditor", "okf-knowledge-curator")
+# Retired skills: ``skill install`` removes an installed copy whose SKILL.md still names it, so a runtime
+# never keeps loading a flow this release no longer ships (ai-wiki-maintainer: the legacy ledger flow, 0.3.3).
+RETIRED = ("ai-wiki-maintainer",)
 PRESERVE = {"multica-metadata.json"}
 _IGNORED = PRESERVE | {".DS_Store"}
 _STAMP = re.compile(r"<!-- ai-wiki:version (\d+(?:\.\d+)*) -->")
@@ -163,6 +166,15 @@ def install(dest: Path | None = None, names: tuple[str, ...] = NAMES) -> list[di
         raise SkillError(f"{detail}: nothing was written; move it away or pass another --dir", code=2)
     dest.mkdir(parents=True, exist_ok=True)
     rows = []
+    for name in RETIRED if names == NAMES else ():
+        target = dest / name
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir() and skill_name(_read(target / "SKILL.md") or "") == name:
+            shutil.rmtree(target)  # only our own retired skill; a foreign directory of that name stays
+        else:
+            continue
+        rows.append({"skill": name, "status": "removed", "path": str(target)})
     for name in names:
         target = dest / name
         before = None if target.is_symlink() else files(target) or None
