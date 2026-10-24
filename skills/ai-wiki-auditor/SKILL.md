@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on your own output.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # AI Wiki Auditor
 
@@ -39,14 +39,23 @@ command. `$WS` is the `workspace` path `review begin` prints.
 
 ## 1. Preflight
 
+Before `review begin`, run `ai-wiki update --check`. A `help` row (`available: true` or `skills` not
+`current`) → run `ai-wiki update && hash -r`. Then, updated or not, compare this skill's
+`<!-- ai-wiki:version X -->` with `ai-wiki --version`: if they differ, read the installed copy at
+the path `ai-wiki skill` lists; if you cannot, stop blocked:
+"workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one line, go
+on with the installed version. A failed `ai-wiki update` → report it in one line, never retry it or
+install by hand; go on only if `ai-wiki skill` shows this skill `current`, else stop blocked. Never
+update between `review begin` and `review end`: the run holds the lease.
+
 ```sh
 ai-wiki -b "$bundle" doctor --role auditor
 ```
 
 Exit `0`: continue. Exit `4` lists failed checks (`scopes` must be exactly read and audit;
 `actor`; `writer`, a read mirror answered; `okf_version`; `state_dir`; `disk`; `tool:git|uv`).
-Stop and report it blocked (§5). Never reinstall the CLI, swap tokens or edit
-`~/.ai-wiki/config.json` to get past a check.
+Stop and report it blocked (§5). Never swap tokens or edit `~/.ai-wiki/config.json` to get
+past a check.
 
 ## 2. Begin
 
@@ -55,8 +64,9 @@ ai-wiki -b "$bundle" review begin --run "$run" --max "$max" --json
 ```
 
 It reruns doctor, takes the auditor lease (3 h, one auditor run at a time), pulls the published
-bundle into `$WS` and prints the backlog size. Exit `4`: `failed` names `doctor`, `lease`
-(`holder` shows who holds it) or `workspace`: stop (§5, blocked). Rerunning `begin` with the
+bundle into `$WS` and prints the backlog size. Exit `4`: `failed` names `doctor`, `update_running`
+(an install held the CLI past 900 s; no lease was taken), `lease` (`holder` shows who holds it) or
+`workspace`: stop (§5, blocked). Rerunning `begin` with the
 same run is safe.
 
 ## 3. The review loop

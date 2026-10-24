@@ -16,6 +16,25 @@ def _point_config(monkeypatch, tmp_path: Path) -> Path:
     return p
 
 
+def test_connect_hints_never_put_a_token_in_argv(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Agents run hints verbatim: a `--token <...>` hint would put the token in argv, history and logs."""
+    from aiwiki.cli import doctor
+
+    _point_config(monkeypatch, tmp_path)                       # empty: not configured, no token
+    assert cli.main([]) == 0                                   # home view
+    with pytest.raises(SystemExit):
+        cli.main(["health"])                                   # _conn's help_command
+    with pytest.raises(SystemExit):
+        cli.main(["config", "set"])                            # config set without a flag
+    shown = capsys.readouterr().out
+    detail = next(row["detail"] for row in doctor.run("member", bundle=None, state_dir=tmp_path / "st",
+                                                      skills_dir=None, tools=())["checks"] if row["check"] == "config")
+    for hint in (shown, detail, cli.CONNECT_HINT):
+        assert "--token <" not in hint
+    assert shown.count(cli.CONNECT_HINT) == 3 and cli.CONNECT_HINT in detail
+    assert "AIWIKI_TOKEN" in cli.CONNECT_HINT and "--endpoint <url>" in cli.CONNECT_HINT
+
+
 def test_config_set_and_conn(monkeypatch, tmp_path: Path) -> None:
     p = _point_config(monkeypatch, tmp_path)
     assert cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"]) == 0

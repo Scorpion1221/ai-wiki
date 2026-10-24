@@ -95,10 +95,12 @@ unset AGENT_TOKEN
 A new agent takes it at creation: `printf '{"AIWIKI_TOKEN":"%s"}' "$AGENT_TOKEN" | multica agent
 create … --custom-env-stdin`. Any other runtime: put `AIWIKI_TOKEN` in the agent's secret
 environment the same way (a systemd `EnvironmentFile` of mode 600, a CI secret, a vault
-injection), and point the CLI at the writer once, without a token:
+injection), install the CLI from GitHub `main`, the release channel (no pinned revision: each run's
+preflight keeps it current with `ai-wiki update`, so the writer is deployed before CLI changes merge
+to `main`), and point it at the writer once, without a token:
 
 ```bash
-uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<deployed revision>" && hash -r
+uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install
 ai-wiki config set --endpoint https://ai-wiki.yqbqnn.com/
 ```
 
@@ -136,6 +138,9 @@ the Multica registry).
    installs the canonical copies under `~/.agents/skills`; `--check` detects drift. In
    Multica, create or update the skill from that `SKILL.md` (`multica skill create|update
    --content-file`) and attach it (`multica agent skills set <agent-id> --skill-ids …`).
+   The agent follows that attached copy, which `ai-wiki update` never touches: republish it at
+   every release (AGENTS.md §5), or the agent stops blocked with "workspace Skill is behind
+   the CLI; publish it".
 2. Paste the agent instructions: the text after the `---` line of the role's
    `*-agent-instructions.md`, verbatim.
 3. Schedule the prompt: the role's `*-autopilot-prompt.md`, with its placeholders filled in,

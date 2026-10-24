@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # AI Wiki Curating Maintainer
 
@@ -25,6 +25,15 @@ host (production and its shadow) apart. `$WS` is the `workspace` path `maint beg
 
 ## 1. Preflight
 
+Before `maint begin`, run `ai-wiki update --check`. A `help` row (`available: true` or `skills` not
+`current`) → run `ai-wiki update && hash -r`. Then, updated or not, compare this skill's
+`<!-- ai-wiki:version X -->` with `ai-wiki --version`: if they differ, read the installed copy at
+the path `ai-wiki skill` lists; if you cannot, stop blocked:
+"workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one line, go
+on with the installed version. A failed `ai-wiki update` → report it in one line, never retry it or
+install by hand; go on only if `ai-wiki skill` shows this skill `current`, else stop blocked. Never
+update between `maint begin` and `maint end`: the run holds the lease.
+
 ```sh
 ai-wiki -b "$bundle" doctor --role curator
 ```
@@ -34,8 +43,7 @@ ai-wiki -b "$bundle" doctor --role curator
   `writer`, a read mirror answered `/whoami`; `okf_version`, from `/health`, which the read
   mirror answers, so it must serve the bundle; `state_dir`; `disk`; `tool:git|uv|multica`). An
   unknown `doctor` (exit `2`) is an `api` failure. Stop and report it (§5, blocked).
-- Never reinstall or upgrade the `ai-wiki` CLI (other agents on this host share it), swap
-  tokens or edit `~/.ai-wiki/config.json` to get past a check; the operator fixes the host.
+- Never swap tokens or edit `~/.ai-wiki/config.json` to get past a check; the operator fixes the host.
 
 ## 2. Begin: deterministic collection
 
@@ -53,7 +61,8 @@ cut off is safe to rerun.
 
 - Exit `0`: go to §3. Exit `5`: a collector was partial or failed and kept what it could not
   collect; still run §3 (the report decides whether that blocks the issue).
-- Exit `4`: `failed` names `doctor`, `lease` (`holder` shows who holds it) or `workspace`. Stop:
+- Exit `4`: `failed` names `doctor`, `update_running` (an install held the CLI past 900 s; no lease
+  was taken), `lease` (`holder` shows who holds it) or `workspace`. Stop:
   post the output and set the issue blocked (§5). Do not run `maint end`.
 - Repeating `begin` with the same `--run` is safe: it keeps the run's budget, taken items and
   lease, and resets workspace edits of an item the writer took back.
