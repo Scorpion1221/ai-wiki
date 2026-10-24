@@ -25,9 +25,9 @@ ai-wiki bundle list        # bundles hosted by this server
 If the binary is missing, install it once with
 `uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`.
 Before the first lookup of a task, run `ai-wiki update --check` (one read of `main`). A `help` row
-(`available: true` or `skills` not `current`) → run `ai-wiki update && hash -r`; no `help` row → go
-on. After an update, if this file's `<!-- ai-wiki:version X -->` differs from `ai-wiki --version`,
-read the installed copy at the path `ai-wiki skill` lists; if you cannot, stop blocked:
+(`available: true` or `skills` not `current`) → run `ai-wiki update && hash -r`. Then, updated or
+not, compare this file's `<!-- ai-wiki:version X -->` with `ai-wiki --version`: if they differ, read
+the installed copy at the path `ai-wiki skill` lists; if you cannot, stop blocked:
 "workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one line, go
 on with the installed version. A failed `ai-wiki update` → report it in one line, never retry it or
 install by hand; go on only if `ai-wiki skill` shows this file `current`, else stop blocked. Never

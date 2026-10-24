@@ -406,7 +406,7 @@ def _audits(bundle: str) -> dict:
 def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: int, deadline_s: int,
           only: tuple[str, ...], workspace_dir: Path | None) -> tuple[int, dict]:
     """doctor → lease → audit resubmission → workspace pull → collect (design §3)."""
-    from aiwiki.cli import doctor, workspace
+    from aiwiki.cli import doctor, update, workspace
 
     settings = _config(config)
     folder = run_dir(state_dir, run)
@@ -422,9 +422,15 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
     if not checked["ok"]:
         failed = [row for row in checked["checks"] if not row["ok"]]
         return PREFLIGHT, {"run": run, "failed": "doctor", "checks": failed}
+    # Shared update.lock until the run pointer is written: `ai-wiki update` never installs under a beginning run.
+    started = update.UpdateLock(shared=True)
+    if not started.acquire():
+        return PREFLIGHT, {"run": run, "failed": "update_running", "error": f"{started.path} stayed held for "
+                           f"{update.LOCK_TIMEOUT} s by an `ai-wiki update`; no lease was taken"}
     try:
         lease = _call("POST", "/maint/lease/maintainer", bundle=bundle, run=run)[1]
     except MaintError as exc:
+        started.release()
         return PREFLIGHT, {"run": run, "failed": "lease", "error": str(exc), "holder": exc.detail}
     now = _now()
     if state is None:  # a begin repeated within the run keeps its clock, budget and taken items
@@ -441,6 +447,7 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
             state["cursors_before"] = {name: _cursor(bundle, name) for name in COLLECTORS}
         _save_run(state_dir, state)
         _write(_pointer(state_dir, bundle), {"run": run, "bundle": bundle})
+        started.release()
         try:  # a shadow bundle leaves its audits to the admin cron (design §9, phase 2)
             state["audits"] = _audits(bundle) if (settings.get("audits") or {}).get("resubmit", True) else {
                 "mode": "skipped", "resubmitted": [], "needs_human": []}
@@ -455,6 +462,8 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
             _call("DELETE", "/maint/lease/maintainer", bundle=bundle, run=run)
         _pointer(state_dir, bundle).unlink(missing_ok=True)
         return PREFLIGHT, {"run": run, "failed": "workspace", "error": str(exc)}
+    finally:
+        started.release()
     collected = collect(bundle, run=run, work=folder / "collect", state_dir=state_dir, config=settings, only=only)
     state["collect"] = _merged(state.get("collect") or {}, collected)
     _save_run(state_dir, state)

@@ -26,8 +26,8 @@ host (production and its shadow) apart. `$WS` is the `workspace` path `maint beg
 ## 1. Preflight
 
 Before `maint begin`, run `ai-wiki update --check`. A `help` row (`available: true` or `skills` not
-`current`) → run `ai-wiki update && hash -r`; no `help` row → go on. After an update, if this
-skill's `<!-- ai-wiki:version X -->` differs from `ai-wiki --version`, read the installed copy at
+`current`) → run `ai-wiki update && hash -r`. Then, updated or not, compare this skill's
+`<!-- ai-wiki:version X -->` with `ai-wiki --version`: if they differ, read the installed copy at
 the path `ai-wiki skill` lists; if you cannot, stop blocked:
 "workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one line, go
 on with the installed version. A failed `ai-wiki update` → report it in one line, never retry it or
@@ -61,7 +61,8 @@ cut off is safe to rerun.
 
 - Exit `0`: go to §3. Exit `5`: a collector was partial or failed and kept what it could not
   collect; still run §3 (the report decides whether that blocks the issue).
-- Exit `4`: `failed` names `doctor`, `lease` (`holder` shows who holds it) or `workspace`. Stop:
+- Exit `4`: `failed` names `doctor`, `update_running` (an install held the CLI past 900 s; no lease
+  was taken), `lease` (`holder` shows who holds it) or `workspace`. Stop:
   post the output and set the issue blocked (§5). Do not run `maint end`.
 - Repeating `begin` with the same `--run` is safe: it keeps the run's budget, taken items and
   lease, and resets workspace edits of an item the writer took back.

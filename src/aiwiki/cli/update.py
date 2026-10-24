@@ -6,8 +6,10 @@ already at ``main`` it still repairs stale skills. A failed skill step never und
 
 ``update`` never replaces the CLI under a live run on this host: it refuses (exit 1, ``run_live``) while a
 ``maint`` or ``review`` run of the state directory was active within the writer's lease TTL, or a legacy
-``maintain`` holds its ``runner.lock``, and installs under an exclusive ``update.lock`` (a second updater
-refuses with ``update_running``). ``--check`` reports such a run and then offers no update.
+``maintain`` holds its ``runner.lock``. It checks and installs holding ``<state dir>/update.lock`` exclusively;
+``maint begin`` and ``review begin`` hold it shared until their run pointer is written, so neither starts under
+the other. Every holder waits up to ``LOCK_TIMEOUT`` for the lock (``--check`` too, for an install) and only then
+refuses (``update_running``). ``--check`` reports a live run and then offers no update.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ from aiwiki.version import VERSION
 REPO = os.environ.get("AIWIKI_UPDATE_REPO", "https://github.com/Scorpion1221/ai-wiki")
 BRANCH = "main"
 LATER = "before your next run (never during one)"
+LOCK_TIMEOUT = 900  # seconds: the uv install's own timeout
 LIVE_FIELDS = ("kind", "bundle", "run", "age_minutes")
 
 
@@ -161,27 +164,60 @@ def _default_state_dir() -> Path:
     return cli._STATE_DIR.expanduser()
 
 
+class UpdateLock:
+    """``update.lock`` in the default state directory, whatever ``--state-dir`` a run uses: exclusive while
+    ``update`` checks for live runs and installs, shared while a run begins (until its pointer is written)."""
+
+    def __init__(self, *, shared: bool):
+        self.path, self.shared, self.fd = _default_state_dir() / "update.lock", shared, None
+
+    def acquire(self, *, create: bool = True) -> bool:
+        """Wait up to LOCK_TIMEOUT; False when it stayed held. Without ``create``, no lock file means no holder."""
+        if create:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT if create else os.O_RDONLY, 0o600)
+        except FileNotFoundError:
+            return True
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(self.fd, (fcntl.LOCK_SH if self.shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    self.release()
+                    return False
+                time.sleep(0.1)
+
+    def release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)  # drops the flock
+            self.fd = None
+
+
+def _busy(lock: UpdateLock) -> int:
+    return _refuse("update_running", f"{lock.path} stayed held for {LOCK_TIMEOUT} s (an install, or a run "
+                   "beginning); nothing was installed. Go on with the installed version and update " + LATER, [])
+
+
 def update_command(args) -> int:
     # The default state directory always; ``--state-dir`` adds others, such as a legacy ``maintain`` ledger.
     dirs = list(dict.fromkeys([_default_state_dir(), *(Path(d).expanduser() for d in args.state_dir or ())]))
-    lock_path = dirs[0] / "update.lock"
-    if args.check:
-        return _check(dirs, lock_path)
-    dirs[0].mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    lock = UpdateLock(shared=args.check)
+    if not lock.acquire(create=not args.check):  # --check waits for an install, then reports what it left
+        return _busy(lock)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return _refuse("update_running", f"another `ai-wiki update` holds {lock_path}; nothing was installed. "
-                           "Go on with the installed version and update " + LATER, [])
+        if args.check:
+            lock.release()
+            return _check(dirs)
         live = _live(dirs)
         if live:
             return _refuse("run_live", "a run is live on this host, so the CLI and skills under it stay as they are; "
                            "nothing was installed. Go on with the installed version and update " + LATER, live)
         return _install()
     finally:
-        os.close(fd)  # releases the flock
+        lock.release()
 
 
 def _status() -> tuple[dict, str, list[dict]]:
@@ -196,12 +232,11 @@ def _status() -> tuple[dict, str, list[dict]]:
     return data, latest, rows
 
 
-def _check(dirs: list[Path], lock_path: Path) -> int:
+def _check(dirs: list[Path]) -> int:
     data, _latest_sha, rows = _status()
-    live = _live(dirs) + ([{"kind": "update", "bundle": None, "run": None, "age_minutes": None}]
-                          if _held(lock_path) else [])
+    live = _live(dirs)
     if live:
-        data["wait"] = "a run or an update is live on this host: update " + LATER
+        data["wait"] = "a run is live on this host: update " + LATER
     groups = [object_lines("update", data),
               table_lines("skills", _with_skill_md(rows), ("skill", "status", "skill_md"))]
     if live:
