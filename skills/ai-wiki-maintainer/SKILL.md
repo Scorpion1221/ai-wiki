@@ -7,7 +7,7 @@ description: >-
   retries), interprets passed versus needs_attention, and advances a durable checkpoint
   without directly editing the OKF bundle or its Git repository.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # AI Wiki Maintainer
 
@@ -30,10 +30,22 @@ test -f "$SKILL_DIR/scripts/checkpoint.py"
 
 ## 1. Runtime preflight
 
-`ai-wiki -b "$bundle" health --json` must report `"compatible": true` (`client_version` and
-`service_version` share major.minor) and `"okf_version": "0.2"`. Otherwise run `ai-wiki update && hash -r`
-(the CLI and these skills move together; a CLI older than `update` needs `uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`), re-read this
-file, and recheck. Still failing: stop
+Before the run, run `ai-wiki update --check --state-dir "$state_dir"`. A `help` row (`available:
+true` or `skills` not `current`) → run `ai-wiki update --state-dir "$state_dir" && hash -r`. Then,
+updated or not, compare this file's `<!-- ai-wiki:version X -->` with `ai-wiki --version`: if they
+differ, read the installed copy at the path `ai-wiki skill` lists; if you cannot, stop blocked:
+"workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one line, go
+on with the installed version. A failed `ai-wiki update` → report it in one line, never retry it or
+install by hand; go on only if `ai-wiki skill` shows this file `current`, else stop blocked. Never
+update mid-run (while a §2.7 `maintain` holds its runner lock, `update` refuses): only before
+starting.
+
+Then `ai-wiki -b "$bundle" health --json` must report `"compatible": true` (`client_version` and
+`service_version` share major.minor) and `"okf_version": "0.2"`. Otherwise run
+`ai-wiki update --state-dir "$state_dir" && hash -r` (the CLI and these skills move together; a CLI
+older than `update` needs `uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`),
+then compare this file's `<!-- ai-wiki:version X -->` with `ai-wiki --version` as above (differ → read the
+installed copy at the path `ai-wiki skill` lists, or stop blocked), and recheck. Still failing: stop
 (no scan, `maintain`, build or write) and report it; a `health --json` without `compatible`
 means GitHub `main` still ships a client older than this skill. Never hard-code a release number.
 
