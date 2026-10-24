@@ -26,6 +26,18 @@ def test_the_skill_list_is_the_repository_list() -> None:
     assert sorted(skills.NAMES) == sorted(p.name for p in (ROOT / "skills").iterdir() if (p / "SKILL.md").is_file())
 
 
+def test_every_skill_updates_before_a_run_and_keeps_tokens_out_of_argv() -> None:
+    # Owner decision 2026-10-24: agents update the CLI themselves, shared Multica host included.
+    for name in skills.NAMES:
+        text = " ".join((ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8").split())
+        assert "`ai-wiki update --check`" in text, f"{name}: its preflight must run `ai-wiki update --check`"
+        assert "never reinstall" not in text.lower(), f"{name}: contradicts the self-update rule"
+        assert "--token" not in text, f"{name}: a token goes in $AIWIKI_TOKEN, never in a command"
+        if name != "okf-knowledge-curator":   # it ships with ai-wiki; its callers' preflights update it
+            assert "`ai-wiki update && hash -r`" in text and "Never update " in text, \
+                f"{name}: update, rehash and re-read before the run, never during its lease"
+
+
 def test_install_status_and_refusals(tmp_path: Path, capsys) -> None:
     dest = tmp_path / "skills"
     assert {row["status"] for row in skills.status(dest)} == {"missing"}

@@ -7,7 +7,7 @@ description: >-
   retries), interprets passed versus needs_attention, and advances a durable checkpoint
   without directly editing the OKF bundle or its Git repository.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # AI Wiki Maintainer
 
@@ -30,7 +30,12 @@ test -f "$SKILL_DIR/scripts/checkpoint.py"
 
 ## 1. Runtime preflight
 
-`ai-wiki -b "$bundle" health --json` must report `"compatible": true` (`client_version` and
+Before the run, run `ai-wiki update --check`. `available: true` or `skills` not `current` (a
+`help` row) → run `ai-wiki update && hash -r`, then re-read this file. A failed check (offline)
+→ say so in one line and continue on the installed version. Never update mid-run (while a §2.7
+`maintain` still runs and holds its runner lock): only before starting.
+
+Then `ai-wiki -b "$bundle" health --json` must report `"compatible": true` (`client_version` and
 `service_version` share major.minor) and `"okf_version": "0.2"`. Otherwise run `ai-wiki update && hash -r`
 (the CLI and these skills move together; a CLI older than `update` needs `uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`), re-read this
 file, and recheck. Still failing: stop

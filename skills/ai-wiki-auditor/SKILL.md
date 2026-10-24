@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on your own output.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # AI Wiki Auditor
 
@@ -39,14 +39,19 @@ command. `$WS` is the `workspace` path `review begin` prints.
 
 ## 1. Preflight
 
+Before `review begin`, run `ai-wiki update --check`. `available: true` or `skills` not `current`
+(a `help` row) → run `ai-wiki update && hash -r`, then re-read this skill. A failed check
+(offline) → say so in one line and continue on the installed version. Never update between
+`review begin` and `review end`: the run holds the lease.
+
 ```sh
 ai-wiki -b "$bundle" doctor --role auditor
 ```
 
 Exit `0`: continue. Exit `4` lists failed checks (`scopes` must be exactly read and audit;
 `actor`; `writer`, a read mirror answered; `okf_version`; `state_dir`; `disk`; `tool:git|uv`).
-Stop and report it blocked (§5). Never reinstall the CLI, swap tokens or edit
-`~/.ai-wiki/config.json` to get past a check.
+Stop and report it blocked (§5). Never swap tokens or edit `~/.ai-wiki/config.json` to get
+past a check.
 
 ## 2. Begin
 

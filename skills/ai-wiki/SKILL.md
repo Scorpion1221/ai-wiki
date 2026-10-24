@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -23,13 +23,19 @@ ai-wiki bundle list        # bundles hosted by this server
 ```
 
 If the binary is missing, install it once with
-`uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`. Keep it current with `ai-wiki update` (it installs the latest CLI and this skill
-together; re-read this file afterwards; never copy skills by hand; an ai-wiki without `update` needs the
-install command above). If it is unconfigured, ask
-the owner for the endpoint and token, then run:
+`uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`.
+Before the first lookup of a task, run `ai-wiki update --check` (one read of `main`). A `help`
+row (`available: true` or `skills` not `current`) → run `ai-wiki update && hash -r`, then re-read
+this file: it installs the latest CLI and this skill together. A failed check (offline, no git) →
+say so in one line and continue on the installed version. Never update between `maint begin` or
+`review begin` and its `end` (the run holds a lease): only before starting.
+Never copy skills by hand; an ai-wiki without `update` needs the install command above.
+The token comes from `AIWIKI_TOKEN`, which wins over a saved token: never put a token in a
+command, chat or file. No token (`ai-wiki config show` has `token_source: null`) → stop and ask
+the user to set `AIWIKI_TOKEN`. No endpoint → ask the owner for the URL, then run:
 
 ```sh
-ai-wiki config set --endpoint <url> --token <token>
+ai-wiki config set --endpoint <url>
 ai-wiki bundle use <name>                 # -b <name> overrides once per command
 ```
 

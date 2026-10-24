@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # AI Wiki Curating Maintainer
 
@@ -25,6 +25,11 @@ host (production and its shadow) apart. `$WS` is the `workspace` path `maint beg
 
 ## 1. Preflight
 
+Before `maint begin`, run `ai-wiki update --check`. `available: true` or `skills` not `current`
+(a `help` row) → run `ai-wiki update && hash -r`, then re-read this skill. A failed check
+(offline) → say so in one line and continue on the installed version. Never update between
+`maint begin` and `maint end`: the run holds the lease.
+
 ```sh
 ai-wiki -b "$bundle" doctor --role curator
 ```
@@ -34,8 +39,7 @@ ai-wiki -b "$bundle" doctor --role curator
   `writer`, a read mirror answered `/whoami`; `okf_version`, from `/health`, which the read
   mirror answers, so it must serve the bundle; `state_dir`; `disk`; `tool:git|uv|multica`). An
   unknown `doctor` (exit `2`) is an `api` failure. Stop and report it (§5, blocked).
-- Never reinstall or upgrade the `ai-wiki` CLI (other agents on this host share it), swap
-  tokens or edit `~/.ai-wiki/config.json` to get past a check; the operator fixes the host.
+- Never swap tokens or edit `~/.ai-wiki/config.json` to get past a check; the operator fixes the host.
 
 ## 2. Begin: deterministic collection
 

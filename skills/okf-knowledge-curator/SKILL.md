@@ -7,13 +7,15 @@ description: >-
   leave generated/verified bookkeeping to the service without faking verification, and hand
   concept edits back to deterministic service gates.
 ---
-<!-- ai-wiki:version 0.3.2 -->
+<!-- ai-wiki:version 0.3.4 -->
 
 # OKF Knowledge Curator
 
 Target **strict OKF v0.2 only**. This skill is the authoring protocol used inside the AI
 Wiki worker and by the curating maintainer (see Remote maintainer mode); other callers
 submit sources through `ai-wiki ingest` rather than editing a bundle directly.
+It ships with ai-wiki and is updated by `ai-wiki update`: the caller's preflight runs
+`ai-wiki update --check` before a run (never during one) and updates when it reports one.
 
 ## Core workflow
 
