@@ -18,10 +18,11 @@ The client config lives at `~/.ai-wiki/config.json`.
 
 ## 2. Connect and choose a bundle
 
-One server (URL + token) can host many knowledge bundles:
+One server (URL + token) can host many knowledge bundles. The token comes from the
+`AIWIKI_TOKEN` environment variable (it wins over a saved one); never put it in a command line:
 
 ```bash
-ai-wiki config set --endpoint https://<host>/ --token <token>
+ai-wiki config set --endpoint https://<host>/
 ai-wiki bundle list
 ai-wiki bundle use solvely-web
 ai-wiki bundle create my-kb

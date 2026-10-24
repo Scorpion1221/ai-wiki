@@ -75,8 +75,9 @@ def test_the_skill_covers_the_whole_loop(root) -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert text.startswith("---\nname: ai-wiki-curating-maintainer\n")
     # A budget, not a style rule: the whole skill is loaded into every maintainer run. 2026-10-10
-    # took it from 220 to 230 for the issue-comment attribution rule and the `--deadline` parameter.
-    assert len(text.splitlines()) <= 230
+    # took it from 220 to 230 for the issue-comment attribution rule and the `--deadline` parameter;
+    # 2026-10-24 (0.3.4) to 250: the self-update preflight left 229/230, no room for the next small fix.
+    assert len(text.splitlines()) <= 250
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert {"doctor", "maint begin", "maint next", "maint skip", "maint split", "maint add-evidence",
             "concept new", "validate", "propose", "workspace pull", "maint park", "maint end"} <= verbs
@@ -85,7 +86,9 @@ def test_the_skill_covers_the_whole_loop(root) -> None:
 def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     text = AUDITOR.read_text(encoding="utf-8")
     assert text.startswith("---\nname: ai-wiki-auditor\n")
-    assert len(text.splitlines()) <= 200
+    # A budget, loaded into every audit run. 2026-10-24 (0.3.4) took it from 200 to 220: the
+    # self-update preflight left 199/200, no room for the next small fix.
+    assert len(text.splitlines()) <= 220
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert verbs == {"update", "doctor", "review begin", "review next", "review evidence", "review verdict",
                      "review submit", "review end"}

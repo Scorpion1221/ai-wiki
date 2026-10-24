@@ -36,6 +36,11 @@ def test_every_skill_updates_before_a_run_and_keeps_tokens_out_of_argv() -> None
         if name != "okf-knowledge-curator":   # it ships with ai-wiki; its callers' preflights update it
             assert "`ai-wiki update && hash -r`" in text and "Never update " in text, \
                 f"{name}: update, rehash and re-read before the run, never during its lease"
+    # The live agents' Multica instructions carry the same rule; they must not contradict their Skill.
+    for prompt in ("production", "shadow", "auditor"):
+        text = " ".join((ROOT / "docs" / "prompts" / f"{prompt}-agent-instructions.md").read_text("utf-8").split())
+        assert "`ai-wiki update --check`" in text and "`ai-wiki update && hash -r`" in text, prompt
+        assert "Never update between " in text and "never reinstall" not in text.lower(), prompt
 
 
 def test_install_status_and_refusals(tmp_path: Path, capsys) -> None:
