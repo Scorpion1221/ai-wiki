@@ -50,6 +50,8 @@ def commands(text: str) -> list[str]:
 def resolve(root: argparse.ArgumentParser, command: str) -> tuple[str, list[str]]:
     """The verb path a command reaches and its unknown ``--flags``; fails on an unknown verb."""
     words, parser, path = shlex.split(command)[1:], root, []
+    if len(words) == 1 and words[0] in cli._VERSION_FLAGS:  # `ai-wiki --version`: answered before argparse
+        return "--version", []
     while True:
         if words[:1] == ["-b"]:
             words = words[2:]
@@ -90,8 +92,8 @@ def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     # self-update preflight left 199/200, no room for the next small fix.
     assert len(text.splitlines()) <= 220
     verbs = {resolve(root, command)[0] for command in commands(text)}
-    assert verbs == {"update", "doctor", "review begin", "review next", "review evidence", "review verdict",
-                     "review submit", "review end"}
+    assert verbs == {"update", "skill", "--version", "doctor", "review begin", "review next", "review evidence",
+                     "review verdict", "review submit", "review end"}
     prompt = (PROMPT.parent / "auditor-autopilot-prompt.md").read_text(encoding="utf-8")
     assert "ai-wiki-auditor" in prompt and not {resolve(root, command)[0] for command in commands(prompt)} - verbs
 

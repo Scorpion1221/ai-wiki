@@ -30,10 +30,15 @@ test -f "$SKILL_DIR/scripts/checkpoint.py"
 
 ## 1. Runtime preflight
 
-Before the run, run `ai-wiki update --check`. `available: true` or `skills` not `current` (a
-`help` row) → run `ai-wiki update && hash -r`, then re-read this file. A failed check (offline)
-→ say so in one line and continue on the installed version. Never update mid-run (while a §2.7
-`maintain` still runs and holds its runner lock): only before starting.
+Before the run, run `ai-wiki update --check --state-dir "$state_dir"`. A `help` row (`available:
+true` or `skills` not `current`) → run `ai-wiki update --state-dir "$state_dir" && hash -r`; no
+`help` row → go on. After an update, if this file's `<!-- ai-wiki:version X -->` differs from
+`ai-wiki --version`, read the installed copy at the path `ai-wiki skill` lists; if you cannot, stop
+blocked: "workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one
+line, go on with the installed version. A failed `ai-wiki update` → report it in one line, never
+retry it or install by hand; go on only if `ai-wiki skill` shows this file `current`, else stop
+blocked. Never update mid-run (while a §2.7 `maintain` holds its runner lock, `update` refuses):
+only before starting.
 
 Then `ai-wiki -b "$bundle" health --json` must report `"compatible": true` (`client_version` and
 `service_version` share major.minor) and `"okf_version": "0.2"`. Otherwise run `ai-wiki update && hash -r`

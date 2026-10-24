@@ -168,3 +168,10 @@ python3 scripts/sync_skills.py --check
 
 Use `--apply` only when deliberately deploying those exact versions. It preserves
 platform-managed `multica-metadata.json` and removes other stale skill files.
+
+GitHub `main` is the release channel: agents run `ai-wiki update` before each run, so deploy the
+writer before merging CLI changes, and roll back by reverting `main`. After a release merges,
+publish all five skills to the Multica workspace (each `SKILL.md` plus its `scripts/` and
+`references/`) and read them back byte for byte against `skills/`. An agent follows its attached
+workspace copy, which `ai-wiki update` does not touch; until it is republished, an agent whose
+copy's version stamp differs from `ai-wiki --version` reads the installed copy or stops blocked.

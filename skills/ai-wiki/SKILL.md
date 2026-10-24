@@ -24,11 +24,14 @@ ai-wiki bundle list        # bundles hosted by this server
 
 If the binary is missing, install it once with
 `uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`.
-Before the first lookup of a task, run `ai-wiki update --check` (one read of `main`). A `help`
-row (`available: true` or `skills` not `current`) → run `ai-wiki update && hash -r`, then re-read
-this file: it installs the latest CLI and this skill together. A failed check (offline, no git) →
-say so in one line and continue on the installed version. Never update between `maint begin` or
-`review begin` and its `end` (the run holds a lease): only before starting.
+Before the first lookup of a task, run `ai-wiki update --check` (one read of `main`). A `help` row
+(`available: true` or `skills` not `current`) → run `ai-wiki update && hash -r`; no `help` row → go
+on. After an update, if this file's `<!-- ai-wiki:version X -->` differs from `ai-wiki --version`,
+read the installed copy at the path `ai-wiki skill` lists; if you cannot, stop blocked:
+"workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one line, go
+on with the installed version. A failed `ai-wiki update` → report it in one line, never retry it or
+install by hand; go on only if `ai-wiki skill` shows this file `current`, else stop blocked. Never
+update between `maint begin` or `review begin` and its `end` (the run holds a lease).
 Never copy skills by hand; an ai-wiki without `update` needs the install command above.
 The token comes from `AIWIKI_TOKEN`, which wins over a saved token: never put a token in a
 command, chat or file. No token (`ai-wiki config show` has `token_source: null`) → stop and ask

@@ -14,8 +14,11 @@ description: >-
 Target **strict OKF v0.2 only**. This skill is the authoring protocol used inside the AI
 Wiki worker and by the curating maintainer (see Remote maintainer mode); other callers
 submit sources through `ai-wiki ingest` rather than editing a bundle directly.
-It ships with ai-wiki and is updated by `ai-wiki update`: the caller's preflight runs
-`ai-wiki update --check` before a run (never during one) and updates when it reports one.
+It ships with ai-wiki and is updated by `ai-wiki update`, which the caller's preflight runs before
+a run (never during one) when `ai-wiki update --check` shows one; a failed update is reported in one
+line: never retry it and never install by hand. After an update, if this skill's
+`<!-- ai-wiki:version X -->` differs from `ai-wiki --version`, read the installed copy at the path
+`ai-wiki skill` lists; if you cannot, stop blocked: "workspace Skill is behind the CLI; publish it".
 
 ## Core workflow
 

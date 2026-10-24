@@ -626,6 +626,9 @@ def main(argv=None) -> int:
         command_path="ai-wiki update", epilog=_examples("ai-wiki update --check", "ai-wiki update"), **common,
     )
     p_update.add_argument("--check", action="store_true", help="report installed vs latest and skill status")
+    p_update.add_argument("--state-dir", action="append", metavar="DIR",
+                          help=f"also refuse while a run of this state directory is live, e.g. a legacy `maintain` "
+                               f"ledger (repeatable; {_STATE_DIR} is always checked)")
     p_ws = sub.add_parser(
         "workspace", help="pull the published bundle into a local workspace; show local changes",
         command_path="ai-wiki workspace",

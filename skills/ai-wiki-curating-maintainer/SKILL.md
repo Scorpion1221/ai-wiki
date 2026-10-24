@@ -25,10 +25,14 @@ host (production and its shadow) apart. `$WS` is the `workspace` path `maint beg
 
 ## 1. Preflight
 
-Before `maint begin`, run `ai-wiki update --check`. `available: true` or `skills` not `current`
-(a `help` row) → run `ai-wiki update && hash -r`, then re-read this skill. A failed check
-(offline) → say so in one line and continue on the installed version. Never update between
-`maint begin` and `maint end`: the run holds the lease.
+Before `maint begin`, run `ai-wiki update --check`. A `help` row (`available: true` or `skills` not
+`current`) → run `ai-wiki update && hash -r`; no `help` row → go on. After an update, if this
+skill's `<!-- ai-wiki:version X -->` differs from `ai-wiki --version`, read the installed copy at
+the path `ai-wiki skill` lists; if you cannot, stop blocked:
+"workspace Skill is behind the CLI; publish it". A failed check (offline) → say so in one line, go
+on with the installed version. A failed `ai-wiki update` → report it in one line, never retry it or
+install by hand; go on only if `ai-wiki skill` shows this skill `current`, else stop blocked. Never
+update between `maint begin` and `maint end`: the run holds the lease.
 
 ```sh
 ai-wiki -b "$bundle" doctor --role curator

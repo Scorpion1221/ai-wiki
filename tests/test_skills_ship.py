@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -27,20 +28,25 @@ def test_the_skill_list_is_the_repository_list() -> None:
 
 
 def test_every_skill_updates_before_a_run_and_keeps_tokens_out_of_argv() -> None:
-    # Owner decision 2026-10-24: agents update the CLI themselves, shared Multica host included.
-    for name in skills.NAMES:
-        text = " ".join((ROOT / "skills" / name / "SKILL.md").read_text(encoding="utf-8").split())
-        assert "`ai-wiki update --check`" in text, f"{name}: its preflight must run `ai-wiki update --check`"
+    # Owner decision 2026-10-24: agents update the CLI themselves, shared Multica host included; the CLI
+    # refuses under a live run, and an agent whose attached (workspace) Skill lags the CLI reads the installed one.
+    import re
+
+    behind = '"workspace Skill is behind the CLI; publish it"'
+    prompts = [ROOT / "docs" / "prompts" / f"{role}-agent-instructions.md"
+               for role in ("production", "shadow", "auditor")]
+    for path in [ROOT / "skills" / name / "SKILL.md" for name in skills.NAMES] + prompts:
+        name = path.parent.name if path.name == "SKILL.md" else path.stem
+        text = " ".join(path.read_text("utf-8").split())
+        assert re.search(r"`ai-wiki update --check[^`]*`", text), f"{name}: its preflight runs `ai-wiki update --check`"
         assert "never reinstall" not in text.lower(), f"{name}: contradicts the self-update rule"
         assert "--token" not in text, f"{name}: a token goes in $AIWIKI_TOKEN, never in a command"
+        assert "`<!-- ai-wiki:version X -->`" in text and "`ai-wiki --version`" in text and behind in text, \
+            f"{name}: after an update, compare the followed Skill's stamp with the CLI, else stop blocked"
+        assert "never retry" in text and "install by hand" in text, f"{name}: a failed update is reported, not retried"
         if name != "okf-knowledge-curator":   # it ships with ai-wiki; its callers' preflights update it
-            assert "`ai-wiki update && hash -r`" in text and "Never update " in text, \
-                f"{name}: update, rehash and re-read before the run, never during its lease"
-    # The live agents' Multica instructions carry the same rule; they must not contradict their Skill.
-    for prompt in ("production", "shadow", "auditor"):
-        text = " ".join((ROOT / "docs" / "prompts" / f"{prompt}-agent-instructions.md").read_text("utf-8").split())
-        assert "`ai-wiki update --check`" in text and "`ai-wiki update && hash -r`" in text, prompt
-        assert "Never update between " in text and "never reinstall" not in text.lower(), prompt
+            assert re.search(r"`ai-wiki update[^`]*&& hash -r`", text) and "Never update " in text, \
+                f"{name}: update and rehash before the run, never during its lease"
 
 
 def test_install_status_and_refusals(tmp_path: Path, capsys) -> None:
@@ -108,6 +114,90 @@ def test_update_check_reports_without_installing(monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert "available: true" in out and "ai-wiki update" in out
     assert not called
+
+
+@pytest.fixture
+def updater(monkeypatch, tmp_path):
+    """`ai-wiki update` against a temp state dir, with main ahead and every subprocess recorded, never run."""
+    from aiwiki.cli import maint, update
+
+    state = tmp_path / "state"
+    monkeypatch.setattr(update, "_default_state_dir", lambda: state)
+    monkeypatch.setattr(update, "_latest", lambda: "f" * 40)
+    monkeypatch.setattr(update, "_receipt", lambda: {"commit": "a" * 40})
+    monkeypatch.setattr(update.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setenv("AIWIKI_SKILLS_HOME", str(tmp_path / "skills"))
+    calls = []
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        out = 'installed[1]{skill,status,skill_md}:\n  "ai-wiki","updated","/s/ai-wiki/SKILL.md"' \
+            if argv[1:] == ["skill", "install"] else "0.3.4"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(update.subprocess, "run", run)
+
+    def begin(kind: str, bundle: str = "kb", run_id: str = "WAIO-1") -> Path:
+        folder = "runs" if kind == "maint" else "reviews"
+        maint._write(state / folder / f"current-{maint._slug(bundle)}.json", {"run": run_id, "bundle": bundle})
+        maint._write(state / folder / maint._slug(run_id) / ("run.json" if kind == "maint" else "review.json"), {})
+        return state / folder
+
+    return state, calls, begin
+
+
+@pytest.mark.parametrize("kind", ["maint", "review"])
+def test_update_refuses_under_a_live_run_and_installs_nothing(updater, capsys, kind) -> None:
+    _state, calls, begin = updater
+    begin(kind)
+    assert cli.main(["update"]) == 1
+    out = capsys.readouterr().out
+    assert 'code: "run_live"' in out and "before your next run (never during one)" in out
+    assert f'"{kind}","kb","WAIO-1",0' in out
+    assert calls == []                                       # neither uv nor the skill install ran
+
+
+def test_update_goes_ahead_past_a_run_older_than_the_lease(updater, capsys) -> None:
+    import os
+
+    from aiwiki.service.maint_state import LEASE_TTL
+
+    _state, calls, begin = updater
+    old = time.time() - LEASE_TTL.total_seconds() - 60      # died without `end`: its lease has expired
+    for path in begin("maint").rglob("*"):
+        os.utime(path, (old, old))
+    assert cli.main(["update"]) == 0
+    out = capsys.readouterr().out
+    assert [argv[1:3] for argv in calls][:2] == [["tool", "install"], ["skill", "install"]]
+    assert "/s/ai-wiki/SKILL.md" in out                      # the new code's install table, with each SKILL.md
+
+
+def test_update_refuses_while_a_maintain_or_another_update_holds_its_lock(updater, tmp_path, capsys) -> None:
+    import fcntl
+
+    state, calls, _begin = updater
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    for path, argv, code in ((ledger / "runner.lock", ["update", "--state-dir", str(ledger)], "run_live"),
+                             (state / "update.lock", ["update"], "update_running")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert cli.main(argv) == 1
+            assert f'code: "{code}"' in capsys.readouterr().out
+    assert calls == []
+    assert cli.main(["update", "--state-dir", str(ledger)]) == 0  # both released: it installs
+
+
+def test_update_check_names_the_live_run_and_offers_no_update(updater, capsys) -> None:
+    _state, calls, begin = updater
+    begin("review", bundle="kb-shadow", run_id="WAIO-2")
+    assert cli.main(["update", "--check"]) == 0
+    out = capsys.readouterr().out
+    assert "available: true" in out and '"review","kb-shadow","WAIO-2",0' in out
+    assert "help[" not in out and "before your next run (never during one)" in out
+    assert "SKILL.md" in out                                 # where each installed skill is read from
+    assert calls == []
 
 
 def test_the_wheel_carries_the_skills(tmp_path: Path) -> None:

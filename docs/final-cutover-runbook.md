@@ -434,15 +434,17 @@ multica autopilot create --title "AI Wiki audit" --agent "$AUDITOR_AGENT" --mode
   --description "$(cat $FL/auditor-prompt.md)" --output json | jq -r '.id // .autopilot.id'   # AUDITOR_AP, no trigger
 ```
 
-**Auditor host.** The owner installs the CLI there once, as the runtime's OS user:
-`uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@$MERGE_SHA" && hash -r`
+**Auditor host.** The owner installs the CLI there once, as the runtime's OS user, from `main` (the
+release channel; the auditor's preflight keeps it current with `ai-wiki update`):
+`uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`
 and `ai-wiki config set --endpoint https://ai-wiki.yqbqnn.com/` (no token: the agent's env
 brings it). `config set --endpoint` keeps a token saved earlier, so check that user's saved
 token next (issue A1 shows it too); remove any but a `member:` one with
 `( umask 077; jq 'del(.token)' ~/.ai-wiki/config.json > ~/.ai-wiki/config.json.new && mv ~/.ai-wiki/config.json.new ~/.ai-wiki/config.json )`.
 
-**Issue R1** (runtime, `$PROD_AGENT`), title `[OPS] AI Wiki final cut-over R1: pin the CLI,
-isolation`. Text (`$FL/issue-R1.md`, with `<MERGE_SHA>` and `<AUDITOR_AGENT>` filled in):
+**Issue R1** (runtime, `$PROD_AGENT`), title `[OPS] AI Wiki final cut-over R1: update the CLI,
+isolation`. Text (`$FL/issue-R1.md`, with `<AUDITOR_AGENT>` filled in; merge to `main` and deploy
+the writer first, so `ai-wiki update` installs `<MERGE_SHA>`):
 
 ```text
 One-time operations task from the owner, not a maintenance run. In one bash shell on this host,
@@ -453,7 +455,7 @@ six commands failed (the last two report; a nonzero exit there is expected and n
 
 id -un; hostname
 find "$(uv tool dir)/ai-wiki" -path '*ai_wiki-*.dist-info/direct_url.json' -exec cat {} \;
-uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<MERGE_SHA>" && hash -r
+ai-wiki update && hash -r
 ai-wiki -b solvely-wiki health --json
 ai-wiki -b solvely-wiki doctor --role curator --json
 ai-wiki maint end --help
@@ -480,7 +482,7 @@ multica agent env get 1dcccd34-e9e4-48c7-a0a3-32c061d4c284 >/dev/null 2>"${TMPDI
 Neither issue prints a token: `env get` discards its output, and `doctor` shows principals and
 scopes only.
 
-Verify from R1: the first `find` line's `commit_id` is `PREV_CLI` (write it down); `health`
+Verify from R1: `ai-wiki update` installed `<MERGE_SHA>` (its `now` and `latest`); `health`
 shows `compatible: true` and the merged `client_version`; `doctor --role curator` shows `"ok":
 true`; `maint end --help` lists `--format`. Every agent on `df0fb673` shares this CLI; the
 legacy flow keeps working with it (its `maintain`, `audit` and `jobs` verbs are unchanged), so
@@ -510,8 +512,9 @@ on only with the owner's written acceptance of that risk, recorded with this run
 
 Rollback: `multica autopilot delete $AUDITOR_AP`, `multica agent archive $AUDITOR_AGENT`,
 `multica skill delete $AUDITOR_SKILL`, and on the host `pp remove process:ai-wiki-auditor;
-pp check; hup`. R1's CLI: the same issue with
-`uv tool install --force "git+https://github.com/Scorpion1221/ai-wiki@<PREV_CLI>" && hash -r`.
+pp check; hup`. R1's CLI: GitHub `main` is the release channel, so deploy the writer before merging
+CLI changes to `main`, and roll back by reverting `main`, then `ai-wiki update` on the host (the
+agents' next preflight does it too). There is no pinned CLI to restore.
 
 ### 2b. Git evidence on the auditor host (optional, owner)
 
