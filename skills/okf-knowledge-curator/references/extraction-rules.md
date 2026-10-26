@@ -34,11 +34,13 @@ Avoid tiny process fragments and verbatim issue mirrors.
 
 For each concept:
 
-1. Copy only source-backed facts and preserve the evidence boundary.
+1. Copy only source-backed facts and preserve the evidence boundary, including the source's
+   caveats: window, population, exclusions, and preliminary or not-a-conclusion limits.
 2. Add strict frontmatter: status, generated, and structured sources.
 3. Give cited sources stable ids and join claims with Markdown footnotes.
 4. Add links only to existing related concepts.
-5. Use `stale_after` for dynamic facts; do not store staleness as status.
+5. Use `stale_after` only when the evidence dates a fact (it expires sooner than 90 days after
+   generation, the default, or provably lasts longer); do not store staleness as status.
 6. Keep new/uncertain material transiently `draft` and omit `verified`; the independent
    audit finalizes retained records without faking verification.
 

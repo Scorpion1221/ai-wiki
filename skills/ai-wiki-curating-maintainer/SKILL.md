@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.4 -->
+<!-- ai-wiki:version 0.3.5 -->
 
 # AI Wiki Curating Maintainer
 
@@ -38,12 +38,11 @@ update between `maint begin` and `maint end`: the run holds the lease.
 ai-wiki -b "$bundle" doctor --role curator
 ```
 
-- Exit `0`: continue. Exit `4` lists the failed checks (`config`; `whoami`; `api`, this CLI
-  is older than the writer's `client.min`; `scopes`, exactly read, submit, curate; `actor`;
-  `writer`, a read mirror answered `/whoami`; `okf_version`, from `/health`, which the read
-  mirror answers, so it must serve the bundle; `state_dir`; `disk`; `tool:git|uv|multica`). An
-  unknown `doctor` (exit `2`) is an `api` failure. Stop and report it (§5, blocked).
-- Never swap tokens or edit `~/.ai-wiki/config.json` to get past a check; the operator fixes the host.
+- Exit `0`: continue. Exit `4` lists the failed checks (`config`; `whoami`; `api`: this CLI is
+  older than the writer's `client.min`; `scopes`: exactly read, submit, curate; `actor`; `writer`:
+  a read mirror answered; `okf_version`: the read mirror must serve the bundle; `state_dir`; `disk`;
+  `tool:git|uv|multica`); an unknown `doctor` (exit `2`) is an `api` failure. Stop and report it
+  (§5, blocked). Never swap tokens or edit `~/.ai-wiki/config.json` to get past a check.
 
 ## 2. Begin: deterministic collection
 
@@ -51,19 +50,17 @@ ai-wiki -b "$bundle" doctor --role curator
 ai-wiki -b "$bundle" maint begin --run "$run" --max-items "$max_items" --deadline "$deadline" --config "$cfg" --json
 ```
 
-`begin` reruns doctor, takes the maintainer lease (3 h, renewed by every call of the run),
-sweeps the last run's leftovers (its in-progress items return as `interrupted`, parked items
-become ready), resubmits failed Codex audits only while the writer still runs them and the
-config allows it (`audits.resubmit`), pulls the workspace, runs the repos and issues collectors,
-freezes their evidence on the writer and only then moves the cursors. Cursors never wait for
-audits. You judge none of this. Run `begin` and `propose` with a 600 s tool timeout; a `begin`
-cut off is safe to rerun.
+`begin` reruns doctor, takes the maintainer lease (3 h, renewed by every call of the run), sweeps
+the last run's leftovers (in-progress items return as `interrupted`, parked ones become ready),
+queues at most 20 new attention items (§3.2; its `attention` row never blocks the run), pulls the
+workspace, runs the repos and issues collectors, freezes their evidence (never a credential store:
+`*.secret.yaml`, `secrets.json`, a Kubernetes `kind: Secret`) and only then moves the cursors. You
+judge none of this. Run `begin` and `propose` with a 600 s tool timeout; rerun a `begin` cut off.
 
 - Exit `0`: go to §3. Exit `5`: a collector was partial or failed and kept what it could not
   collect; still run §3 (the report decides whether that blocks the issue).
 - Exit `4`: `failed` names `doctor`, `update_running` (an install held the CLI past 900 s; no lease
-  was taken), `lease` (`holder` shows who holds it) or `workspace`. Stop:
-  post the output and set the issue blocked (§5). Do not run `maint end`.
+  was taken), `lease` (`holder` shows who) or `workspace`. Stop: post the output, set blocked (§5).
 - Repeating `begin` with the same `--run` is safe: it keeps the run's budget, taken items and
   lease, and resets workspace edits of an item the writer took back.
 
@@ -90,18 +87,35 @@ Read the evidence in `evidence_dir` with `head`, `sed -n` or `rg`, never whole b
 knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a dated Reference.
 
 - None: `ai-wiki -b "$bundle" maint skip <item> --reason no_durable_knowledge`. Reasons are
-  `no_durable_knowledge`, `insufficient_evidence`, `out_of_scope` or `duplicate_of:<path>` (a
-  concept path of the bundle that already says exactly this); add `--note "<why>"` when it helps.
+  `no_durable_knowledge`, `insufficient_evidence`, `out_of_scope` or `duplicate_of:<path>`;
+  `--note "<why>"` names the files read. Judge every frozen file, not the brief or commit titles.
+  `duplicate_of` only when that concept already states every number, status, date, decision,
+  identifier and caveat of the evidence; otherwise update it. A changed value (image, flag, route,
+  model, status) of something a concept states is a dated update, not `out_of_scope`. Before
+  skipping an issue window holding only a status change, `add-evidence issue:<id>` for its history.
 - Too large for one pass (too much to read, or more than 20 concept files to change):
   `ai-wiki -b "$bundle" maint split <item> --group <file>,<file> --group <file>`, 2 to 20 groups
   placing every file of the item exactly once.
 - A file is missing: `ai-wiki -b "$bundle" maint add-evidence <item> <remote>@<commit>:<path>#L<x>-<y> --config "$cfg"`
-  (a tracked repository; drop `#L…` for the whole file) or with `issue:<identifier>#<comment-id>`
-  in place of the Git ref (a collectable issue). Evidence comes only from this deterministic
-  extraction, never from your own text. It prints the new file's name.
+  (a tracked repository; drop `#L…` for the whole file), or in place of the Git ref
+  `issue:<identifier>#<comment-id>` (a collectable issue) or `source:sources/<file>` (a frozen file
+  directly under `sources/`; on a line-ends refusal, pull the workspace as it says). It refuses a
+  credential store (a secret file, a Kubernetes Secret): cite the commit message or a document that
+  describes the change. Evidence comes only from this extraction, never from your own text.
 - A `rebaseline:<remote>` item holds only `baseline.md`, a new or re-based repository's summary:
   freeze the files worth reading with `add-evidence` at its `commit`, then curate them here or
   split with `baseline.md` in one group. Skip it only when nothing in the baseline is durable.
+- An `attention:<path>` item holds only `notice.md` (its `brief` says what to do): facts, never
+  evidence; never cite it (alone it is `notice_not_evidence`). Freeze what decides it with
+  `add-evidence`, fix or remove only what that evidence contradicts or does not support, cite it,
+  propose. Nothing decides it: skip `insufficient_evidence` (a new version queues a new item).
+  - `audit_unverified`, "the auditor's own verdict": the note says why this version is unsupported;
+    freeze the source it names (`source:sources/<file>`), a Git file or an issue.
+  - "the gate refused the requested …: D_…": after D_NOVEL_TOKEN, D_NEW_LINK, D_GROWTH or
+    D_CAVEAT_REMOVED the note is a rejected edit: never apply it without new evidence proving it.
+    D_NO_EVIDENCE: the concept cites no frozen source; add one, or skip.
+  - `stale` (basis `declared`, or `default`: 90 days after generation): check the claims against
+    evidence newer than the generation (a Git file or an issue, not a copy of a source it cites).
 
 **Evidence boundary.** Task logs are signals, not pages to mirror: prefer a task root's current
 README, status, PRD, report or diagnosis, durable docs, shared memory and solution docs.
@@ -111,9 +125,13 @@ proves only that its author said it then: write "a member (an agent) reported in
 <comment date>: …" with its numbers and window verbatim, as the latest comment in your evidence
 states it (a member's for a decision), never as a bare fact and never in a title or description.
 Leave out what a comment only points to (a query, attachment or link). Never use this automation's
-own issues or reports as sources. Refresh facts past `stale_after` only with new evidence; never
-bulk-renew. On a genuine conflict keep both claims, mark both concepts `contested` with
-`contradictions`, and add or update an OpenQuestion.
+own issues or reports as sources. A digest keeps the source's window, population, exclusions and
+preliminary or not-a-conclusion limits. Refresh a fact past its stale date (declared, or 90 days
+after generation) only with new evidence; never bulk-renew. Set `stale_after` only when evidence
+says the claim expires sooner, or lasts longer; a copy of a bundle source never extends it
+(`stale_after_needs_new_evidence`). On a genuine conflict keep both claims, mark both concepts
+`contested` with `contradictions`, and add or update an OpenQuestion. Correcting a claim: grep
+`$WS` for it and fix every copy in this changeset if it fits; else name the rest in the report (§5).
 
 ### 3.3 Curate in the workspace
 
@@ -160,39 +178,36 @@ Pass the same extra flags to both, and only when true:
 | propose exit `11` (429) | park `capacity`, then §5; the rest waits in the queue | - |
 | propose exit `4` | the token lost its rights: go to §5 | - |
 
-Fixes by code: `yaml_parse`, `missing_key`, `invalid_value`, `legacy_key`, `invalid_status` fix
-the frontmatter; `uncited_change`, `unknown_evidence_ref`, `resource_unresolvable` cite
-`evidence:packet` or revert the file; `broken_link`, `dangling_contradiction`, `duplicate_title`
-fix the link or update the existing concept; `body_shrink`, `identity_locked` restore the content
-or pass the allow flag with a true reason; `path_forbidden`, `service_owned_path`,
-`delete_forbidden` drop that file or change; `too_large` shorten the concept or split the item.
-`secret_detected` never echoes the value: remove it from your text; if the rule matched the
-evidence itself, park `model_output` naming the rule.
-`service_owned_key_ignored` is a warning: nothing to do.
+Fixes by code: `yaml_parse`, `missing_key`, `invalid_value`, `legacy_key`, `invalid_status` fix the
+frontmatter; `uncited_change`, `unknown_evidence_ref`, `resource_unresolvable` cite `evidence:packet`
+or revert the file; `broken_link`, `dangling_contradiction`, `duplicate_title` fix the link or update
+the existing concept; `body_shrink`, `identity_locked` restore the content or pass the allow flag
+with a true reason; `path_forbidden`, `service_owned_path`, `delete_forbidden` drop that file or
+change; `too_large` shorten the concept or split the item; `notice_not_evidence` add evidence
+(§3.2) and cite it; `stale_after_needs_new_evidence` keep `stale_after` as it was, or add a Git file
+or an issue. `secret_detected` never echoes the value: remove it from your text; if the rule matched
+the evidence itself, park `model_output` naming the rule. `service_owned_key_ignored`: a warning.
 
 ```sh
 ai-wiki -b "$bundle" maint park <item> --class model_output --detail "<codes, what failed>"
 ```
 
 Parking reverts the item's edits; the item returns at the next run's `begin`. `model_output`,
-`context` and `internal` count: the third counted park sends the item to needs_human, which
-alerts a person and blocks nothing else. Give an item about 20 minutes and at most 3 proposals;
-out of time or context, park it `--class context`. When your own context grows long, finish the
-current item and go to §5.
+`context` and `internal` count: the third counted park sends the item to needs_human, which alerts
+a person and blocks nothing else. Give an item about 20 minutes and at most 3 proposals; out of
+time or context, park it `--class context`. When your context grows long, finish the item, go to §5.
 
 ## 4. Failures and resuming
 
-- Progress lives on the writer (items, cursors, receipts); this host keeps only the run
-  directory under `~/.ai-wiki/state`, `$WS` included: edit only concept files in `$WS`, nothing
-  else there. Any attempt with the same run id resumes: rerun the §2 `begin`, then §3.
+- Progress lives on the writer (items, cursors, receipts); this host keeps only the run directory
+  under `~/.ai-wiki/state`, `$WS` included: edit only concept files in `$WS`. Any attempt with the
+  same run id resumes: rerun the §2 `begin`, then §3. A run that dies needs no cleanup: the lease
+  expires within 3 h and the next `begin` returns its item uncounted and resets the workspace.
 - A resumed item with edits: inspect them with `ai-wiki -b "$bundle" workspace status --dir "$WS"`
   and `ai-wiki -b "$bundle" workspace diff --dir "$WS"`, then finish or park it.
-- A verb exits `1` (writer unreachable, unexpected answer): retry it once after a minute. A
-  second failure: go to §5.
-- `propose` resends identical bytes itself and the writer dedupes them: never re-POST, curl, poll
-  jobs or resubmit by hand.
-- A run that dies needs no cleanup: the lease expires within 3 h and the next `begin` returns
-  its item uncounted (`interrupted`) and resets the workspace.
+- A verb exits `1` (writer unreachable, unexpected answer): retry it once after a minute; a second
+  failure: go to §5. `propose` resends identical bytes itself and the writer dedupes them: never
+  re-POST, curl, poll jobs or resubmit by hand.
 - Parked, rejected and needs_human items are the watchdog's: report them; never retry or block on them.
 
 ## 5. End and report
@@ -207,28 +222,29 @@ ai-wiki -b "$bundle" maint end --run "$run" --format md > "${TMPDIR:-/tmp}/ai-wi
 `end` releases the lease and renders the report from the writer's receipts (exit `0`; `3` new
 needs_human items, still done; `4` never collected). Its first line ends `status=done` or
 `status=blocked`: the issue status. Only append to that file (`cat >> … <<'EOF'`), at most 5
-lines on notable knowledge changes (concept paths, what changed; never claim verification). Then:
+lines on notable knowledge changes (concept paths, what changed, copies of a corrected claim left
+for later; never claim verification). Then:
 
 ```sh
 multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin < "${TMPDIR:-/tmp}/ai-wiki-comment-$run.md"
 multica issue status "$MULTICA_ISSUE_ID" <done|blocked> --no-start   # the report's status=
 ```
 
-No report (preflight or `begin` failed closed, or `end` failed twice per §4 so the file opens with
-`error:`): post it once, set blocked, stop; the lease lapses and the next `begin` resumes. Else a
-comment not opening with the report's first line is a defect: post the file again.
+No report (preflight or `begin` failed closed: never run `end` then; or `end` failed twice per §4,
+so the file opens with `error:`): post the output once, set blocked, stop; the lease lapses and the
+next `begin` resumes. Else a comment not opening with the report's first line is a defect: post the
+file again.
 
 ## 6. Hard prohibitions
 
-- Never write `generated`, `verified` or `status`, and never claim verification in prose; the
-  gate stamps them. Never self-audit: no `ai-wiki audit`, no auditor or Codex calls, and never
-  wait for an audit.
+- Never write `generated`, `verified` or `status`, or claim verification in prose; the gate stamps
+  them. Never self-audit: no `ai-wiki audit`, no auditor or Codex calls, never wait for an audit.
 - Never touch `SCHEMA.md`, `purpose.md`, `index.md`, `log.md`, `index-meta.yaml`, `viz.html`,
   `sources/` or `.ai-wiki/`. Never delete or rename a concept.
 - Never run Git: no clone, commit, push, rebase or conflict resolution in the workspace, the
   bundle or a reference repository.
 - No legacy or side writes: no `ai-wiki ingest`, `ai-wiki maintain`, manifests, v4 checkpoints,
   `admin` verbs, token or `~/.ai-wiki/config.json` edits; write `cfg` only as the prompt gives it.
-- No hand-written evidence, no copied secrets, no `stale_after` extension without new evidence.
+- No hand-written evidence, no copied secrets, no `stale_after` extension without outside evidence.
 - No subagents, child issues, background model processes, or monitoring, polling and retries
   of your own. A deterministic watchdog pages humans.

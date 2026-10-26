@@ -47,9 +47,11 @@ and non-empty structured `sources`.
   bundle-root absolute `/sources/<file>` for root source snapshots because relative paths
   resolve from the concept document.
 - `verified`: optional real verification events; editing never creates/refreshes them.
-  Trust follows all verification history. When no event is at or after `generated.at`,
-  `verification_current` is false and the current revision is unconfirmed.
-- `stale_after`: optional absolute `YYYY-MM-DD`; stale is not a status.
+  Trust follows all verification history. When no event is at or after `generated.at` (for
+  the generator's own process event, 12 h after it), `verification_current` is false and the
+  current revision is unconfirmed.
+- `stale_after`: optional absolute `YYYY-MM-DD`; stale is not a status. Absent: stale 90 days
+  after `generated.at`, never fresh by default.
 - Extensions such as `confidence`, `contested`, `contradictions`, and `source_sha256` are allowed.
 
 Forbidden v0.1 forms: `timestamp`, `last_verified_at`, string sources,

@@ -58,12 +58,14 @@ A bare `verified: {by, at}` mapping is valid and means a one-element list. Trust
 - only non-human actors → machine-confirmed
 - any `human:` actor → human-reviewed
 
-Freshness is derived by comparing the current date with `stale_after`; missing
-`stale_after` means unspecified, not proven fresh. `generated` and `verified` are
-independent: editing updates `generated`, never verification. Historical verification may
-be retained. The OKF trust tier still derives from all `verified` history; separately, when
-no `verified.at >= generated.at`, `verification_current` is false, so the current revision
-is not confirmed and must be re-audited.
+Freshness is derived by comparing the current date with `stale_after`: `fresh` before it,
+`stale` on and after it. A missing `stale_after` means `unspecified` until `generated.at` + 90
+days, then `stale` (`freshness_basis: default`); the default never proves a concept fresh.
+`generated` and `verified` are independent: editing updates `generated`, never verification.
+Historical verification may be retained. The OKF trust tier still derives from all `verified`
+history; separately, when no `verified.at >= generated.at` (for an event by the concept's own
+`process:` generator, `>= generated.at + 12 h`), `verification_current` is false, so the
+current revision is not confirmed and must be re-audited.
 
 ## Per-claim source join
 
