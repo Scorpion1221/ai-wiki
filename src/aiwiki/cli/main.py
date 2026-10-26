@@ -3,7 +3,7 @@
 One server (URL + token) hosts many *bundles* (knowledge bases). You configure the
 connection once, then list / switch / create bundles that live on that server:
 
-    ai-wiki config set --endpoint https://host/ --token <tok>   # connect to the server
+    ai-wiki config set --endpoint https://host/   # connect to the server (token: $AIWIKI_TOKEN)
     ai-wiki bundle list                # bundles hosted on the server (active/default state)
     ai-wiki bundle use solvely-web     # switch the active bundle
     ai-wiki bundle create my-kb        # create a new empty bundle on the server
@@ -13,7 +13,8 @@ connection once, then list / switch / create bundles that live on that server:
 Config lives at ~/.ai-wiki/config.json (override with $AIWIKI_CONFIG):
     {"endpoint": "https://host/", "token": "<tok>", "bundle": "<active-name>"}
 $AIWIKI_TOKEN, when set, is used instead of the saved token, so an agent's injected token
-never has to be written to the file.
+never has to be written to the file or a command line (`config set --token` is for a human at
+a terminal; hints never advertise it).
 Older configs (a flat {endpoint, token}, or the {current, bundles:{...}} form) are read
 and migrated transparently.
 """
@@ -37,6 +38,8 @@ from aiwiki.cli.toon import emit, emit_error, object_lines, table_lines
 from aiwiki.version import VERSION
 
 CONFIG = Path(os.environ.get("AIWIKI_CONFIG", str(Path.home() / ".ai-wiki" / "config.json")))
+# Every "how to connect" hint: the token comes from the environment, never a command line an agent may echo.
+CONNECT_HINT = "set AIWIKI_TOKEN in the environment, then: ai-wiki config set --endpoint <url>"
 # A real User-Agent — the urllib default ("Python-urllib/x") trips Cloudflare bot rules (error 1010).
 _UA = f"ai-wiki-cli/{VERSION} (+https://github.com/Scorpion1221/ai-wiki)"
 _DESCRIPTION = "Read and maintain a curated OKF knowledge bundle over its service API"
@@ -185,7 +188,7 @@ def _conn() -> tuple[str, str]:
     token = _token(cfg)
     if not cfg.get("endpoint") or not token:
         _fail("not configured: endpoint and token (saved or $AIWIKI_TOKEN) are required",
-              help_command='ai-wiki config set --endpoint <url> --token <token>')
+              help_command=CONNECT_HINT)
     return cfg["endpoint"], token
 
 
@@ -367,7 +370,7 @@ def _home() -> int:
         emit(
             object_lines("connection", {"configured": False}),
             table_lines("help", ({
-                "command": "ai-wiki config set --endpoint <url> --token <token>",
+                "command": CONNECT_HINT,
                 "purpose": "connect to a server",
             },), ("command", "purpose")),
         )
@@ -460,7 +463,8 @@ def main(argv=None) -> int:
     c = sub.add_parser(
         "config", help="show config / set the server endpoint+token",
         command_path="ai-wiki config",
-        epilog=_examples("ai-wiki config show", "ai-wiki config set --endpoint <url> --token <token>"),
+        epilog=_examples("ai-wiki config show", "ai-wiki config set --endpoint <url>")
+        + "\n\nThe token comes from $AIWIKI_TOKEN in the environment, which wins over a saved one.",
         **common,
     )
     csub = c.add_subparsers(dest="action", required=True)
@@ -468,12 +472,11 @@ def main(argv=None) -> int:
         "set", help="save an endpoint and/or token",
         command_path="ai-wiki config set",
         epilog=_examples(
-            "ai-wiki config set --endpoint https://wiki.example.com --token <token>",
-            "ai-wiki config set --token <new-token>",
-        ), **common,
+            "ai-wiki config set --endpoint https://wiki.example.com",
+        ) + "\n\nThe token comes from $AIWIKI_TOKEN in the environment, which wins over a saved one.", **common,
     )
     cset.add_argument("--endpoint")
-    cset.add_argument("--token")
+    cset.add_argument("--token", help="save a token: for a human at a terminal; agents use AIWIKI_TOKEN")
     cshow = csub.add_parser(
         "show", help="show the current connection with token redacted",
         command_path="ai-wiki config show",
@@ -625,6 +628,9 @@ def main(argv=None) -> int:
         command_path="ai-wiki update", epilog=_examples("ai-wiki update --check", "ai-wiki update"), **common,
     )
     p_update.add_argument("--check", action="store_true", help="report installed vs latest and skill status")
+    p_update.add_argument("--state-dir", action="append", metavar="DIR",
+                          help=f"also refuse while a run of this state directory is live, e.g. a legacy `maintain` "
+                               f"ledger (repeatable; {_STATE_DIR} is always checked)")
     p_ws = sub.add_parser(
         "workspace", help="pull the published bundle into a local workspace; show local changes",
         command_path="ai-wiki workspace",
@@ -1101,8 +1107,8 @@ def _cmd_config(a) -> int:
     cfg = _normalize(_load())
     if a.action == "set":
         if not a.endpoint and not a.token:
-            _fail("provide --endpoint and/or --token",
-                  help_command="ai-wiki config set --endpoint <url> --token <token>", code=2)
+            _fail("provide --endpoint (the token comes from $AIWIKI_TOKEN)",
+                  help_command=CONNECT_HINT, code=2)
         if a.endpoint:
             cfg["endpoint"] = a.endpoint
         if a.token:

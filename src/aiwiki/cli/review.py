@@ -90,7 +90,7 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
           as_human: bool = False) -> tuple[int, dict]:
     """doctor → auditor lease → workspace pull → the backlog's size. ``as_human`` preflights a
     human reviewer (design §5.5), whom the writer does not hold to the backlog."""
-    from aiwiki.cli import doctor, workspace
+    from aiwiki.cli import doctor, update, workspace
 
     folder = _folder(state_dir, run)
     state = maint._read(folder / "review.json") or {  # a begin repeated within the run keeps its record
@@ -102,21 +102,29 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
     if not checked["ok"]:
         failed = [row for row in checked["checks"] if not row["ok"]]
         return PREFLIGHT, {"run": run, "failed": "doctor", "checks": failed}
+    # Shared update.lock until the run pointer is written: `ai-wiki update` never installs under a beginning run.
+    started = update.UpdateLock(shared=True)
+    if not started.acquire():
+        return PREFLIGHT, {"run": run, "failed": "update_running", "error": f"{started.path} stayed held for "
+                           f"{update.LOCK_TIMEOUT} s by an `ai-wiki update`; no lease was taken"}
     try:
-        lease = maint._call("POST", "/maint/lease/auditor", bundle=bundle, run=run)[1]["lease"]
-    except MaintError as exc:
-        return PREFLIGHT, {"run": run, "failed": "lease", "error": str(exc), "holder": exc.detail}
-    state["workspace"] = str((workspace_dir or folder / "ws").expanduser().resolve())
-    try:
-        pulled = workspace.pull(Path(state["workspace"]), bundle)
-        found = _backlog(bundle)
-    except (MaintError, workspace.WorkspaceError, OSError) as exc:
-        with contextlib.suppress(MaintError):
-            maint._call("DELETE", "/maint/lease/auditor", bundle=bundle, run=run)
-        return PREFLIGHT, {"run": run, "failed": "workspace", "error": str(exc)}
-    state["mode"] = found.get("mode")  # codex: the writer still runs Codex audits, so this run shadows them
-    _save(state_dir, state)
-    maint._write(_pointer(state_dir, bundle), {"run": run, "bundle": bundle})
+        try:
+            lease = maint._call("POST", "/maint/lease/auditor", bundle=bundle, run=run)[1]["lease"]
+        except MaintError as exc:
+            return PREFLIGHT, {"run": run, "failed": "lease", "error": str(exc), "holder": exc.detail}
+        state["workspace"] = str((workspace_dir or folder / "ws").expanduser().resolve())
+        try:
+            pulled = workspace.pull(Path(state["workspace"]), bundle)
+            found = _backlog(bundle)
+        except (MaintError, workspace.WorkspaceError, OSError) as exc:
+            with contextlib.suppress(MaintError):
+                maint._call("DELETE", "/maint/lease/auditor", bundle=bundle, run=run)
+            return PREFLIGHT, {"run": run, "failed": "workspace", "error": str(exc)}
+        state["mode"] = found.get("mode")  # codex: the writer still runs Codex audits, so this run shadows them
+        _save(state_dir, state)
+        maint._write(_pointer(state_dir, bundle), {"run": run, "bundle": bundle})
+    finally:
+        started.release()
     return OK, {"run": run, "bundle": bundle, "workspace": state["workspace"], "base_revision": pulled["base_revision"],
                 "lease_expires_at": lease.get("expires_at"), "mode": found.get("mode"), "epoch": found.get("epoch"),
                 "backlog": found.get("total"), "seed": found.get("seed"),

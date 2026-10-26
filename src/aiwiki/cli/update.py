@@ -3,15 +3,24 @@
 ``update`` reads ``main``'s head from the repository, installs exactly that commit with ``uv tool install --force``,
 then runs the newly installed ``ai-wiki skill install`` (the new code installs its own skills). When the CLI is
 already at ``main`` it still repairs stale skills. A failed skill step never undoes the CLI step; it is reported.
+
+``update`` never replaces the CLI under a live run on this host: it refuses (exit 1, ``run_live``) while a
+``maint`` or ``review`` run of the state directory was active within the writer's lease TTL, or a legacy
+``maintain`` holds its ``runner.lock``. It checks and installs holding ``<state dir>/update.lock`` exclusively;
+``maint begin`` and ``review begin`` hold it shared until their run pointer is written, so neither starts under
+the other. Every holder waits up to ``LOCK_TIMEOUT`` for the lock (``--check`` too, for an install) and only then
+refuses (``update_running``). ``--check`` reports a live run and then offers no update.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from aiwiki import skills
@@ -20,6 +29,72 @@ from aiwiki.version import VERSION
 
 REPO = os.environ.get("AIWIKI_UPDATE_REPO", "https://github.com/Scorpion1221/ai-wiki")
 BRANCH = "main"
+LATER = "before your next run (never during one)"
+LOCK_TIMEOUT = 900  # seconds: the uv install's own timeout
+LIVE_FIELDS = ("kind", "bundle", "run", "age_minutes")
+
+
+def _held(path: Path) -> bool:
+    """Whether another open file holds an flock on ``path``: a non-blocking probe that never creates it."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _live(state_dirs: list[Path]) -> list[dict]:
+    """The runs on this host an update must not replace the CLI under.
+
+    A ``maint``/``review`` pointer counts while its run wrote locally within the writer's lease TTL (every verb
+    of a run saves its record, as every call renews the lease); a run that died without ``end`` stops counting
+    when its lease would have expired. A legacy ``maintain`` counts while it holds ``runner.lock``.
+    """
+    from aiwiki.cli import maint
+    from aiwiki.service.maint_state import LEASE_TTL
+
+    now, rows = time.time(), []
+    for state_dir in state_dirs:
+        for kind, folder, record in (("maint", "runs", "run.json"), ("review", "reviews", "review.json")):
+            for pointer in sorted((state_dir / folder).glob("current-*.json")):
+                current = maint._read(pointer) or {}
+                touched = [pointer]
+                if isinstance(current.get("run"), str):
+                    run_dir = state_dir / folder / maint._slug(current["run"])
+                    touched += [run_dir / record, run_dir / "proposals.jsonl"]
+                age = now - max(_mtime(path) for path in touched)
+                if age < LEASE_TTL.total_seconds():
+                    rows.append({"kind": kind, "bundle": current.get("bundle"), "run": current.get("run"),
+                                 "age_minutes": max(int(age // 60), 0)})
+        if _held(state_dir / "runner.lock"):
+            ledger = maint._read(state_dir / "state.json") or {}
+            rows.append({"kind": "maintain", "bundle": ledger.get("bundle"), "run": None, "age_minutes": None})
+    return rows
+
+
+def _refuse(code: str, message: str, live: list[dict]) -> int:
+    emit(object_lines("error", {"kind": "error", "code": code, "message": message}),
+         table_lines("live_runs", live, LIVE_FIELDS) if live else [])
+    return 1
+
+
+def _with_skill_md(rows: list[dict]) -> list[dict]:
+    return [{**row, "skill_md": str(Path(row["path"]) / "SKILL.md")} for row in rows]
 
 
 def _receipt() -> dict:
@@ -63,13 +138,13 @@ def skill_command(args) -> int:
     if args.action == "install":
         rows = skills.install(dest, tuple(args.names) or skills.NAMES)
         emit(object_lines("skills", {"version": VERSION, "dir": str(dest or skills.default_dir())}),
-             table_lines("installed", rows, ("skill", "status", "path")))
+             table_lines("installed", _with_skill_md(rows), ("skill", "status", "skill_md")))
         return 0
     rows = skills.status(dest)
     overall = _summary(rows)
     where = str(dest or skills.default_dir())
     groups = [object_lines("skills", {"status": overall, "version": VERSION, "dir": where}),
-              table_lines("skills", rows, ("skill", "status", "installed", "packaged"))]
+              table_lines("skills", _with_skill_md(rows), ("skill", "status", "installed", "packaged", "skill_md"))]
     if overall == "stale":
         install = "ai-wiki skill install" + (f" --dir {dest}" if dest else "")
         groups.append(table_lines("help", ({"command": install, "purpose": "install the skills this ai-wiki ships"},),
@@ -82,7 +157,70 @@ def skill_command(args) -> int:
     return 0
 
 
+def _default_state_dir() -> Path:
+    """The state directory ``maint`` and ``review`` default to."""
+    from aiwiki.cli import main as cli
+
+    return cli._STATE_DIR.expanduser()
+
+
+class UpdateLock:
+    """``update.lock`` in the default state directory, whatever ``--state-dir`` a run uses: exclusive while
+    ``update`` checks for live runs and installs, shared while a run begins (until its pointer is written)."""
+
+    def __init__(self, *, shared: bool):
+        self.path, self.shared, self.fd = _default_state_dir() / "update.lock", shared, None
+
+    def acquire(self, *, create: bool = True) -> bool:
+        """Wait up to LOCK_TIMEOUT; False when it stayed held. Without ``create``, no lock file means no holder."""
+        if create:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT if create else os.O_RDONLY, 0o600)
+        except FileNotFoundError:
+            return True
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(self.fd, (fcntl.LOCK_SH if self.shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    self.release()
+                    return False
+                time.sleep(0.1)
+
+    def release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)  # drops the flock
+            self.fd = None
+
+
+def _busy(lock: UpdateLock) -> int:
+    return _refuse("update_running", f"{lock.path} stayed held for {LOCK_TIMEOUT} s (an install, or a run "
+                   "beginning); nothing was installed. Go on with the installed version and update " + LATER, [])
+
+
 def update_command(args) -> int:
+    # The default state directory always; ``--state-dir`` adds others, such as a legacy ``maintain`` ledger.
+    dirs = list(dict.fromkeys([_default_state_dir(), *(Path(d).expanduser() for d in args.state_dir or ())]))
+    lock = UpdateLock(shared=args.check)
+    if not lock.acquire(create=not args.check):  # --check waits for an install, then reports what it left
+        return _busy(lock)
+    try:
+        if args.check:
+            lock.release()
+            return _check(dirs)
+        live = _live(dirs)
+        if live:
+            return _refuse("run_live", "a run is live on this host, so the CLI and skills under it stay as they are; "
+                           "nothing was installed. Go on with the installed version and update " + LATER, live)
+        return _install()
+    finally:
+        lock.release()
+
+
+def _status() -> tuple[dict, str, list[dict]]:
     installed = _receipt()
     latest = _latest()
     rows = skills.status()
@@ -91,14 +229,28 @@ def update_command(args) -> int:
     if installed.get("editable"):
         data["available"] = False
         data["note"] = "an editable checkout install: update it with git, then `ai-wiki skill install`"
-    if args.check:
-        groups = [object_lines("update", data)]
-        if data["available"] or data["skills"] != "current":
-            groups.append(table_lines("help", ({"command": "ai-wiki update",
-                                                "purpose": "install the latest CLI and its skills together"},),
-                                      ("command", "purpose")))
-        emit(*groups)
-        return 0
+    return data, latest, rows
+
+
+def _check(dirs: list[Path]) -> int:
+    data, _latest_sha, rows = _status()
+    live = _live(dirs)
+    if live:
+        data["wait"] = "a run is live on this host: update " + LATER
+    groups = [object_lines("update", data),
+              table_lines("skills", _with_skill_md(rows), ("skill", "status", "skill_md"))]
+    if live:
+        groups.append(table_lines("live_runs", live, LIVE_FIELDS))  # and no help row: nothing to run now
+    elif data["available"] or data["skills"] != "current":
+        groups.append(table_lines("help", ({"command": "ai-wiki update",
+                                            "purpose": "install the latest CLI and its skills together, " + LATER},),
+                                  ("command", "purpose")))
+    emit(*groups)
+    return 0
+
+
+def _install() -> int:
+    data, latest, _rows = _status()
     if data["available"]:
         uv = shutil.which("uv")
         if not uv:
@@ -122,9 +274,12 @@ def update_command(args) -> int:
         emit(object_lines("update", data), step.stdout.strip().splitlines())
         return step.returncode
     data["skills"] = "current"
-    groups = [object_lines("update", data)]
+    # The new code's own `skill install` table: where each installed SKILL.md now is.
+    groups = [object_lines("update", data), step.stdout.strip().splitlines()]
     if data["available"]:
-        groups.append(table_lines("help", ({"command": "re-read the ai-wiki skill you are following",
-                                            "purpose": "it changed with the CLI"},), ("command", "purpose")))
+        groups.append(table_lines("help", ({
+            "command": "compare the <!-- ai-wiki:version --> of the Skill you follow with `now`",
+            "purpose": "if they differ, read the installed SKILL.md listed above; if you cannot, stop blocked: "
+                       "workspace Skill is behind the CLI; publish it"},), ("command", "purpose")))
     emit(*groups)
     return 0

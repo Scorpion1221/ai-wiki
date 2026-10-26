@@ -99,7 +99,7 @@ def run(role: str, *, bundle: str | None, state_dir: Path, skills_dir: Path | No
 
     config = cli._normalize(cli._load())
     if not config.get("endpoint") or not cli._token(config):
-        check("config", False, "no endpoint or token; run: ai-wiki config set --endpoint <url> --token <token>")
+        check("config", False, f"no endpoint or token; {cli.CONNECT_HINT}")
     else:
         _server(role, bundle, check)
     try:

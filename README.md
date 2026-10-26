@@ -186,6 +186,8 @@ ai-wiki skill install            # into ~/.agents/shared-skills if the host has 
                                  # (--dir or $AIWIKI_SKILLS_HOME override; update uses the same directory)
 ai-wiki update --check           # installed vs GitHub main, and skill status
 ai-wiki update                   # uv-installs main's head, then the new code installs its own skills
+                                 # (refuses, exit 1 run_live, while a maint/review run or a legacy
+                                 # maintain is live on this host; --state-dir adds a ledger)
 ```
 
 Install keeps a platform-managed `multica-metadata.json` but replaces every other file in
