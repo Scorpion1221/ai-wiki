@@ -81,6 +81,8 @@ class Concept:
     current_verified_by: list[str] = field(default_factory=list)
     current_verified_at: str = ""
     stale_after: str = ""
+    stale_on: str = ""
+    freshness_basis: str = ""
     sources: list[dict[str, Any]] = field(default_factory=list)
     links_to: list[str] = field(default_factory=list)
 
@@ -104,6 +106,8 @@ class Concept:
                 "current_verified_by": self.current_verified_by,
                 "current_verified_at": self.current_verified_at,
                 "stale_after": self.stale_after,
+                "stale_on": self.stale_on,
+                "freshness_basis": self.freshness_basis,
                 "sources": self.sources,
                 "size": 30 + min(60, len(self.body) // 200),
             }
@@ -183,6 +187,8 @@ def _walk_concepts(bundle_root: Path) -> list[Concept]:
             current_verified_by=meta["current_verified_by"],
             current_verified_at=meta["current_verified_at"],
             stale_after=meta["stale_after"],
+            stale_on=meta["stale_on"],
+            freshness_basis=meta["freshness_basis"],
             sources=[source for source in sources if isinstance(source, dict)],
             links_to=_extract_links(body or "", md_path.parent, bundle_root),
         ))

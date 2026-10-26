@@ -11,10 +11,11 @@ record is written with fsync + atomic rename, so a crash leaves the old or the n
 Items move ready -> in_progress(run) -> curated | skipped | duplicate | split |
 needs_access | needs_conversion | needs_human, or -> parked, which returns to ready when the
 next maintainer run takes the lease. Attempt caps and non-retryable failures move an item to
-needs_human; that only raises an alert and never blocks any other item. A member submission
-(``origin.kind`` member, see ``service.inbox``) is queued without a lease and records the
-commit of its redacted copy (``intake``), and an unfinished one leaves the queue as requeued
-when an admin hands it back to the Codex path.
+needs_human; that only raises an alert and never blocks any other item. A new run also queues
+the writer's attention items (``service.attention``, design §5.3) through the same enqueue
+path. A member submission (``origin.kind`` member, see ``service.inbox``) is queued without a
+lease and records the commit of its redacted copy (``intake``), and an unfinished one leaves
+the queue as requeued when an admin hands it back to the Codex path.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -31,6 +32,7 @@ import json
 import os
 import re
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -62,6 +64,7 @@ ADMIN_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conve
 REOPENABLE = frozenset({"needs_human", "skipped", "duplicate", "needs_access", "needs_conversion", "parked"})
 MAX_FILES = 64
 MAX_CHILDREN = 20
+ATTENTION_CAP = 20  # new attention items one run start creates; the oldest go first, the rest wait
 MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
 REQUEUEABLE = frozenset({"ready", "parked", "needs_human"})  # member items the inbox rollback hands to Codex
 _ID = re.compile(r"it_[0-9a-f]{12}")
@@ -327,12 +330,15 @@ def require_lease(bundle: Path, role: str, *, principal: str, run: str | None) -
         return _hold(bundle, role, principal, run, _now())
 
 
-def acquire_lease(bundle: Path, role: str, *, principal: str, run: str | None) -> dict:
+def acquire_lease(bundle: Path, role: str, *, principal: str, run: str | None,
+                  attention: Callable[[], list[dict]] | None = None) -> dict:
     """Take the run-level lease for ``role``. A live lease of another run is a 409 with its holder.
 
     Taking the maintainer lease starts a run: items left in progress by an earlier or
     interrupted run return to ready (class ``interrupted``) and parked items become ready.
     The run that already holds the live lease only renews it; its own item stays claimed.
+    ``attention`` lists the attention items due (``service.attention.plan``); a new run
+    queues them, and its counts are the answer's ``attention``.
     """
     if role not in ROLES:
         raise MaintError(404, "not_found", f"unknown lease role: {role}")
@@ -350,7 +356,13 @@ def acquire_lease(bundle: Path, role: str, *, principal: str, run: str | None) -
         if role != "maintainer":
             return {"lease": lease}
         swept = {"interrupted": [], "unparked": [], "build_retry": []} if live else _begin_run(bundle, now)
+    if attention is None:
         return {"lease": lease, **swept}
+    # Outside maint_state's _LOCK, so item calls are not held up while the bundle is read; the
+    # lease is already the run's. The lease route still holds the writer's lifecycle lock
+    # (worker.serialized_lifecycle, via app._maint), so commits and intake wait for the collection.
+    return {"lease": lease, **swept, "attention": {"status": "not_run", "reason": "the run already held the lease"}
+            if live else _attention(bundle, attention)}
 
 
 def release_lease(bundle: Path, role: str, *, principal: str, run: str | None) -> dict:
@@ -398,6 +410,39 @@ def _begin_run(bundle: Path, now: datetime) -> dict:
             continue
         _save(bundle, item, now)
     return {"interrupted": interrupted, "unparked": unparked, "build_retry": build_retry}
+
+
+def _attention(bundle: Path, collect: Callable[[], list[dict]]) -> dict:
+    """Queue the attention items due, the oldest first, until ATTENTION_CAP of them are new.
+
+    A duplicate (a notice already queued or closed for that version) or a merge into a waiting
+    item costs nothing and still happens past the cap, so a backlog of skipped notices never
+    starves the rest and a waiting item always takes the newer notice; only the new items past
+    the cap are ``deferred`` to the next run. Nothing here may stop the run: a failure is
+    reported in the answer instead.
+    """
+    try:
+        specs, invalid = [], 0
+        for raw in collect():
+            try:
+                specs.append(_spec(raw))
+            except MaintError:  # one concept the queue cannot hold (a path past 512) spoils no other
+                invalid += 1
+        result = {"status": "ok", "due": len(specs), "cap": ATTENTION_CAP, "created": 0, "merged": 0,
+                  "duplicate": 0, "deferred": 0, "invalid": invalid, "by_reason": {}}
+        with _LOCK:
+            now = _now()
+            current = _items(bundle)
+            for spec, files in specs:
+                outcome = _enqueue(bundle, spec, files, "service", current, now,
+                                   create=result["created"] < ATTENTION_CAP)["result"]
+                result[outcome] += 1
+                if outcome == "created":
+                    reason = str(spec["origin"].get("reason"))
+                    result["by_reason"][reason] = result["by_reason"].get(reason, 0) + 1
+        return result
+    except Exception as exc:  # noqa: BLE001 — attention never blocks the maintainer lease
+        return {"status": "failed", "error": redact(f"{type(exc).__name__}: {exc}")[:300]}
 
 
 # --- items ---------------------------------------------------------------------------
@@ -452,7 +497,8 @@ def _blob(bundle: Path, item_id: str, meta: dict) -> bytes:
 
 
 def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principal: str, items: list[dict],
-             now: datetime) -> dict:
+             now: datetime, *, create: bool = True) -> dict:
+    """``create`` False still dedupes and merges, but answers ``deferred`` for a new item."""
     key = spec["item_key"]
     for item in items:
         if key == item["item_key"] or any(v.get("item_key") == key for v in item["versions"]):
@@ -476,6 +522,8 @@ def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principa
                       collected_at=_iso(now))
         _save(bundle, target, now)
         return {"id": target["id"], "item_key": key, "result": "merged", "status": target["status"]}
+    if not create:
+        return {"id": None, "item_key": key, "result": "deferred", "status": None}
     item_id = "it_" + key[:12]
     if (_item_dir(bundle, item_id) / "item.json").exists():
         raise MaintError(500, "internal", f"item id collision: {item_id}")

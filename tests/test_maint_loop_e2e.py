@@ -98,7 +98,9 @@ def control_repo(tmp_path: Path) -> tuple[Path, Path, str]:
     first = commit(work, "initial", {
         "README.md": "control\n", "tasks/funnel/README.md": "# Funnel task\n\nOwner: web team\n",
         "memory/learnings.md": "- first lesson\n", "docs/a.md": "# A\n", "docs/b.md": "# B\n",
-        "src/app.ts": "export {}\n"})
+        "src/app.ts": "export {}\n",
+        "deploy/app.secret.yaml": "kind: Secret\nstringData:\n  JWT_SECRET: a1b2c3d4e5f6\n",
+        "deploy/config.yaml": "apiVersion: v1\nkind: Secret\nstringData:\n  E2B_API_KEY: e2b0f1e2d3c4\n"})
     return remote, work, first
 
 
@@ -409,11 +411,14 @@ def test_add_evidence_extracts_only_what_the_collectors_may_cite(loop, capsys) -
         f"https://code.example/unknown.git@{loop['first'][:7]}:README.md",  # not a collected repository
         f"{loop['remote']}@{loop['first'][:7]}:../outside.md",
         f"{loop['remote']}@{loop['first'][:7]}:README.md#L5-9",  # README.md has one line
+        f"{loop['remote']}@{loop['first'][:7]}:deploy/app.secret.yaml",  # a credential store, by name
+        f"{loop['remote']}@{loop['first'][:7]}:deploy/config.yaml",  # and by its kind: Secret
     ]
     for ref in refused:
         code, error = wiki_json(capsys, "maint", "add-evidence", item_id, ref, "--state-dir", st,
                                 "--config", loop["config"])
         assert code == 2, (ref, error)
+        assert "deploy/" not in ref or "credential store" in error["error"]
     code, error = wiki_json(capsys, "maint", "add-evidence", item_id, "issue:WAIO-7", "--state-dir", st,
                             "--config", loop["tmp"] / "none.json")
     assert code == 2 and "issues.exclude_agents" in error["error"]  # no exclusions configured: fail closed

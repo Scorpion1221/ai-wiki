@@ -4,7 +4,8 @@
     collect        run the collectors; freeze their evidence as work items, then move the cursors
     next           claim the next work item and fetch its evidence into the workspace; a member's
                    Feishu/Lark link sent alone is read first, as the wiki's app (lark-cli --as bot)
-    add-evidence   freeze one more file into the item: a Git blob at a commit, or a Multica issue
+    add-evidence   freeze one more file into the item: a Git blob at a commit, a Multica issue, or
+                   a source the bundle already froze (source:sources/<file>)
     skip | park | split   close the item without a changeset, hand it back, or divide it
     end            release the lease and render the run's deterministic report
     status         the writer's SLO snapshot
@@ -42,7 +43,7 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from aiwiki.cli import main as cli
@@ -68,6 +69,7 @@ UNFINISHED = ("ready", "parked", "in_progress", "needs_human")  # what export-v4
 _GIT_REF = re.compile(
     r"(?P<remote>[^-].*)@(?P<commit>[0-9a-f]{7,40}):(?P<path>[^#]+)(?:#L(?P<first>\d+)(?:-L?(?P<last>\d+))?)?")
 _ISSUE_REF = re.compile(r"issue:(?P<issue>[^#\s-][^#\s]*)(?:#(?P<comment>[^\s-]\S*))?")
+_SOURCE_REF = re.compile(r"source:(?P<path>sources/[^\s]+)")
 
 
 class MaintError(Exception):
@@ -442,6 +444,9 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
     state["acquired_at"] = state.get("acquired_at") or (lease.get("lease") or {}).get("acquired_at")
     state.update(workspace=str((workspace_dir or folder / "ws").expanduser().resolve()),
                  swept={key: lease.get(key) or [] for key in ("interrupted", "unparked", "build_retry")})
+    # What the run start queued (design §5.3); a begin repeated within the run keeps those counts.
+    if (lease.get("attention") or {}).get("status") != "not_run" or "attention" not in state:
+        state["attention"] = lease.get("attention")
     try:
         if "cursors_before" not in state:  # where the run found the cursors, over repeated begins
             state["cursors_before"] = {name: _cursor(bundle, name) for name in COLLECTORS}
@@ -474,6 +479,7 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
         "lease_expires_at": (lease.get("lease") or {}).get("expires_at"),
         "swept": {key: len(ids) for key, ids in state["swept"].items()}, "reclaimed": len(reclaimed),
         "audits": {key: len(value) if isinstance(value, list) else value for key, value in state["audits"].items()},
+        "attention": state["attention"],
         "collect": {name: {key: value for key, value in result.items() if key not in ("failures", "noise")}
                     | ({"failures": result["failures"][:3]} if result.get("failures") else {})
                     for name, result in collected.items()},
@@ -671,6 +677,10 @@ def _git_evidence(bundle: str, state_dir: Path, match: re.Match, repos: object) 
     if b"\0" in data:
         raise MaintError(f"{path} is binary; cite a text file", USAGE)
     text, lines = data.decode(errors="replace"), None
+    # The collector never freezes a credential store; neither does an explicit request for one.
+    if planner.noise(path) == "secret" or planner.SECRET_MANIFEST.search(text):
+        raise MaintError(f"{path} is a credential store (a secret file or a Kubernetes Secret) and is never "
+                         "frozen; cite the commit message or a document that describes the change", USAGE)
     if match["first"]:
         first, last = int(match["first"]), int(match["last"] or match["first"])
         rows = text.splitlines(keepends=True)
@@ -682,6 +692,73 @@ def _git_evidence(bundle: str, state_dir: Path, match: re.Match, repos: object) 
         f"add-{full[:7]}{span}-{collect_repos.snapshot_name(path)}"[:128], text,
         {"kind": "git-file", "remote": collect_repos.display_remote(remote), "commit": full, "path": path,
          "blob": blob, **({"lines": lines} if lines else {})})
+
+
+def _source_name(rel: str) -> str:
+    """``src-<path hash>-<stem><ext>`` within the queue's 128: the stem is cut, never the extension,
+    which a one-part packet keeps when it is committed. A ``.md.source`` is Markdown: named ``.md``,
+    it commits as ``.md.source`` like any Markdown packet."""
+    name = PurePosixPath(rel).name
+    name = name.removesuffix(".source") if name.endswith(".md.source") else name
+    ext = re.sub(r"[^A-Za-z0-9.]", "", PurePosixPath(name).suffix)[:16]
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", name[:len(name) - len(PurePosixPath(name).suffix)])
+    return f"src-{hashlib.sha256(rel.encode()).hexdigest()[:8]}-{stem[:64]}{ext}"
+
+
+def _source_evidence(state: dict, rel: str) -> dict:
+    """A source the bundle already froze, byte for byte: from the run's pulled workspace, else
+    from the writer's published tree. The writer stores it only if its sha256 is the one
+    ``sources/.hashes.yaml`` records for ``rel`` (422 otherwise), so a maintainer can cite what the
+    auditor pointed at -- the source that contradicts a claim -- and nothing the bundle never froze.
+    Only a file directly under sources/ is a curated source (inbox/, _rejected/ and the ledger are not)."""
+    from aiwiki.cli import workspace
+    from aiwiki.runtime import changeset
+
+    if not changeset.top_level_source(rel):
+        raise MaintError(f"{rel}: name a frozen file directly under sources/", USAGE)
+    root = Path(state["workspace"])
+    cached = root / workspace.META / "base" / rel
+    if cached.is_file() and not cached.is_symlink():
+        data = cached.read_bytes()
+    else:
+        data = _published_source(state, rel, root)
+    limit = changeset.limits()["packet_text_bytes"] - PACKET_HEADROOM
+    if len(data) > limit:
+        raise MaintError(f"{rel} holds {len(data)} bytes, more than one evidence packet takes ({limit})", USAGE)
+    sha = hashlib.sha256(data).hexdigest()
+    # Stored whole and unredacted: these are the bytes the bundle published, and only they match.
+    return {"name": _source_name(rel), "data": data, "bytes": len(data),
+            "sha256": sha, "origin": {"kind": changeset.SOURCE_KIND, "path": rel, "sha256": sha,
+                                      "truncated": False, "redactions": 0}}
+
+
+def _published_source(state: dict, rel: str, root: Path) -> bytes:
+    """A source frozen after the run's pull, through ``/cat``. That serves text with its line ends
+    normalised, so the bytes are checked against the writer's ledger here: a CRLF or non-UTF-8
+    source needs the pull, rather than a POST the writer is sure to refuse."""
+    import yaml
+
+    def cat(path: str) -> tuple[int, str | None]:
+        status, _headers, body = cli._http("GET", "/cat", bundle=state["bundle"], params={"path": path})
+        try:
+            return status, json.loads(body)["content"] if status == 200 else None
+        except (ValueError, KeyError, TypeError):
+            return status, None
+
+    (status, text), (_status, ledger) = cat(rel), cat("sources/.hashes.yaml")
+    try:
+        recorded = yaml.safe_load(ledger or "")
+    except yaml.YAMLError:
+        recorded = None
+    recorded = recorded.get(rel) if isinstance(recorded, dict) else None
+    pull = f"run ai-wiki workspace pull --dir {root}, then add it again"
+    if text is None or recorded is None:
+        raise MaintError(f"{rel} is not a frozen source the writer serves as text ({status}); {pull}", USAGE)
+    data = text.encode("utf-8")
+    if hashlib.sha256(data).hexdigest() != recorded:
+        raise MaintError(f"{rel}: the writer serves it as text that differs from the bytes sources/.hashes.yaml "
+                         f"records (line ends or encoding); {pull}", USAGE)
+    return data
 
 
 def add_evidence(state_dir: Path, bundle: str | None, item_id: str, ref: str, config: Path) -> tuple[int, dict]:
@@ -704,8 +781,11 @@ def add_evidence(state_dir: Path, bundle: str | None, item_id: str, ref: str, co
                 cache_dir=run_dir(state_dir, state["run"]) / "evidence" / _iso(_now()))
         except (MulticaError, ValueError, OSError) as exc:
             raise MaintError(f"{ref}: {exc}", USAGE) from None
+    elif match := _SOURCE_REF.fullmatch(ref):
+        file = _source_evidence(state, match["path"])
     else:
-        raise MaintError("evidence is <remote>@<commit>:<path>[#Lx-y] or issue:<id>[#<comment>]", USAGE)
+        raise MaintError("evidence is <remote>@<commit>:<path>[#Lx-y], issue:<id>[#<comment>] or "
+                         "source:sources/<file>", USAGE)
     _call("POST", f"/maint/items/{quote(item_id, safe='')}/files", bundle=state["bundle"], run=state["run"],
           body={"name": file["name"], "origin": file["origin"], "content_b64": base64.b64encode(file["data"]).decode()})
     root = Path(state["workspace"])
@@ -826,12 +906,14 @@ def export_manifest(bundle: str, path: Path) -> dict:
     not fit one packet become one source each. Each identity names its item: ``maintain``
     treats sources of one identity as versions and would supersede the older of two
     unfinished items of one topic unread. More unfinished items than one listing returns
-    fail the export rather than leave some out.
+    fail the export rather than leave some out. An attention notice is no source P0 may
+    ingest: it is left out, and an item of nothing else is counted as ``attention_only``
+    (the next writer run start derives it again).
     """
     from aiwiki.runtime import changeset
 
     folder = path.with_name(path.stem + "-files")
-    sources, items = [], []
+    sources, items, attention_only = [], [], 0
     for state in UNFINISHED:
         listing = _call("GET", "/maint/items", bundle=bundle, params={"status": state, "limit": LIST_LIMIT})[1]
         if listing.get("truncated"):
@@ -841,11 +923,16 @@ def export_manifest(bundle: str, path: Path) -> dict:
     for item in sorted(items, key=lambda item: (item["created_at"], item["id"])):
         files = []
         for entry in item["files"]:
+            if (entry.get("origin") or {}).get("kind") == changeset.NOTICE_KIND:
+                continue
             status, _headers, data = cli._http(
                 "GET", f"/maint/items/{item['id']}/files/{quote(entry['name'], safe='')}", bundle=bundle)
             if status != 200 or hashlib.sha256(data).hexdigest() != entry["sha256"]:
                 raise MaintError(f"{item['id']}/{entry['name']} could not be fetched intact ({status})")
             files.append(changeset.EvidenceFile(f"{item['id']}/{entry['name']}", data, entry.get("origin") or {}))
+        if not files:
+            attention_only += 1
+            continue
         packet, errors = changeset.build_packet({"id": item["id"], "item_files": [file.name for file in files]}, files)
         identity = f"{item['topic_key']}@{item['id']}"
         parts = [(identity, packet.filename, packet.data)] if packet and not errors else [
@@ -857,7 +944,8 @@ def export_manifest(bundle: str, path: Path) -> dict:
             sources.append({"identity": identity, "path": str(target.resolve()),
                             "sha256": hashlib.sha256(data).hexdigest()})
     _write(path, {"sources": sources})
-    return {"manifest": str(path), "items": len(items), "sources": len(sources)}
+    return {"manifest": str(path), "items": len(items) - attention_only, "sources": len(sources),
+            "attention_only": attention_only}
 
 
 def _settled(job: dict) -> bool:
@@ -992,11 +1080,13 @@ def add_parser(sub, common: dict) -> None:
                             help="collectors (default: repos,issues); inbox alone just drains the member queue")
     next_ = verb("next", "claim the next work item (exit 10 queue empty, 11 budget spent, 12 workspace dirty)",
                  "ai-wiki maint next --json")
-    evidence = verb("add-evidence", "freeze a Git file or a Multica issue into the item",
+    evidence = verb("add-evidence", "freeze a Git file, a Multica issue or a bundle source into the item",
                     "ai-wiki maint add-evidence it_3f2a9c1b7d10 https://code.example/web.git@1a2b3c4:docs/x.md#L10-40",
-                    "ai-wiki maint add-evidence it_3f2a9c1b7d10 issue:WAIO-587#01a0c068")
+                    "ai-wiki maint add-evidence it_3f2a9c1b7d10 issue:WAIO-587#01a0c068",
+                    "ai-wiki maint add-evidence it_3f2a9c1b7d10 source:sources/funnel-2026-09-<sha>.md.source")
     evidence.add_argument("item")
-    evidence.add_argument("ref", help="<remote>@<commit>:<path>[#Lx-y] or issue:<id>[#<comment>]")
+    evidence.add_argument("ref", help="<remote>@<commit>:<path>[#Lx-y], issue:<id>[#<comment>] or "
+                                      "source:sources/<file>")
     skip = verb("skip", "close the item without a changeset",
                 "ai-wiki maint skip it_3f2a9c1b7d10 --reason out_of_scope")
     skip.add_argument("item")

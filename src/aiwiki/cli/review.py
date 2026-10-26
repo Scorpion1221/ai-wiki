@@ -4,7 +4,8 @@
               (--as-human: doctor --role reviewer, for the owner's human-reviewed verdicts)
     next      the next concept the writer's backlog lists, with its content hash and evidence
               (--path: a human run takes any concept, backlog or not)
-    evidence  re-check the concept's frozen evidence, and re-read its Git parts from this host
+    evidence  re-check the concept's frozen evidence, re-read its Git parts from this host, and
+              list related frozen sources it does not cite
     verdict   record verified, corrected (the workspace edit) or unverified, with a note
     submit    send the recorded verdicts as audit changesets of at most 5 reviews
     end       release the lease and summarize the run
@@ -25,6 +26,8 @@ import argparse
 import contextlib
 import hashlib
 import json
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -37,6 +40,18 @@ from aiwiki.runtime.changeset import VERDICTS
 
 OK, FAILED, USAGE, PREFLIGHT, DROPPED, TRANSIENT, EMPTY, BUDGET = 0, 1, 2, 4, 6, 8, 10, 11
 BATCH = 5  # reviews per audit changeset (design §2.3)
+# Related evidence: the concept's distinctive identifiers (backticked names, file paths, camelCase,
+# snake_case, UPPER_CASE and dotted names) found in frozen sources it does not cite. An audit that
+# reads only the cited sources re-verified graph-jsx while a newer uncited source showed
+# GraphController replacing GraphJsxController (audit report §2.3).
+_IDENTIFIER = re.compile(
+    r"`([^`\n]+)`"
+    r"|(?<![\w/.-])((?:[\w.-]+/)+[\w.-]*\.[A-Za-z]{1,6})(?![\w/])"
+    r"|(?<![\w.])([a-z][a-z0-9]*(?:[A-Z][a-z0-9]*)+|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)(?!\w)"
+    r"|(?<![\w.])([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(?!\w)"
+    r"|(?<![\w.])([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)+)(?!\w)")
+_LINK_TARGET = re.compile(r"\]\([^)]*\)")  # a concept link names a concept, not the system
+RELATED, COMMON = 5, 30  # rows shown; an identifier in more sources than this distinguishes nothing
 
 
 def _folder(state_dir: Path, run: str) -> Path:
@@ -152,7 +167,12 @@ def next_concept(state_dir: Path, bundle: str | None, path: str | None = None) -
         entry = _chosen(root, path)
     else:
         found = _backlog(state["bundle"])
-        entry = next((row for row in found.get("concepts") or [] if row["path"] not in state["taken"]), None)
+        # A correction is another run's to review, from its reviewable_at (design §5.4 A4); the
+        # writer judges by its own clock, so this only saves a review it would refuse.
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        entry = next((row for row in found.get("concepts") or [] if row["path"] not in state["taken"]
+                      and row.get("corrected_run") != state["run"] and (row.get("reviewable_at") or "") <= now),
+                     None)
         if entry is None:
             return EMPTY, {"stopped": "backlog_empty", "pending": len(state["pending"]),
                            "next": f"ai-wiki -b {state['bundle']} review submit" if state["pending"] else
@@ -215,11 +235,50 @@ def _reread(part: dict, repos: object) -> tuple[str, str, bytes | None]:
     return "unavailable", "no checkout under repos.root holds that commit", None
 
 
+def _identifiers(document) -> set[str]:
+    """The distinctive names the concept's body, title and aliases state."""
+    aliases = document.frontmatter.get("aliases")
+    text = "\n".join([document.body, str(document.frontmatter.get("title") or ""),
+                      *(str(alias) for alias in (aliases if isinstance(aliases, list) else []))])
+    found = set()
+    for match in _IDENTIFIER.finditer(_LINK_TARGET.sub(" ", text)):
+        value = next(group for group in match.groups() if group).strip()
+        if len(value) >= 4 and re.search(r"[A-Za-z]", value):
+            found.add(value)
+    return found
+
+
+def _related(root: Path, document, frozen: dict, cited: set[str]) -> list[dict]:
+    """Up to ``RELATED`` frozen sources of the workspace (``sources/`` but its inbox) that the
+    concept does not cite and that state at least two of its identifiers, most first. An
+    identifier that more than ``COMMON`` sources state is dropped. Client-side only: the writer
+    keeps no index, so this reads the workspace the run pulled."""
+    identifiers = _identifiers(document)
+    holds: dict[str, set[str]] = {}
+    for rel, recorded in frozen.items():
+        file = root / str(rel)
+        if not str(rel).startswith("sources/") or "inbox" in Path(str(rel)).parts or not file.is_file() \
+                or file.is_symlink():
+            continue
+        data = file.read_bytes()
+        if hashlib.sha256(data).hexdigest() != recorded:
+            continue  # not the bytes the service froze: no evidence
+        text = data.decode("utf-8", errors="replace")
+        holds[str(rel)] = {name for name in identifiers if name in text and re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text)}
+    stated = {name: sum(name in found for found in holds.values()) for name in identifiers}
+    rows = [{"source": rel, "matches": len(names), "identifiers": sorted(names)}
+            for rel, found in holds.items() if rel not in cited
+            and len(names := {name for name in found if stated[name] <= COMMON}) >= 2]
+    return sorted(rows, key=lambda row: (-row["matches"], row["source"]))[:RELATED]
+
+
 def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tuple[int, dict]:
     """Re-check the concept's cited sources: the frozen bytes against ``sources/.hashes.yaml``,
     and each Git part of a packet re-read from this host's checkouts against its recorded sha256.
-    A re-read copy lands in the run's ``evidence/``. The findings are for the note only: the
-    writer never trusts a reviewer's word about evidence (design §5.4)."""
+    A re-read copy lands in the run's ``evidence/``. ``related`` lists frozen sources the concept
+    does not cite that state its identifiers: newer evidence may contradict it. The findings are
+    for the note only: the writer never trusts a reviewer's word about evidence (design §5.4)."""
     from aiwiki.engine.document import parse_document
     from aiwiki.engine.scan_sources import _source_resource_rel
 
@@ -232,11 +291,13 @@ def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tu
     frozen = yaml.safe_load(ledger.read_text(encoding="utf-8")) if ledger.is_file() else {}
     frozen = frozen if isinstance(frozen, dict) else {}
     settings = maint._config(config)
-    rows, out = [], _folder(state_dir, state["run"]) / "evidence"
-    sources = parse_document(concept.read_text(encoding="utf-8")).frontmatter.get("sources") or []
+    rows, out, cited = [], _folder(state_dir, state["run"]) / "evidence", set()
+    document = parse_document(concept.read_text(encoding="utf-8"))
+    sources = document.frontmatter.get("sources") or []
     for source in sources if isinstance(sources, list) else []:
         resource = source.get("resource") if isinstance(source, dict) else None
         rel = _source_resource_rel(resource.strip(), path) if isinstance(resource, str) else None
+        cited.add(rel)
         if not rel or not rel.startswith("sources/"):
             rows.append({"source": resource, "part": None, "status": "external", "detail": "not frozen evidence"})
             continue
@@ -265,7 +326,7 @@ def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tu
                 status = "match" if same else "differs (truncated or redacted)" if clipped else "differs"
                 detail = f"{detail}; re-read copy {copy}"
             rows.append({"source": rel, "part": part.get("ref"), "status": status, "detail": detail})
-    return OK, {"path": path, "evidence": rows}
+    return OK, {"path": path, "evidence": rows, "related": _related(root, document, frozen, cited)}
 
 
 def verdict(state_dir: Path, bundle: str | None, path: str, value: str, note: str) -> tuple[int, dict]:
@@ -411,7 +472,8 @@ def add_parser(sub, common: dict) -> None:
     take = verb("next", "take the next backlog concept (exit 10 backlog empty, 11 budget spent)",
                 "ai-wiki review next --json", "ai-wiki review next --path metrics/x.md  # a human run")
     take.add_argument("--path", help="a human run: take this concept, in the backlog or not")
-    check = verb("evidence", "re-check the concept's frozen evidence; re-read its Git parts on this host",
+    check = verb("evidence", "re-check the concept's frozen evidence; re-read its Git parts on this host; "
+                             "list related uncited sources",
                  "ai-wiki review evidence metrics/x.md --config ~/.ai-wiki/maint.json")
     check.add_argument("path")
     check.add_argument("--config", type=Path, default=maint.CONFIG,

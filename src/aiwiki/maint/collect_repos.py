@@ -934,7 +934,9 @@ def topic_candidate(
         data = read_blob(object_repo, blob)
         # An empty file (an ``__init__.py``) or binary content: listed in the manifest only. The
         # writer refuses empty evidence, which would fail the whole collect.
-        file = None if not data.strip() or b"\0" in data else planner.evidence_file(
+        # A Kubernetes Secret under an ordinary name (``config.yaml``) is still a credential store.
+        file = None if not data.strip() or b"\0" in data or planner.SECRET_MANIFEST.search(
+            data.decode(errors="replace")) else planner.evidence_file(
             snapshot_name(change["path"]), data.decode(errors="replace"),
             {"kind": "git-file", **remote, "path": change["path"], "blob": blob},
         )

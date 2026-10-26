@@ -201,3 +201,21 @@ def test_evidence_file_keeps_prose_about_credentials(prose: str) -> None:
     file = planner.evidence_file("notes.md", prose, {"kind": "git-file"})
 
     assert (file["data"].decode(), file["origin"]["redactions"]) == (prose, 0)
+
+
+@pytest.mark.parametrize("path", [
+    "prod/solvely-plugin-server/solvely-plugin-server.secret.yaml", "dev/web/secrets.yaml", "k8s/app-secret.json",
+    "config/.env.production", "deploy/id_ed25519",
+])
+def test_deployment_secret_files_are_never_frozen(path: str) -> None:
+    assert planner.noise(path) == "secret"
+
+
+@pytest.mark.parametrize("path", ["docs/secret-rotation.md", "src/secrets.ts", "prod/app.deployment.yaml"])
+def test_files_about_secrets_are_not_secret_stores(path: str) -> None:
+    assert planner.noise(path) != "secret"
+
+
+def test_a_kubernetes_secret_manifest_is_recognised_by_its_kind() -> None:
+    assert planner.SECRET_MANIFEST.search("apiVersion: v1\nkind: Secret\nstringData:\n  a: b\n")
+    assert not planner.SECRET_MANIFEST.search("apiVersion: v1\nkind: Deployment\n# kind: Secret lives elsewhere\n")

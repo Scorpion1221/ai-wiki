@@ -6,9 +6,9 @@ description: >-
   audit backlog lists against the frozen evidence it cites, record verified, corrected or
   unverified with `review verdict`, send them with `review submit` and close with `review end`.
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
-  curation, and never on your own output.
+  curation, and never on a correction your own run wrote.
 ---
-<!-- ai-wiki:version 0.3.4 -->
+<!-- ai-wiki:version 0.3.5 -->
 
 # AI Wiki Auditor
 
@@ -30,6 +30,9 @@ command. `$WS` is the `workspace` path `review begin` prints.
   multi-part packet, a part whose origin is `kind: issue` with its `identifier`): it is
   evidence of what was reported, as §3.3 says. A summary that only cites issues (an older
   `kind: multica_issue` digest) is not: a claim only it supports is unverified.
+- `review evidence` also lists `related`: frozen sources the concept does not cite that state its
+  identifiers. Read them. A contradiction found only there means `unverified`, with that source
+  path in the note; never build a correction from it: it is not the concept's evidence.
 - **Never evidence:** the concept's own prose, the maintainer's changeset messages, reports,
   live Multica issues and comments you could look up (the one that started this run
   included, beyond its id), hand-off notes, your notes, your memory, web pages. Do not read
@@ -54,8 +57,7 @@ ai-wiki -b "$bundle" doctor --role auditor
 
 Exit `0`: continue. Exit `4` lists failed checks (`scopes` must be exactly read and audit;
 `actor`; `writer`, a read mirror answered; `okf_version`; `state_dir`; `disk`; `tool:git|uv`).
-Stop and report it blocked (§5). Never swap tokens or edit `~/.ai-wiki/config.json` to get
-past a check.
+Stop and report it blocked (§5). Never swap tokens or edit `~/.ai-wiki/config.json` to pass.
 
 ## 2. Begin
 
@@ -66,8 +68,7 @@ ai-wiki -b "$bundle" review begin --run "$run" --max "$max" --json
 It reruns doctor, takes the auditor lease (3 h, one auditor run at a time), pulls the published
 bundle into `$WS` and prints the backlog size. Exit `4`: `failed` names `doctor`, `update_running`
 (an install held the CLI past 900 s; no lease was taken), `lease` (`holder` shows who holds it) or
-`workspace`: stop (§5, blocked). Rerunning `begin` with the
-same run is safe.
+`workspace`: stop (§5, blocked). Rerunning `begin` with the same run is safe.
 
 ## 3. The review loop
 
@@ -79,10 +80,16 @@ Read `$WS/SCHEMA.md` once. Then repeat.
 ai-wiki -b "$bundle" review next --json
 ```
 
-Exit `0`: `path`, `base` (the content hash your verdict judges), `reason` (`generation`: new
-content; `external`: a push past the service changed it or a source it cites; `seed`: an
-older unaudited concept), `concept` (the file in `$WS`) and `evidence` (its frozen sources in
-`$WS`). Exit `10` (backlog empty) or `11` (budget spent): go to §3.5, then §4.
+Exit `0`: `path`, `base` (the content hash your verdict judges), `reason`, `concept` (the file in
+`$WS`) and `evidence` (its frozen sources in `$WS`). Exit `10` (backlog empty) or `11` (budget
+spent): go to §3.5, then §4. Reasons: `generation` (new content); `external` (a push past the
+service changed it or a source it cites); `seed` (an older unaudited concept); `correction`: an
+auditor's narrowing nobody has confirmed yet. Its backlog entry names `corrected_run` (the run that
+wrote it; `legacy: true` for one from before this rule, which any run may review) and
+`reviewable_at`, 12 h after it. You may review it only in another run and from `reviewable_at`, by
+the writer's clock; renaming your run does not help, and `review next` skips the rest. Judge it like
+new content against its cited evidence: `verified` confirms it, `unverified` leaves it unconfirmed
+for the maintainer, `corrected` writes a new correction that another run reviews 12 h later.
 
 ### 3.2 Check the evidence
 
@@ -95,6 +102,7 @@ Each cited source: `frozen` (matches the service's hash ledger), `unrecorded`, `
 not evidence). Each Git part of a packet re-read on this host:
 `match`, `differs (truncated or redacted)` (the frozen copy was clipped; read the re-read copy
 the row names), `differs` (the frozen text is not what Git holds: unreliable) or `unavailable`.
+`related`: up to 5 uncited frozen sources (`source`, `matches`, `identifiers`; see Trust boundary).
 Read evidence with `head`, `sed -n` or `rg`, never whole batches.
 
 ### 3.3 Judge every material claim
@@ -115,9 +123,13 @@ Hold each to the evidence boundary:
   the comment is a `member`'s (an `agent` comment supports only "an agent reported"). A claim
   stated as a fact (released, fixed, won, the rate is) is not supported by a comment: if it
   would pass that test, open its sentence with one word ("Reportedly,", "据报，"); otherwise
-  delete it. Add no date, time or number; never delete an attribution or hedge and keep its
-  claim. If the title states it as fact, the verdict is unverified: the writer restores the
-  title. A comment that only points to a query, attachment or result supports nothing.
+  delete it. Add no date, time or number; never delete an attribution and keep its claim. If the
+  title states it as fact, the verdict is unverified: the writer restores the title. A comment
+  that only points to a query, attachment or result supports nothing.
+- A hedge (不证明, 不构成, 早期快照, 待验证, preliminary…) bounds the claims around it. Delete it only
+  together with the claim it bounds; reword it only with an equally strong limit (不足以, 无法,
+  没有证据 for 不证明; never 只, 仅, not, only); never flip it to its positive. A hedged footnote
+  (its definition and markers) and a hedged heading are hedges too (`D_CAVEAT_REMOVED`).
 
 ### 3.4 Record a verdict
 
@@ -127,15 +139,17 @@ Hold each to the evidence boundary:
   concept in `$WS`, body and content keys only. Never add a number, date, URL, identifier or
   link (`contradictions` included) that the concept or its cited evidence does not already
   hold, grow the body or a text key by more than 20%, add a key or list item, raise
-  `confidence` or touch `contested`/`contradictions`: the writer downgrades any such
-  correction to unverified (`D_NOVEL_TOKEN`, `D_NEW_LINK`, `D_GROWTH`) and keeps the old
-  text. `type`, `title`, `sources`, `stale_after`, `generated`, `verified` and `status` are
-  restored whatever you write; a correction of only those ends unverified (`D_RESTORED`), so
-  say in the note what is wrong.
+  `confidence`, touch `contested`/`contradictions` or remove a hedge (§3.3): the writer downgrades
+  any such correction to unverified (`D_NOVEL_TOKEN`, `D_NEW_LINK`, `D_GROWTH`,
+  `D_CAVEAT_REMOVED`) and keeps the old text. `type`, `title`, `sources`, `stale_after`,
+  `generated`, `verified` and `status` are restored whatever you write; a correction of only those
+  ends unverified (`D_RESTORED`), so say in the note what is wrong. A correction is your new
+  generation, applied unverified: it returns to the backlog as `correction`, and another run
+  reviews it at least 12 h later.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is
-  unreliable, or the concept cites no frozen source (`D_NO_EVIDENCE`: a note is never
-  evidence). An earlier verification of the version then stops being current. The
-  maintainer brings new evidence; never "fix" a concept by writing facts.
+  unreliable, or the concept cites no frozen source (`D_NO_EVIDENCE`: a note is never evidence).
+  An earlier verification of the version stops being current, and the maintainer gets an
+  attention item: it brings new evidence; never "fix" a concept by writing facts.
 
 ```sh
 ai-wiki -b "$bundle" review verdict <path> verified --note "<which part supports which claims>"
@@ -157,7 +171,7 @@ ai-wiki -b "$bundle" review submit --json
 | Exit | Meaning | Action |
 |---|---|---|
 | `0` | every verdict landed; `reviews` shows each `outcome` and any `downgrade` | back to §3.1 |
-| `6` | some were dropped: `dropped` lists each path and code (`conflict`: it changed since you read it; `audit_scope`: no longer due; `self_verification`: not yours to review; `yaml_parse` and other validation codes: your correction broke the file) | the rest landed; the dropped ones return to a later run's backlog when still due. Back to §3.1 |
+| `6` | some were dropped: `dropped` lists each path and code (`conflict`: it changed since you read it; `audit_scope`: no longer due; `self_verification`: not yours to review (your own generation, another auditor's, a correction your run wrote, or one before its `reviewable_at`); `yaml_parse` and other validation codes: your correction broke the file) | the rest landed; the dropped ones return to a later run's backlog when still due. Back to §3.1 |
 | `8` | the writer gave no final answer | run `review submit` once more later; the writer dedupes. Never re-POST by hand |
 | `4` | the token lost its rights | §5, blocked |
 
@@ -171,9 +185,10 @@ is then such a dry-run that settles its verdicts (`shadow: true`), and nothing i
 ai-wiki -b "$bundle" review end --run "$run" --json > "${TMPDIR:-/tmp}/ai-wiki-review-$run.json"
 ```
 
-It releases the lease and summarizes: `reviewed`, `verified`, `corrected`, `unverified`,
-`downgraded` codes, `dropped`, `unsubmitted` (must be empty: submit first),
-`backlog_remaining`, and `dry_run`: what the writer would have concluded for each dry-run.
+It releases the lease and summarizes: `reviewed`, `verified` (verified outcomes only; corrections
+count under `corrected`), `corrected`, `unverified`, `downgraded` codes, `dropped`, `unsubmitted`
+(must be empty: submit first), `backlog_remaining`, and `dry_run`: what the writer would have
+concluded for each dry-run.
 Post a comment with those counts (in a shadow run, also the `dry_run` rows as a JSON code
 block) and at most 5 lines on notable findings (concept paths and what did not hold), then set
 the issue done with `--no-start`:
@@ -193,8 +208,9 @@ reviews never block; a deterministic watchdog pages humans.
 
 - Never curate: no `propose`, `maint`, `ingest`, `concept new`, new concepts, new sources or
   evidence of your own. The writer refuses a review of your own or another auditor's
-  generation (`self_verification`); a `reason: external` entry is a push by someone else
-  since then, so review it like any other, whoever generated the concept before.
+  generation (`self_verification`), except a `reason: correction` entry from another run after
+  its `reviewable_at`; a `reason: external` entry is a push by someone else since then, so
+  review it like any other, whoever generated the concept before.
 - Never write `generated`, `verified` or `status`, and never claim verification in prose.
 - Never touch `SCHEMA.md`, `purpose.md`, `index.md`, `log.md`, `sources/` or `$WS/.ai-wiki/`,
   never run Git in `$WS`, and never delete or rename a file.

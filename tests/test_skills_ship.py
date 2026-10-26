@@ -1,6 +1,7 @@
 """The agent skills ship with the CLI: stamped with its version, installed by it, updated with it."""
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -103,7 +104,6 @@ def test_install_status_and_refusals(tmp_path: Path, capsys) -> None:
     checkout = tmp_path / "checkout" / "ai-wiki"
     checkout.mkdir(parents=True)
     (checkout / "SKILL.md").write_text("---\nname: ai-wiki\n---\nold\n")
-    import shutil
 
     shutil.rmtree(dest / "ai-wiki")
     (dest / "ai-wiki").symlink_to(checkout)
@@ -120,6 +120,28 @@ def test_install_status_and_refusals(tmp_path: Path, capsys) -> None:
         skills.install(dest)
     assert refused.value.code == 2
     assert (dest / "ai-wiki-auditor" / "SKILL.md").read_text() == "edited"
+
+
+def test_install_removes_a_retired_skill_but_never_a_foreign_one(tmp_path: Path) -> None:
+    dest = tmp_path / "skills"
+    for name in skills.RETIRED:
+        (dest / name / "scripts").mkdir(parents=True)
+        (dest / name / "SKILL.md").write_text(f"---\nname: {name}\n---\nlegacy\n")
+    rows = skills.install(dest)
+    assert {row["skill"] for row in rows if row["status"] == "removed"} == set(skills.RETIRED)
+    assert not any((dest / name).exists() for name in skills.RETIRED)
+
+    # A directory of that name that is not our skill stays, and so does everything on a subset install.
+    name = skills.RETIRED[0]
+    (dest / name).mkdir()
+    (dest / name / "SKILL.md").write_text("---\nname: someone-elses\n---\n")
+    assert all(row["status"] != "removed" for row in skills.install(dest))
+    assert (dest / name / "SKILL.md").is_file()
+    shutil.rmtree(dest / name)
+    (dest / name).mkdir()
+    (dest / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n")
+    skills.install(dest, ("ai-wiki",))
+    assert (dest / name / "SKILL.md").is_file()
 
 
 def test_cli_skill_commands(tmp_path: Path, capsys, monkeypatch) -> None:

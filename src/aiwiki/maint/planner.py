@@ -26,10 +26,11 @@ PRIORITY = {
     "task_doc": 70,  # a task root's README/status/PRD/report
     "issue_signal": 60,  # an issue with a member's decision, or one that reached review or done
     "doc": 50,  # repository documentation or SQL outside the priority prefixes
+    "attention": 45,  # a concept the auditor judged unverified in its current version (service.attention)
     "delta": 40,  # any other repository or issue increment
     "tooling": 35,  # a repository topic that changed only tooling or dependency manifests
     "hygiene": 30,
-    "refresh": 20,  # refresh and attention
+    "refresh": 20,  # refresh, and a concept whose freshness elapsed (service.attention)
 }
 
 ITEM_TEXT_LIMIT = 64 * 1024
@@ -83,7 +84,12 @@ MINIFIED = re.compile(r"\.min\.(?:js|css)$|\.map$")
 # Credential stores: the secret rules only catch known token shapes, not ``DB_PASS=...``.
 SECRET_FILE = re.compile(
     r"^\.env(?:\..+)?$|^\.netrc$|^id_(?:rsa|dsa|ecdsa|ed25519)|\.(?:pem|key|p12|pfx)$|^credentials.*\.json$"
+    # Deployment secrets: a GitOps repo's ``<service>.secret.yaml`` holds the service's whole .env in
+    # plaintext stringData (2026-10-20: one froze seven production keys into the bundle).
+    r"|(?:^|[._-])secrets?\.(?:ya?ml|json|env|toml|properties)$|^secrets?$"
 )
+# A Kubernetes Secret manifest under any file name: its data is credentials, whatever the keys are called.
+SECRET_MANIFEST = re.compile(r"(?m)^kind:[ \t]*[\"']?Secret[\"']?[ \t]*$")
 BINARY_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg", ".psd", ".pdf", ".doc", ".docx", ".xls",
     ".xlsx", ".ppt", ".pptx", ".zip", ".gz", ".tgz", ".tar", ".7z", ".rar", ".jar", ".woff", ".woff2", ".ttf",

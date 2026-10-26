@@ -310,6 +310,8 @@ def _search_row(result: dict) -> dict:
         "generated_at": result.get("generated_at"),
         "verified_at": result.get("verified_at"),
         "current_verified_at": result.get("current_verified_at"),
+        "stale_on": result.get("stale_on") or "",
+        "basis": result.get("freshness_basis") or "",
         "score": result.get("score"),
         "phrase": bool(match.get("phrase")),
         "coverage": match.get("coverage"),
@@ -817,6 +819,9 @@ def main(argv=None) -> int:
                                       for name, count in (d.get("by_trust") or {}).items()), ("name", "count")),
                 table_lines("freshness", ({"name": name, "count": count}
                                           for name, count in (d.get("by_freshness") or {}).items()), ("name", "count")),
+                table_lines("freshness_basis", ({"name": name, "count": count}
+                                                for name, count in (d.get("by_freshness_basis") or {}).items()),
+                            ("name", "count")),
             )
     elif a.cmd == "ls":
         d = _api("/ls", bundle=bsel, dir=a.dir,
@@ -840,10 +845,13 @@ def main(argv=None) -> int:
                         "generated_at": item.get("generated_at"),
                         "verified_at": item.get("verified_at"),
                         "current_verified_at": item.get("current_verified_at"),
+                        "stale_on": item.get("stale_on") or "",  # an older writer sends none
+                        # declared | default | none: a table tells "stale (default)" from a declared date
+                        "basis": item.get("freshness_basis") or "",
                         "summary": _ls_summary(item),
                     } for item in concepts),
                     ("path", "status", "trust", "freshness", "verification_current",
-                     "generated_at", "verified_at", "current_verified_at", "summary"),
+                     "generated_at", "verified_at", "current_verified_at", "stale_on", "basis", "summary"),
                 ))
             if entries:
                 groups.append(table_lines(
@@ -905,7 +913,8 @@ def main(argv=None) -> int:
                       table_lines(
                           "results", rows,
                           ("path", "title", "status", "trust", "freshness", "verification_current",
-                           "generated_at", "verified_at", "current_verified_at", "score", "phrase",
+                           "generated_at", "verified_at", "current_verified_at", "stale_on", "basis", "score",
+                           "phrase",
                            "coverage", "fields", "terms", "context"),
                       )]
             if isinstance(total, int) and len(results) < total:

@@ -554,9 +554,11 @@ def apply_bookkeeping(
         stamp = _not_before(trusted_now, max(filter(None, [generated_at, *history]), default=None), strictly=True)
         template = _lines(before_blocks, "generated") or _lines(after_blocks, "generated")
         blocks = _put(blocks, "generated", _generated_lines(template, actor, _text(stamp)), order)
-    elif stage == "review" and verdict == "unverified" and current_verified(before_doc):
+    elif stage == "review" and verdict == "unverified" and current_verified(before_doc, own_after=None):
         # A reviewer found this verified version unsupported (a push kept its old stamps): the
         # service dates the generation now, so no earlier event confirms it. Its author stays.
+        # OKF's own rule decides, not A4's: an author's self-stamp (the 140 legacy corrections)
+        # must not read verified to an older reader or after a rollback either.
         stamp = _not_before(trusted_now, max(filter(None, [generated_at, *history]), default=None), strictly=True)
         author = generated.get("by") if isinstance(generated, dict) and generated.get("by") else actor
         blocks = _put(blocks, "generated", _generated_lines(_lines(blocks, "generated"), str(author), _text(stamp)),

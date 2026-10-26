@@ -58,13 +58,15 @@ raw entry array. JSON `search`/`grep`/`log` output is an envelope containing the
 `shown`, `total`, and `truncated`; inspect those counts before treating a result as complete.
 
 Structured results expose `status`, derived `trust` and `freshness`, `generated_at`,
-`verified_at`, and `verification_current`. Trust follows OKF §5.3 across all verification
-history; `verification_current` separately says whether an event confirms the current
-generated revision. For current-fact decisions, treat `verification_current: false` like
-unverified regardless of the historical trust tier. Search returns explainable `phrase`,
-`coverage`, `fields`, and `terms`; exact phrases and full query coverage rank ahead of
-repeated partial tokens. Trust/freshness remain tie-breakers. Run one search first and
-rewrite it at most once only when results are empty or coverage is partial; apply this
+`verified_at`, `verification_current`, `stale_on` and `freshness_basis` (TOON tables: `basis`).
+Trust follows OKF §5.3 across all verification history; `verification_current` separately says
+whether an event confirms the current generated revision (an event by the concept's own
+`process:` generator counts only 12 h after the generation). For current-fact decisions, treat
+`verification_current: false` like unverified regardless of the historical trust tier. Search
+returns explainable `phrase`, `coverage`, `fields`, and `terms`; exact phrases and full query
+coverage rank ahead of repeated partial tokens. Trust/freshness remain tie-breakers. Run one
+search first and rewrite it at most once when coverage is partial; on zero hits retry with
+synonyms or the table, event or field name before concluding the wiki has nothing. Apply this
 current-fact gate after retrieval even when a weak hit ranks highly:
 
 ```text
@@ -75,13 +77,16 @@ draft                              (transient pre-audit process/context only)
 stale or deprecated               (history only)
 ```
 
-Missing `stale_after` means freshness is unspecified, not fresh. For commercial metrics,
-experiment winners, and released/live claims, fail closed unless the concept is stable,
-fresh, `verification_current: true`, and backed by a source that proves that exact boundary.
+Without `stale_after`, freshness is `unspecified` until 90 days after `generated.at` and `stale`
+from then on (`freshness_basis: default`). The default never makes a concept `fresh`; only a
+declared `stale_after` does. For commercial metrics, experiment winners, and released/live
+claims, fail closed unless the concept is stable, fresh, `verification_current: true`, and
+backed by a source that proves that exact boundary.
 
 **Discipline:**
 
-- Cite the concept paths used, for example `metrics/<name>.md`.
+- Cite the concept paths used, for example `metrics/<name>.md`, with their status, trust and
+  verification date; cite only concepts read with `cat`, never one seen only in search results.
 - Trust only returned content; never invent metrics, prices, events, fields, dates, or outcomes.
 - Surface material status/trust/freshness and the latest verification date.
 - A claim a concept attributes to an issue ("WAIO-722 reported…", "Reportedly,", "据报，") is
@@ -133,34 +138,37 @@ run's comment opens with the verbatim `maint end` report.
 **The auditor verifies.** A separate agent, with its own `audit` principal, another OS user
 and preferably another model family, reviews the audit backlog the server derives and
 submits audit changesets; only those confirm a generation (machine-confirmed). No principal
-may both curate and audit, and an auditor never reviews its own output.
+may both curate and audit. No auditor confirms its own work: the writer refuses a review of a
+correction in the run that wrote it or within 12 h of it, and a process's verification of its
+own generation counts only 12 h after that generation.
 
 Progress lives on the writer: work items, collector cursors and changeset receipts. A cursor
 advances once its evidence is frozen, never waiting for an audit; audits trail on their own
 schedule. A changeset's job is its receipt; do not re-check it against live `cat` results,
 because a public read mirror may lag the writer by a few minutes (record visibility as a
 warning). The read-side gates of §3 still apply to answers: a curated but unaudited concept
-is `draft` or `verification_current: false`.
+is `draft` or `verification_current: false`. A concept the auditor left unverified, or whose
+stale date passed, comes back to the maintainer as an `attention:<path>` work item.
 
 A deterministic watchdog ([docs/maintenance-watchdog.md](docs/maintenance-watchdog.md)) pages
 humans on stale cursors, stuck or needs_human items and failed writer jobs. Agents add no
 monitoring, polling or retries of their own.
 
-### Legacy flow: rollback only
+### Legacy CLI commands
 
-`ai-wiki maintain`, `ai-wiki audit`, `ai-wiki jobs --pending-audit` and
-`skills/ai-wiki-maintainer` drive the old path: ingest, server-side Codex curation, server-side
-Codex audit, and a ledger checkpoint. They work only while the writer still runs Codex
-(`AIWIKI_LLM=codex` with `AIWIKI_INTAKE=curate` and `AIWIKI_AUDIT=codex`) and exist solely to
-roll back (docs/final-cutover-runbook.md). A final-state writer answers their audit request
-with 409. The ledger's semantics (exit codes, cooldowns, `needs_repair`, `--drop`) are in the
-README's "Maintenance recovery".
+`ai-wiki maintain`, `ai-wiki audit` and `ai-wiki jobs --pending-audit` are legacy CLI commands
+of the old path: ingest, server-side Codex curation, server-side Codex audit, and a ledger
+checkpoint. They work only while the writer still runs Codex (`AIWIKI_LLM=codex` with
+`AIWIKI_INTAKE=curate` and `AIWIKI_AUDIT=codex`); a final-state writer answers their audit
+request with 409. The skill that drove them, `ai-wiki-maintainer`, is retired: `ai-wiki skill
+install` removes an installed copy. The ledger's semantics (exit codes, cooldowns,
+`needs_repair`, `--drop`) are in the README's "Maintenance recovery".
 
 ## 5. Skill source of truth
 
 Repository directories `skills/ai-wiki`, `skills/ai-wiki-curating-maintainer`,
-`skills/ai-wiki-auditor`, `skills/okf-knowledge-curator` and the rollback-only
-`skills/ai-wiki-maintainer` are canonical. Detect runtime drift with:
+`skills/ai-wiki-auditor` and `skills/okf-knowledge-curator` are canonical. Detect runtime drift
+with:
 
 ```bash
 python3 scripts/sync_skills.py --check
@@ -171,7 +179,7 @@ platform-managed `multica-metadata.json` and removes other stale skill files.
 
 GitHub `main` is the release channel: agents run `ai-wiki update` before each run, so deploy the
 writer before merging CLI changes, and roll back by reverting `main`. After a release merges,
-publish all five skills to the Multica workspace (each `SKILL.md` plus its `scripts/` and
-`references/`) and read them back byte for byte against `skills/`. An agent follows its attached
+publish all four skills to the Multica workspace (each `SKILL.md` plus its `references/` and
+`assets/`) and read them back byte for byte against `skills/`. An agent follows its attached
 workspace copy, which `ai-wiki update` does not touch; until it is republished, an agent whose
 copy's version stamp differs from `ai-wiki --version` reads the installed copy or stops blocked.

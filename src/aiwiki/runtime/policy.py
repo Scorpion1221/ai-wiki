@@ -52,9 +52,14 @@ def _isolated_agent_bundle(bundle: Path) -> tuple[Path, Path]:
     return temporary, workspace
 
 
-def _agent_tree_snapshot(bundle: Path) -> dict[str, bytes]:
-    """Snapshot knowledge content; service-owned .okf/inbox state is concurrent."""
-    snapshot: dict[str, bytes] = {}
+def _agent_tree_snapshot(bundle: Path, *, digests: bool = False) -> dict[str, bytes] | dict[str, str]:
+    """Snapshot knowledge content; service-owned .okf/inbox state is concurrent.
+
+    ``digests`` keeps each file's sha256 instead of its bytes: enough for a snapshot that is only
+    compared, never restored, and ~28 MB less per copy on the production bundle (sources/ is most
+    of it).
+    """
+    snapshot: dict = {}
     for directory, dirnames, filenames in os.walk(bundle, followlinks=False):
         base = Path(directory)
         # Git internals are not bundle content and never enter the Codex workspace.
@@ -71,7 +76,8 @@ def _agent_tree_snapshot(bundle: Path) -> dict[str, bytes]:
             path = base / name
             if path.is_symlink() or not path.is_file():
                 continue
-            snapshot[path.relative_to(bundle).as_posix()] = path.read_bytes()
+            data = path.read_bytes()
+            snapshot[path.relative_to(bundle).as_posix()] = hashlib.sha256(data).hexdigest() if digests else data
     return snapshot
 
 
@@ -95,13 +101,19 @@ def _agent_symlink_snapshot(bundle: Path) -> dict[str, str]:
 
 def _agent_scope_errors(
     bundle: Path,
-    before: dict[str, bytes],
+    before: dict[str, bytes] | dict[str, str],
     links_before: dict[str, str],
     source_rel: str,
     expected_sha: str | None,
 ) -> list[str]:
-    """Allow only concept edits; the pre-existing service snapshot is read-only."""
-    after = _agent_tree_snapshot(bundle)
+    """Allow only concept edits; the pre-existing service snapshot is read-only.
+
+    ``before`` holds bytes or (``digests=True``) their sha256: the tree after is only compared,
+    so it is taken as digests either way.
+    """
+    after = _agent_tree_snapshot(bundle, digests=True)
+    before = {rel: data if isinstance(data, str) else hashlib.sha256(data).hexdigest()
+              for rel, data in before.items()}
     links_after = _agent_symlink_snapshot(bundle)
     errors = [
         f"{rel}: curation may not create, remove, or retarget symlinks"
@@ -125,7 +137,7 @@ def _agent_scope_errors(
                 errors.append(f"{rel}: curation deleted immutable source evidence")
             elif rel in before:
                 errors.append(f"{rel}: curation modified immutable source evidence")
-            elif expected_sha and hashlib.sha256(after[rel]).hexdigest() == expected_sha:
+            elif expected_sha and after[rel] == expected_sha:
                 new_snapshots.append(rel)
             else:
                 errors.append(f"{rel}: curation added source evidence unrelated to this ingest")

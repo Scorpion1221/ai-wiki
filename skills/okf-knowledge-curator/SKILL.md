@@ -7,7 +7,7 @@ description: >-
   leave generated/verified bookkeeping to the service without faking verification, and hand
   concept edits back to deterministic service gates.
 ---
-<!-- ai-wiki:version 0.3.4 -->
+<!-- ai-wiki:version 0.3.5 -->
 
 # OKF Knowledge Curator
 
@@ -122,20 +122,23 @@ The service owns `generated` and `verified`; never write, edit, refresh, or copy
 Editing prose is not verification; a source timestamp and historical `last_verified_at` are
 not verification either.
 
-- On a substantive change the service stamps `generated: {by: process:ai-wiki-curator, at:
-  <trusted pass time>}` (after an audit correction: `process:ai-wiki-adversarial-audit`),
-  strictly after the prior generation and every retained verification event.
+- On a substantive change the service stamps `generated: {by: <actor>, at: <trusted pass
+  time>}`, strictly after the prior generation and every retained verification event. The actor
+  is the changeset's principal (`process:ai-wiki-maintainer`; the worker's own pass:
+  `process:ai-wiki-curator`); after an audit correction, the auditor: `process:ai-wiki-auditor`
+  (legacy Codex corrections: `process:ai-wiki-adversarial-audit`).
 - Edits that only change frontmatter formatting (key order, quoting, YAML layout) or trailing
   whitespace and blank lines in the body are not substantive: the service restores the file's
   previous bytes, drops those edits, and records the repair. Any other body change, including
   indentation or spacing inside a line, is substantive and gets a new `generated` stamp.
 - Verification history is restored byte-for-byte after every pass. The service appends a
-  `verified` event (below) only when the adversarial auditor's verdict lists the concept as
-  verified; the auditor does not write it either.
+  `verified` event (below) only for an auditor's `verified` verdict on an unchanged concept, or a
+  human's correction; the auditor does not write it either. A process auditor's correction is its
+  new, unverified generation, which another audit run reviews at least 12 h later.
 
 ```yaml
 verified:
-  - {by: process:ai-wiki-adversarial-audit, at: 2026-08-13T08:05:00Z}
+  - {by: process:ai-wiki-auditor, at: 2026-08-13T08:05:00Z}
 ```
 
 Within an ingest pass, **any** edit to an existing concept—including a Related concepts
@@ -153,23 +156,29 @@ Trust is derived, never stored:
 If content changes after an audit, the service keeps the historical verification unchanged
 (the curator never decides this). Per OKF §5.3, that history still determines the displayed
 trust tier; separately, the changed content remains unconfirmed until re-audited
-(`verification_current: false`). Never present a previous verification as confirmation of a
-new claim.
+(`verification_current: false`; a process's own verification of its generation counts only 12 h
+after it). Never present a previous verification as confirmation of a new claim.
 
 ## Lifecycle and freshness
 
 - `draft`: transient curation state awaiting the independent audit.
 - `stable`: ready for consumption at its stated evidence boundary.
 - `deprecated`: historical/superseded; retain for links and history.
-- `stale_after`: optional absolute date; stale when `today >= stale_after`.
+- `stale_after`: optional absolute date; `fresh` before it, stale when `today >= stale_after`.
+  Without it a concept reads `unspecified`, then stale 90 days after `generated.at`
+  (`freshness_basis: default`); never fresh by default.
 
 Staleness is not a status. A changed source or expired concept remains structurally valid
-but must not be treated as a current fact until re-curated and re-audited. Do not extend
-`stale_after` merely because text was edited.
+but must not be treated as a current fact until re-curated and re-audited. Set `stale_after`
+only when evidence says the claim expires sooner than the default, or lasts longer; never extend
+it merely because text was edited. Extending it needs evidence from outside the bundle: the gate
+refuses a packet of bundle sources alone (`stale_after_needs_new_evidence`).
 
 For commercial metrics, experiment winners, and release/live claims, fail closed: the
 source must prove that exact boundary. Requirements prove intent; merged code proves only
-merge; production QA proves availability; mature measurements prove effects.
+merge; production QA proves availability; mature measurements prove effects. A digest keeps
+the source's caveats: its window, population and exclusions, and any preliminary,
+directional or not-a-conclusion limit stay beside the claim they bound.
 
 ## Ingest: new source → concepts
 
@@ -182,8 +191,8 @@ merge; production QA proves availability; mature measurements prove effects.
 4. Search existing concepts and prefer aggregation/update over one-page-per-source mirroring.
 5. New concepts start transiently as `status: draft` and have no `verified` field. The
    independent audit removes unsupported claims or bounds uncertainty; the service then sets
-   `stable` (or keeps `deprecated`) and appends `verified` only for concepts the auditor's
-   verdict lists as verified.
+   `stable` (or keeps `deprecated`) and appends `verified` only for concepts the auditor
+   verified unchanged.
 6. On genuine conflict, preserve both claims and sources; set reciprocal `contested: true`
    and `contradictions`, and add/update an `OpenQuestion`.
 7. Add precise footnotes and existing related-concept links only.
@@ -209,7 +218,8 @@ replace the worker-specific ones above:
 
 1. Evidence is the claimed work item's frozen files under `<workspace>/.ai-wiki/items/<item>/`,
    not a snapshot under `sources/`; still never write `sources/`. More evidence comes only from
-   `ai-wiki maint add-evidence`, never from your own text.
+   `ai-wiki maint add-evidence`, never from your own text. An attention item's `notice.md` is
+   facts about a concept, never evidence: never cite it.
 2. Cite the item's one evidence packet as `{id: <evidence-id>, resource: evidence:packet}` with
    `[^<evidence-id>]` footnotes; the gate rewrites the resource to the final `/sources/`
    snapshot. Every changed concept cites it (else `uncited_change`); keep existing `sources`,
@@ -274,7 +284,7 @@ not execute or silently rewrite the sanctioned computation.
 ## Quality bar
 
 - Match the source language; preserve identifiers, event names, enums, prices, SQL, URLs,
-  and dates verbatim.
+  and dates verbatim, and the source's hedges and limits with the claims they bound.
 - Keep raw source separate from curated knowledge.
 - Do not invent metrics, outcomes, release state, or source credibility signals.
 - Split reusable concepts without creating a second issue tracker.

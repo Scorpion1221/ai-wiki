@@ -24,7 +24,7 @@ from pathlib import Path
 
 import yaml
 
-from .document import has_symlink_component
+from .document import DEFAULT_STALE_DAYS, freshness_basis, has_symlink_component, stale_date
 
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SKIP_TOP = {"sources", ".okf"}
@@ -198,14 +198,13 @@ def lint(root):
         st = fm.get("status")
         if st and st not in VALID_STATUS:
             add("medium", "frontmatter", rel, f"invalid status: {st!r}")
-        raw_stale = fm.get("stale_after")
-        if raw_stale:
-            try:
-                stale_on = raw_stale if isinstance(raw_stale, date) else date.fromisoformat(str(raw_stale))
-            except (TypeError, ValueError):
-                stale_on = None  # validator owns the malformed-date error
-            if stale_on is not None and date.today() >= stale_on:
-                add("medium", "stale", rel, f"stale_after {stale_on.isoformat()} has passed")
+        # The effective date: a valid ``stale_after``, else generated.at + the 90-day default.
+        stale_on = stale_date(fm)
+        if stale_on is not None and date.today() >= stale_on:
+            basis = "" if freshness_basis(fm) == "declared" else \
+                f" (the {DEFAULT_STALE_DAYS}-day default from generated.at)"
+            add("medium", "stale", rel, f"stale since {stale_on.isoformat()}{basis}",
+                "re-check the claims against current evidence, then regenerate")
 
         generated = fm.get("generated") if isinstance(fm.get("generated"), dict) else {}
         generated_at = str(generated.get("at") or "")

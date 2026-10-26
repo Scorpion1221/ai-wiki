@@ -68,7 +68,7 @@ from ..runtime import changeset, secrets
 from ..runtime import curate as curate_runtime
 from ..runtime.config import LLM_MODES
 from ..runtime.failure import failure
-from . import auth, inbox, worker
+from . import attention, auth, inbox, worker
 from . import bundle as B
 from . import ingest as I
 from . import maint_state as M
@@ -1074,12 +1074,51 @@ def _lease_scope(role: str) -> str:
     return M.ROLES[role]
 
 
+def _attention(path: Path) -> list[dict]:
+    """The attention items due (design §5.3), judged on the published revision as the audit
+    backlog is: the content hashes are those of the workspace the maintainer pulls. A bundle
+    without Git publishes its live tree."""
+    if curate_runtime._repo_root(path) is None:
+        return attention.plan(path, today=attention.today())
+    _root, _revision, archive = _published(path)
+    with tempfile.TemporaryDirectory(prefix="aiwiki-attention-") as scratch:
+        tree = Path(scratch) / "bundle"
+        _unpack(archive, tree)
+        return attention.plan(path, tree=tree, today=attention.today())
+
+
+def _frozen_sources(path: Path, files: object) -> None:
+    """A ``bundle-source`` file must name a file directly under ``sources/`` (never inbox/,
+    _rejected/ or another folder, nor the ledger itself) and hold the bytes
+    ``sources/.hashes.yaml`` records for it (design §5.6): the label says the bundle froze them,
+    so the writer checks it before storing. Anything malformed is left to maint_state (400)."""
+    ledger = None
+    for raw in files if isinstance(files, list) else ():
+        origin = raw.get("origin") if isinstance(raw, dict) else None
+        if not isinstance(origin, dict) or origin.get("kind") != changeset.SOURCE_KIND:
+            continue
+        try:
+            data = base64.b64decode(raw.get("content_b64"), validate=True)
+        except (TypeError, ValueError, binascii.Error):
+            continue
+        ledger = attention.ledger(path) if ledger is None else ledger
+        rel = origin.get("path")
+        if not isinstance(rel, str) or not changeset.top_level_source(rel) \
+                or hashlib.sha256(data).hexdigest() != ledger.get(rel):
+            raise M.MaintError(422, "not_frozen", f"{rel!r} is not a source of this bundle at these bytes "
+                                                  "(sources/.hashes.yaml); workspace pull and cite it again")
+
+
 @app.post("/maint/lease/{role}")
 def maint_lease_acquire(role: str, bundle: str | None = None, x_aiwiki_run: str | None = Header(default=None),
                         authorization: str | None = Header(default=None)):
-    """Take the role's run-level lease (TTL 3h); another live run gets 409 {holder, run, expires_at}."""
+    """Take the role's run-level lease (TTL 3h); another live run gets 409 {holder, run, expires_at}.
+
+    A new maintainer run also queues the attention items due; ``attention`` counts them.
+    """
     with _maint(bundle, authorization, _lease_scope(role), write=True) as (path, principal):
-        return M.acquire_lease(path, role, principal=principal, run=x_aiwiki_run)
+        return M.acquire_lease(path, role, principal=principal, run=x_aiwiki_run,
+                               attention=(lambda: _attention(path)) if role == "maintainer" else None)
 
 
 @app.delete("/maint/lease/{role}")
@@ -1117,6 +1156,8 @@ def maint_items_enqueue(body: dict, bundle: str | None = None,
                         authorization: str | None = Header(default=None)):
     """Enqueue collected items with their evidence bytes; idempotent by item_key, merged by topic."""
     with _maint(bundle, authorization, "curate", write=True) as (path, principal):
+        for raw in body.get("items") if isinstance(body.get("items"), list) else ():
+            _frozen_sources(path, raw.get("files") if isinstance(raw, dict) else None)
         return M.enqueue(path, body.get("items"), principal=principal, run=x_aiwiki_run)
 
 
@@ -1146,8 +1187,10 @@ def maint_item_get(item_id: str, bundle: str | None = None, authorization: str |
 def maint_item_add_file(item_id: str, body: dict, bundle: str | None = None,
                         x_aiwiki_run: str | None = Header(default=None),
                         authorization: str | None = Header(default=None)):
-    """Freeze one more evidence file ``{name, content_b64, origin}`` into the run's item."""
+    """Freeze one more evidence file ``{name, content_b64, origin}`` into the run's item; a
+    ``bundle-source`` one only at the bytes the bundle's ledger records (422 otherwise)."""
     with _maint(bundle, authorization, "curate", write=True) as (path, principal):
+        _frozen_sources(path, [body])
         return M.add_file(path, item_id, body, principal=principal, run=x_aiwiki_run)
 
 
@@ -1180,8 +1223,10 @@ def maint_status(bundle: str | None = None, authorization: str | None = Header(d
             status["audit"]["error"] = str(exc)[:300]
         else:
             # Age from when each version became due: a push to an old concept waits since the push.
-            due = [entry["since"] for entry in found["concepts"]
-                   if entry["reason"] != "seed" and audit_runtime._instant(entry["since"])]
+            # Seeds and legacy corrections are the pre-rule backlog, drained behind new work: an
+            # age of weeks at deploy is no stalled auditor (design §5.2).
+            due = [entry["since"] for entry in found["concepts"] if entry["reason"] != "seed"
+                   and not entry.get("legacy") and audit_runtime._instant(entry["since"])]
             status["audit"].update(pending=len(found["concepts"]), seed=found["seed"], epoch=found["epoch"],
                                    oldest_finished=min(due, key=audit_runtime._instant, default=None))
     return status
@@ -1193,8 +1238,11 @@ def audit_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | N
     """The concepts due for an external review (design §5.3), derived from the published revision.
 
     Each names its path, the ``base`` content hash a review cites, its generation, why it is due
-    (``generation``, ``external`` or ``seed``) and the frozen sources it cites; never a curator's
-    changeset message or hand-off text. New work comes first, oldest first.
+    (``generation``, ``external``, ``correction`` with the ``corrected_run`` that wrote it, the
+    ``reviewable_at`` before which no auditor reviews it, and ``legacy`` when no receipt under
+    A4's rule recorded it, or ``seed``) and the frozen sources it cites; never a curator's
+    changeset message or hand-off text. New work comes first, then legacy corrections, then
+    seeds, each oldest first.
     """
     principal = _auth(authorization, "read")
     _enabled("audit")

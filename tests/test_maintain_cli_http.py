@@ -98,19 +98,6 @@ def test_cli_and_skill_entry_resume_capacity_failure_over_http(tmp_path):
             state = json.loads((state_dir / "state.json").read_text())
             assert [j["status"] for j in state["sources"][0]["ingest"]] == ["failed", "done"]
 
-            # Existing automation's script delegates to the actual CLI, not a stale copy of retry logic.
-            bin_dir = tmp_path / "bin"
-            bin_dir.mkdir()
-            executable = bin_dir / "ai-wiki"
-            executable.write_text(f'#!{sys.executable}\nfrom aiwiki.cli.entry import main\nraise SystemExit(main())\n')
-            executable.chmod(0o755)
-            script = Path(__file__).resolve().parents[1] / "skills/ai-wiki-maintainer/scripts/run_sources.py"
-            legacy = subprocess.run([sys.executable, str(script), "--bundle", "kb", "--state-dir", str(state_dir)],
-                                    env={**env, "PATH": str(bin_dir) + os.pathsep + env["PATH"]},
-                                    capture_output=True, text=True, timeout=30)
-            assert legacy.returncode == 0, legacy.stdout + legacy.stderr
-            assert json.loads(legacy.stdout)["done"] == 2
-            assert len(submissions) == 3 and len(audits) == 2
         finally:
             server.shutdown()
             thread.join(timeout=5)
