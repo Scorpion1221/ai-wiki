@@ -677,6 +677,10 @@ def _git_evidence(bundle: str, state_dir: Path, match: re.Match, repos: object) 
     if b"\0" in data:
         raise MaintError(f"{path} is binary; cite a text file", USAGE)
     text, lines = data.decode(errors="replace"), None
+    # The collector never freezes a credential store; neither does an explicit request for one.
+    if planner.noise(path) == "secret" or planner.SECRET_MANIFEST.search(text):
+        raise MaintError(f"{path} is a credential store (a secret file or a Kubernetes Secret) and is never "
+                         "frozen; cite the commit message or a document that describes the change", USAGE)
     if match["first"]:
         first, last = int(match["first"]), int(match["last"] or match["first"])
         rows = text.splitlines(keepends=True)

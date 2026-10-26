@@ -84,7 +84,12 @@ MINIFIED = re.compile(r"\.min\.(?:js|css)$|\.map$")
 # Credential stores: the secret rules only catch known token shapes, not ``DB_PASS=...``.
 SECRET_FILE = re.compile(
     r"^\.env(?:\..+)?$|^\.netrc$|^id_(?:rsa|dsa|ecdsa|ed25519)|\.(?:pem|key|p12|pfx)$|^credentials.*\.json$"
+    # Deployment secrets: a GitOps repo's ``<service>.secret.yaml`` holds the service's whole .env in
+    # plaintext stringData (2026-10-20: one froze seven production keys into the bundle).
+    r"|(?:^|[._-])secrets?\.(?:ya?ml|json|env|toml|properties)$|^secrets?$"
 )
+# A Kubernetes Secret manifest under any file name: its data is credentials, whatever the keys are called.
+SECRET_MANIFEST = re.compile(r"(?m)^kind:[ \t]*[\"']?Secret[\"']?[ \t]*$")
 BINARY_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svg", ".psd", ".pdf", ".doc", ".docx", ".xls",
     ".xlsx", ".ppt", ".pptx", ".zip", ".gz", ".tgz", ".tar", ".7z", ".rar", ".jar", ".woff", ".woff2", ".ttf",

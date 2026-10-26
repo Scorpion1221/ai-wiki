@@ -32,15 +32,39 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("url_credentials", re.compile(
         r"(?i)(?<=://)[^/\s:@\"'<>]+:"
         r"(?!(?:password|passwd|pass|pwd|secret|changeme|x+|\*+)@)[^/\s@\"'<>{}$]{3,}(?=@[^\s/@])")),
+    # A credential-named key assigned a bare random value (a deployment secret's ``"JWT_SECRET": "…"``,
+    # ``E2B_API_KEY=…``, ``apiKey: …``): no vendor prefix, so only the key name and the value's shape tell.
+    # The value must be 12+ characters mixing letters and digits, so prose, booleans, numbers, ``${VAR}``
+    # templates and code expressions (anything with a dot) never match. A hash or an id the key names as one
+    # is not a secret; a key word in prose (``tokens: 1234…``) has no assignment shape and is not either.
+    # Only the ``value`` group is replaced, so the key name stays readable.
+    ("credential_assignment", re.compile(
+        r"(?i)(?<![A-Za-z0-9])[\"']?"
+        r"(?![A-Za-z0-9_.-]*(?:sha\d*|hash|digest|fingerprint|_id|_ids|name|ref|tokens|count)[\"']?[ \t]*[:=])"
+        r"[A-Za-z0-9_.-]*(?:secret|token|api_?key|password|passwd|private_?key|access_?key|auth_?key)"
+        r"[A-Za-z0-9_-]*[\"']?[ \t]*[:=][ \t]*[\"']?"
+        r"(?P<value>(?=[A-Za-z0-9+/_=-]*[0-9])(?=[A-Za-z0-9+/_=-]*[A-Za-z])[A-Za-z0-9+/_=-]{12,})"
+        # A dotted value is a code expression (``process.env.X``, ``config.s2s.key``), never a literal.
+        r"(?![A-Za-z0-9+/_=.-])")),
 )
+
+
+# Catch-all rules: a value a specific rule already names is reported (and redacted) once, by that rule.
+_FALLBACK = frozenset({"credential_assignment"})
+
+
+def _span(match: re.Match[str]) -> tuple[int, int]:
+    return match.span("value") if "value" in match.re.groupindex else match.span()
 
 
 def scan(text: str) -> list[tuple[str, int]]:
     """Return sorted ``(rule, 1-based line)`` pairs, one per line where a match starts."""
+    found = [(name, match) for name, pattern in RULES for match in pattern.finditer(text)]
+    specific = [_span(match) for name, match in found if name not in _FALLBACK]
     findings = {
         (name, text.count("\n", 0, match.start()) + 1)
-        for name, pattern in RULES
-        for match in pattern.finditer(text)
+        for name, match in found
+        if name not in _FALLBACK or not any(a < _span(match)[1] and _span(match)[0] < b for a, b in specific)
     }
     return sorted(findings, key=lambda finding: (finding[1], finding[0]))
 
@@ -49,6 +73,14 @@ def redact(text: str) -> tuple[str, int]:
     """Replace every rule match with ``<redacted:rule>``; return the text and the count."""
     count = 0
     for name, pattern in RULES:
-        text, replaced = pattern.subn(f"<redacted:{name}>", text)
+        marker = f"<redacted:{name}>"
+
+        def keep_key(match: re.Match[str], marker: str = marker) -> str:
+            if "value" not in match.re.groupindex:
+                return marker
+            start, end = match.start("value") - match.start(), match.end("value") - match.start()
+            return match.group(0)[:start] + marker + match.group(0)[end:]
+
+        text, replaced = pattern.subn(keep_key, text)
         count += replaced
     return text, count

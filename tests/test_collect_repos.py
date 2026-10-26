@@ -1148,13 +1148,15 @@ def test_collect_never_freezes_credentials(tmp_path: Path) -> None:
     pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
     commit_all(work, "deploy", {
         "deploy/id_ed25519": pem,
+        "deploy/app.secret.yaml": "kind: Secret\nstringData:\n  JWT_SECRET: a1b2c3d4e5f6a7b8c9d0\n",
+        "docs/manifest.yaml": "apiVersion: v1\nkind: Secret\nstringData:\n  E2B_API_KEY: e2b0f1e2d3c4b5a6978\n",
         "config/.env.production": "DB_PASS=hunter2\n",
         "docs/setup.md": "Use aiw_c_9f8e7d6c5b4a39281706f5e4 with " + "AKIA" + "IOSFODNN7EXAMPLE.\n" + pem,
     })
 
     collected = collect_repos.collect(scan_report(tmp_path, root, "--checkpoint-json", cursor_file(tmp_path, cursor)))
 
-    assert collected["counts"]["noise"] == {"secret": 2}
+    assert collected["counts"]["noise"] == {"secret": 3}
     assert sorted(candidate["topic_key"].rsplit("#", 1)[1] for candidate in collected["candidates"]) == ["docs"]
     frozen = [file for candidate in collected["candidates"] for file in candidate["files"]]
     assert [file["origin"].get("path") for file in frozen] == [None, "docs/setup.md"]
@@ -1162,6 +1164,7 @@ def test_collect_never_freezes_credentials(tmp_path: Path) -> None:
     for file in frozen:
         text = file["data"].decode()
         assert secrets.scan(text) == [] and "hunter2" not in text
+        assert "a1b2c3d4e5f6a7b8c9d0" not in text and "e2b0f1e2d3c4b5a6978" not in text
 
 
 def test_collect_keeps_the_previous_cursor_row_when_evidence_cannot_be_read(tmp_path: Path) -> None:
