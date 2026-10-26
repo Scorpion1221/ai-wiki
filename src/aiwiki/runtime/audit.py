@@ -1072,11 +1072,12 @@ def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping
 def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], dict[tuple[str, str], dict]]:
     """For each ``(path, content hash)`` a done audit changeset judged, the order of its newest
     judgement; the seed paths among them; and the newest correction that wrote each, ``{run,
-    at, order, legacy}``. Jobs are ordered by finish (to the second, then ``finished_ns``), then start
-    and id (the writer runs them one at a time), never by the order their files are listed in. An admin-reverted audit is
-    no review: its concepts are due again. A correction judges nothing it wrote, nor does an
-    older judgement of the same bytes settle it: only a verified or unverified review after the
-    correction does, so the version a correction leaves is a ``correction`` for a later run
+    at, order, legacy}``. Jobs are ordered by finish (to the second, then ``finished_ns``), then
+    start and id (the writer runs them one at a time), never by the order their files are listed
+    in. An admin-reverted audit is no review: its concepts are due again. A correction judges
+    nothing it wrote, nor does an older judgement of the same bytes settle it: only a verified or
+    unverified review after the correction does, so the version a correction leaves is a
+    ``correction`` for a later run
     (§5.3, §5.4 A4). A correction is ``legacy`` when no receipt written under that rule (a
     record that names its ``run``) recorded it: a Codex audit's, or an external auditor's from
     before, which stamped itself verified."""
