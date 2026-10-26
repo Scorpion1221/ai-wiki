@@ -30,8 +30,11 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   such a file), nor `admin` or `human_verify`. The gate stamps `generated`, `verified` and
   `status`: a maintainer's changeset never verifies anything, whatever it writes.
 - **No self-audit.** An auditor may review only the backlog the server derives and never a
-  revision its own principal (or role) generated. The server knows principals, not agents: a
-  maintainer that reaches the auditor's token (or the reverse) audits its own work unnoticed.
+  revision its own principal (or role) generated, except a `correction` entry: another run of
+  the auditor may review it from `reviewable_at`, 12 h after the correction. A process's
+  verification of its own generation counts only 12 h after it. The server knows principals,
+  not agents: a maintainer that reaches the auditor's token (or the reverse) audits its own
+  work unnoticed.
   So neither may reach the other's token, which leaks two ways:
   - one OS user: either reads the other's token from `/proc/<pid>/environ`. Run them under
     different OS users or hosts;
@@ -40,7 +43,10 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
     and to every workspace owner or admin. Check it from each host before an auditor goes
     live (§3); the runbook's step 2 does, without printing a token.
 - **Evidence is never an agent's own text.** A process cites frozen work-item files; only a
-  `human:` principal uploads a packet.
+  `human:` principal uploads a packet. An attention item's notice is never evidence, and the
+  collectors and `maint add-evidence` never freeze a credential store (`*.secret.yaml`,
+  `secrets.json`, a Kubernetes `kind: Secret`); every frozen text is redacted of secrets
+  (a `credential_assignment` rule catches a bare value under a credential-named key).
 - **Quotas.** Changesets per hour and per day and deprecations per day are metered per
   principal (429 with `Retry-After`); the `maintainer` preset carries 30, 150 and 10, and the
   `auditor` preset 200 reviews a day. A member queues at most 30 new submissions per bundle a

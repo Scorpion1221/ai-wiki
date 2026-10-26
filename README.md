@@ -137,8 +137,10 @@ failures produce a failed audit job. If ingest changed no concept files, audit r
 immediate idempotent `passed` job with `reason: no_concepts_to_audit` and no audit commit.
 Bookkeeping is service-owned. Agents decide content only: the service restores `verified`
 history (and, at audit, `status` and `sources`), stamps `generated` with trusted time only for a
-substantive change, appends a verification event only when the auditor's JSON verdict lists the
-concept as `verified`, and sets `status` to `stable` at audit (`deprecated` stays). Formatting-only
+substantive change, appends a verification event only when the auditor's JSON verdict lists it
+as `verified` and the auditor did not change it (a process reviewer's correction is its new,
+unverified generation, which another run reviews 12 h later), and sets `status` to `stable` at
+audit (`deprecated` stays). Formatting-only
 edits and frontmatter spilled into a body are discarded; each repair is recorded under
 `deterministic_repairs`. An audit whose verdict is missing or unparseable ends `needs_attention`
 with `audit.reason: verdict_missing`/`verdict_invalid`, and one more audit of that ingest is
@@ -172,8 +174,6 @@ The canonical query, maintenance, and curation skills live in [`skills/`](skills
 - `ai-wiki-curating-maintainer` — the maintainer that curates: `doctor`, `maint begin/next`,
   local curation, `validate`/`propose` through the writer's gate, and the `maint end` report;
 - `ai-wiki-auditor` — the external auditor's `review` loop over the server-derived backlog;
-- `ai-wiki-maintainer` — rollback only: the legacy `ai-wiki maintain` ledger over the
-  server's Codex ingest and audit;
 - `okf-knowledge-curator` — strict OKF v0.2 authoring protocol used by the worker and, in its
   remote maintainer mode, by the curating maintainer.
 
@@ -194,9 +194,10 @@ Install keeps a platform-managed `multica-metadata.json` but replaces every othe
 these skill directories, so stale bundled scripts cannot silently override the shipped
 version; a directory whose SKILL.md names another skill is never touched. From a checkout,
 `python3 scripts/sync_skills.py --check|--apply` does the same against the repository copy. Publish the same directories to Multica and compare them against this
-check before enabling its Maintainer automation. Sync `ai-wiki-maintainer` only after its
-release is on GitHub `main` and deployed to the writer and read mirror: its preflight needs
-`compatible` from `ai-wiki health --json`, and reinstalling an older client cannot supply it.
+check before enabling its Maintainer automation. The legacy `ai-wiki-maintainer` skill is
+retired: a full `ai-wiki skill install` (as `ai-wiki update` runs it) removes an installed copy
+whose SKILL.md still names it, never a foreign directory of that name. The `ai-wiki maintain`
+command it drove stays as a legacy CLI command.
 
 The CLI is non-interactive: usage/API failures are structured on stdout with exit code 2/1, and destructive `bundle rm` requires `--yes`. Bare `-v`, `-V`, and `--version` probes return only the version.
 

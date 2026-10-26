@@ -5,6 +5,9 @@ This runbook deploys the Phase 2 shadow of the design (§9 "影子对比"): a se
 running exactly as today. Every step has its own verification and rollback, and nothing
 in it writes to production's bundle, its clone or its origin.
 
+A record of 2026-09-27: the final cut-over (docs/final-cutover-runbook.md) superseded it, and
+the legacy `ai-wiki-maintainer` skill it names as production's is retired since 0.3.5.
+
 What changes, in order:
 
 | § | Change | Production effect |

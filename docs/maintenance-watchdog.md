@@ -167,8 +167,9 @@ The watchdog runs once a day, at 07:00 CST, after the 04:00 maintainer run, on t
   `process:ai-wiki-watchdog` read token in `AIWIKI_WATCHDOG_TOKEN`: the curating maintainer's
   progress lives on the writer, so its maint checks page on cursors that stopped advancing
   (the maintainer did not run), items waiting too long (a member's submission after 24 h, any
-  item after 72 h) or needing a human, and stuck run leases; the audit check pages when the
-  Auditor's backlog has new work older than 72 h.
+  item after 72 h, attention items included) or needing a human, and stuck run leases; the
+  audit check pages when the Auditor's backlog has new work older than 72 h (never seed or
+  legacy corrections).
 - The maintainer's runtime host, `--multica --no-checkpoint`, once for the maintainer's
   autopilot and once with `--autopilot-id <the Auditor's autopilot>`: failed, overdue and stuck
   runs and issues. The Auditor's check runs at 10:30 CST, after its 07:00 run has ended.
@@ -188,10 +189,11 @@ shadow agent retires. The Auditor's failed or missing runs also page through its
   days), add `--bundle <shadow bundle path>` to `ExecStart`. That also runs the writer checks
   (commit age and jobs) against the shadow bundle, so the shadow bundle needs its own
   `.okf/jobs/`. Remove the flag when the shadow is deleted.
-- After a Phase 3a rollback (legacy prompt, `maint export-v4 --pending-manifest`,
+- After a Phase 3a rollback (`maint export-v4 --pending-manifest`, the final-cutover runbook §13,
   `solvely-wiki` removed from `AIWIKI_CHANGESETS_COMMIT`), nothing rewrites the server cursors
-  and the exported items stay `ready`. `maint_cursor_stale` then fires after 30 hours and
-  `maint_ready_stale` after 72, and neither clears. Once `ai-wiki maint status` shows no
+  and the exported items stay `ready`; attention-only items are not exported and stay `ready`
+  too. `maint_cursor_stale` then fires after 30 hours and `maint_ready_stale` after 72, and
+  neither clears. Once `ai-wiki maint status` shows no
   active lease, archive the queue as the worker's user:
 
   ```bash
@@ -205,10 +207,11 @@ shadow agent retires. The Auditor's failed or missing runs also page through its
 ## Multica runtime host (optional)
 
 The Multica and ledger checks need the `multica` CLI to be logged in to the workspace with
-read access, and they need the maintainer's durable ledger. Both are on the agent runtime
-host (currently `ip-10-2-192-225`, user `ubuntu`). The autopilot uses
+read access, and the ledger check needs the legacy `ai-wiki maintain` ledger. Both are on the
+agent runtime host (currently `ip-10-2-192-225`, user `ubuntu`). The legacy flow used
 `${XDG_STATE_HOME:-$HOME/.local/state}/ai-wiki-maintainer/solvely-wiki` as its ledger
-directory.
+directory; in the final state the unit runs `--multica --no-checkpoint` without `--ledger`
+(docs/final-cutover-runbook.md step 10.2), and the example below is the legacy one.
 
 ```bash
 multica autopilot runs 5c80732b-67a6-4e33-ba22-c620a94e27c1 --limit 1 --output json   # auth smoke test

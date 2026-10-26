@@ -21,8 +21,8 @@ The final state is these writer flags, and nothing else changes on the server:
 Step 6 sets them all in one drop-in. Step 11 then takes the Codex configuration, the model
 gateway credential and admin's lark-cli login off the writer host, with backups.
 
-Every step below has its verification and its rollback; §13 rolls back to the legacy path
-from any point. Until step 11, rolling back is removing the step 6 drop-in and restoring
+Every step below has its verification and its rollback; §13 rolls the writer back to the
+legacy path from any point (since 0.3.5 without the legacy maintainer skill: §15). Until step 11, rolling back is removing the step 6 drop-in and restoring
 Multica settings from the archive step 1 makes; after it, restore step 11's backup first and,
 once the credentials it holds are revoked, install and prove new ones before anything goes back
 to Codex (step 11's rollback).
@@ -90,7 +90,7 @@ Never restart the writer between 03:30 and 06:30 CST, nor while a job or lease i
 Every operator step of the three units, in the order to run them. The sections below hold the
 commands. **Owner: yes** means the owner must act or decide (a credential, an approval, a
 risk acceptance); every other step needs only the laptop and host access. A rollback from any
-point is §13 (issue RB1).
+point is §13.
 
 1. **Rotate the model gateway token, now.** Where: the gateway console (gateway.ddit.ai). The
    commented `ANTHROPIC_AUTH_TOKEN` line of aliyun-jp's world-readable `/etc/environment`
@@ -701,6 +701,7 @@ multica autopilot update $PROD_AP --title "AI Wiki daily incremental sync" \
 ```
 
 The skill contents roll back from `skill-<id>.before.json` as in the Phase 2 runbook §11.3.
+Since 0.3.5 this block restores a retired skill (`$LEGACY_SKILL`): see §13 step 3.
 
 ## 6. Writer drop-in: the final flags (host)
 
@@ -734,7 +735,8 @@ On `STOP`, rerun the last line once idle: the drop-in takes effect only at that 
 Every concept generated before the epoch and not verified in its current version is **seed**:
 the unverified ones, including the concepts of H8's pending-audit ingests and R2's
 `audit_pending`, the newest legacy curations. The backlog releases seed oldest first, so at the
-default 10 a day the newest would wait about a week, and the 72 h alert does not measure seed.
+default 10 a day the newest would wait about a week, and the 72 h alert does not measure seed
+or legacy corrections.
 The Auditor runs once a day (07:00 CST, after the maintainer's 04:00 run) and reviews up to
 20 concepts a run. New work comes first in its backlog, so 30 seed a day releases a seed of
 about 70 to 80 concepts (the unverified count `ai-wiki health` shows, plus verifications
@@ -868,9 +870,11 @@ done, the canary's concept was reviewed:
 
 ```bash
 uv run ai-wiki -b solvely-wiki cat <the concept_file> --json | jq -c '.metadata | {status, trust, verification_current}'
-#   stable; machine-confirmed and true (verified or a corrected narrowing), or unverified with the reviewer's note
+#   stable; machine-confirmed and true when verified; a correction reads verification_current false and is
+#   due as `correction` from its reviewable_at; or unverified with the reviewer's note
 git -C $ws/clone pull -q && git -C $ws/clone log -3 --format='%h %s'                   # the audit changeset's commit
 grep -A3 '^verified:' $ws/clone/<the concept_file>                                      # by: process:ai-wiki-auditor, never the maintainer
+#   after a correction there is no new auditor event: the next run's review adds it
 ```
 
 **8c. The schedules** (laptop). The maintainer's daily 04:00 trigger resumes; the Auditor
@@ -995,7 +999,7 @@ anything `-E` would blank.
 What the writer side pages on: a member's submission waiting in ready over 24 h (it missed a
 daily run), any item over 72 h or needing a human, a cursor that has not advanced for 30 h, a
 run lease stuck over 3 h, no commit for 48 h, writer job failures, less than 3 GB free on the
-bundle's disk, and the oldest audit
+bundle's disk, and the oldest non-seed, non-legacy audit
 backlog entry waiting over 72 h or a backlog the writer cannot derive
 (`audit_backlog_stale`, `audit_backlog_error`). A missed or failed daily run of the
 maintainer or the Auditor pages the same morning from the Multica side (10.2): the maintainer's
@@ -1230,10 +1234,11 @@ Finally, `shred -u $FS/owner.h $FS/legacy.h` on the host, and `unset AIWIKI_TOKE
 - Stays: the gate (`runtime/changeset.py`, `policy.py`, the `_transaction` pipeline),
   recovery, receipts, the collectors, the shadow bundle as the canary target.
 - Rollback-only until the Codex code is deleted (design W19): the legacy Codex runner, `POST
-  /jobs/{id}/audit`, `/jobs/pending-audit`, `ai-wiki maintain` and `audit`, `ai-wiki admin
-  inbox requeue`, the `ai-wiki-maintainer` skill, the archive in `$FL` (the only copy of the
-  legacy texts), the legacy ledger on the runtime host
-  (`~/.local/state/ai-wiki-maintainer/solvely-wiki`, read-only from step 4 on).
+  /jobs/{id}/audit`, `/jobs/pending-audit`, the legacy CLI commands `ai-wiki maintain` and
+  `audit`, `ai-wiki admin inbox requeue`, the archive in `$FL` (the only copy of the legacy
+  texts), the legacy ledger on the runtime host (`~/.local/state/ai-wiki-maintainer/solvely-wiki`,
+  read-only from step 4 on).
+- Gone: the `ai-wiki-maintainer` skill, retired in 0.3.5 (§13 step 3).
 - Member uploads stay verbatim in the git-ignored `sources/inbox/` after their item closes
   (the requeue needs them), and no read route serves them or `.okf`; what Git holds of each is
   its intake copy under `sources/inbox/intake/` (text redacted), which `/workspace` leaves out,
@@ -1244,7 +1249,7 @@ Finally, `shred -u $FS/owner.h $FS/legacy.h` on the host, and `unset AIWIKI_TOKE
 
 ## 13. Rollback to the legacy path
 
-Each step's own rollback is listed with it. To go back to the legacy flow from any point
+Each step's own rollback is listed with it. To go back to the legacy writer from any point
 after step 5, in this order (skip what never ran):
 
 1. **Stop the new runs** (laptop): `multica autopilot update $PROD_AP --status paused` and
@@ -1258,25 +1263,29 @@ after step 5, in this order (skip what never ran):
    bundles (it answers 409 under `AIWIKI_LLM=off`, but not on a revoked key: each item it
    hands to a dead credential ends as a failed Codex job), and widen the legacy token again
    (step 7's rollback). Keep this build: 9d62536 no longer fits the state step 6 left (§0).
-3. **The agent back to the legacy flow** (laptop): step 5's rollback block.
-4. **The cursors and unfinished items back to the ledger** (issue RB1 below): the writer's
-   cursors as a v4 checkpoint on the newest run issue, so the legacy `find` picks them up, and
-   the unfinished work items as a `maintain` manifest.
-5. **Resume the legacy schedule** (laptop): `multica autopilot update $PROD_AP --status active`;
-   its next run starts from RB1's checkpoint.
-6. **Archive the queue** (host, once `status_w solvely-wiki | jq .leases` shows no live
-   lease), so the watchdog stops paging on cursors nothing advances:
-   `as_admin mv $PROD/.okf/maint $PROD/.okf/maint.rolled-back-$(date +%F)`.
-7. **The watchdog**: the writer side stays as it is. On the runtime host R3's rollback removes
+3. **No legacy agent flow in this release.** The skill the legacy agent ran on,
+   `ai-wiki-maintainer`, is retired since 0.3.5 (`ai-wiki update` removes an installed copy), so
+   nothing drives the legacy `ai-wiki maintain` CLI command. After step 2 the writer's Codex
+   curates member submissions; repository and conversation collection waits until the curating
+   maintainer runs again (§5 forward). Bringing a legacy agent back needs a build that still
+   ships its skill (0.3.4 or older) and is the owner's call; then step 5's rollback block, issue
+   RB1 below (cursors and unfinished items to the ledger) and `multica autopilot update $PROD_AP
+   --status active`, in that order.
+4. **Archive the queue**, only after RB1 exported its items (host, once `status_w solvely-wiki |
+   jq .leases` shows no live lease), so the watchdog stops paging on cursors nothing advances:
+   `as_admin mv $PROD/.okf/maint $PROD/.okf/maint.rolled-back-$(date +%F)`. Without RB1, keep
+   it: the curating maintainer resumes from it, and `maint_cursor_stale` pages meanwhile.
+5. **The watchdog**: the writer side stays as it is. On the runtime host R3's rollback removes
    the Multica side, which pages on the legacy runs only once reinstalled without
    `--no-checkpoint` (docs/maintenance-watchdog.md, "Multica runtime host").
-8. The Auditor stays paused (`multica agent archive $AUDITOR_AGENT` to retire it); committed
+6. The Auditor stays paused (`multica agent archive $AUDITOR_AGENT` to retire it); committed
    changesets and audit changesets are valid OKF content and stay.
 
 Issue RB1, title `[OPS] AI Wiki rollback RB1: export cursors to the legacy ledger`, assigned
-to `$PROD_AGENT` after step 3 of this list restored its legacy skills, and marked
+to `$PROD_AGENT` only once the owner brings a legacy agent back (step 3), and marked
 `ai_wiki_ops` like every one-time issue; `<LAST_RUN_ISSUE>` is
-`multica autopilot runs $PROD_AP --limit 1 --output json | jq -r '.runs[0].issue_id'`:
+`multica autopilot runs $PROD_AP --limit 1 --output json | jq -r '.runs[0].issue_id'`. It runs
+the checkpoint module with the `ai-wiki` CLI's own interpreter, so it needs no skill directory:
 
 ```text
 One-time operations task from the owner: hand the curating maintainer's progress back to the
@@ -1284,21 +1293,20 @@ legacy ledger. In one bash shell run exactly the commands below, in order, and n
 stop at the first failure. Post one comment with every command and its complete output
 verbatim, then set this issue to done with --no-start, or to blocked if you stopped.
 
-SKILL_DIR="${AI_WIKI_MAINTAINER_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/ai-wiki-maintainer}"
-[ -f "$SKILL_DIR/scripts/checkpoint.py" ] || SKILL_DIR="$PWD/.claude/skills/ai-wiki-maintainer"
-[ -f "$SKILL_DIR/scripts/checkpoint.py" ] || SKILL_DIR="$HOME/.agents/skills/ai-wiki-maintainer"
+AIWIKI_PY="$(dirname "$(readlink -f "$(command -v ai-wiki)")")/python3"
 mkdir -p /tmp/ai-wiki-rollback
 ai-wiki -b solvely-wiki maint status --json
 ai-wiki -b solvely-wiki maint export-v4 --config "$HOME/.ai-wiki/maint-solvely-wiki.json" --output /tmp/ai-wiki-rollback/v4.json --pending-manifest /tmp/ai-wiki-rollback/sources.json --json
-python3 "$SKILL_DIR/scripts/checkpoint.py" write --issue <LAST_RUN_ISSUE> --file /tmp/ai-wiki-rollback/v4.json
+"$AIWIKI_PY" -m aiwiki.maint.checkpoint write --issue <LAST_RUN_ISSUE> --file /tmp/ai-wiki-rollback/v4.json
 ai-wiki -b solvely-wiki maintain --manifest /tmp/ai-wiki-rollback/sources.json --state-dir "${XDG_STATE_HOME:-$HOME/.local/state}/ai-wiki-maintainer/solvely-wiki" --import-only --json
 
 Stop before the export if maint status shows a maintainer lease with "active": true.
 ```
 
 Verify: `write` reads the checkpoint back identical; `maintain --import-only` lists every
-exported item as a frozen source. The next legacy run's `find` reports that checkpoint's
-`completed_at`.
+exported item as a frozen source. The export leaves attention notices out:
+`manifest.attention_only` counts items that held nothing else, which the next writer run start
+derives again. The next legacy run's `find` reports that checkpoint's `completed_at`.
 
 ## 14. The owner's own review (afterwards, when wanted)
 
@@ -1321,6 +1329,39 @@ Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` show
 `human-reviewed` with `verification_current: true` for `verified` or `corrected`. Rollback:
 `ai-wiki admin revert --changeset <the audit changeset id> --reason '<why>'`.
 
+## 15. Maintenance notes
+
+**2026-10-27, release 0.3.5** (operator note). Steps 1–11 are the record of 2026-09-29: where
+they use the `ai-wiki-maintainer` skill (step 1's archive, R2, step 5's rollback block) they
+describe that day.
+
+- **Attention items.** Each maintainer run start (`maint begin`) queues at most 20 new
+  `attention:<path>` items, oldest first: a concept the Auditor left `unverified` in its current
+  version (priority 45), or one past its stale date (priority 20). An item holds only
+  `notice.md` (facts, never evidence; the writer refuses a changeset citing nothing else) and its
+  `brief` says what to do; the maintainer skill §3.2 has the rules. Freshness now defaults to
+  stale 90 days after `generated.at` for a concept with no `stale_after` (it reads `unspecified`
+  until then, never `fresh`). On the 2026-10-26 clone, 60 concepts reach that date in November,
+  208 in December and 256 in January, so expect `stale` items at up to 20 a run from November;
+  `maint_ready_stale` pages if they wait over 72 h. A `maint export-v4` leaves notices out.
+- **Self-verification.** A `process:` actor's `verified` event on its own generation counts for
+  `verification_current` only from 12 h after that generation, and an auditor's correction adds
+  no verified event: another run reviews it from `reviewable_at`. A human's verdict, `corrected`
+  included, still verifies at once (§14). Expected effect at deploy: about 200 concepts stop
+  reading `verification_current: true` (on the 2026-10-26 clone 397 → 198: 169 generated by
+  `process:ai-wiki-auditor`, 30 by `process:ai-wiki-adversarial-audit`); trust tiers do not
+  change. Readers then treat them as unverified for current facts until re-reviewed.
+- **Legacy corrections drain after the deploy.** Those concepts, and the Codex corrections left
+  unverified, enter the backlog as `correction` entries with `legacy: true`, after new work and
+  before seed: up to 216 (the 2026-10-26 clone, which has no review receipts: 169 auditor, 47
+  Codex). Any Auditor run may review them, and the 72 h alert ignores them. At 20 reviews a day
+  they drain in about two weeks, longer on days of heavy new work; the Auditor's `review end`
+  reports `backlog_remaining`.
+- **Retired skill.** `ai-wiki-maintainer` no longer ships: the agents' `ai-wiki update` removes
+  installed copies on each host, and the legacy agent flow is no rollback target of this release
+  (§13 step 3). Publish the four skills (AGENTS.md §5). The `ai-wiki maintain` command stays as a
+  legacy CLI command.
+
 ## Open risks
 
 - Step 2's isolation gate may fail on the Multica check: a runtime whose daemon is logged in
@@ -1332,15 +1373,15 @@ Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` show
   (24 h) say when to raise it further.
 - The first days of `AIWIKI_AUDIT=external` release the old unverified concepts into the
   backlog 30 a day (the seed, step 6), so the Auditor's backlog stays long for a few days; the
-  maintainer is not affected. The 72 h backlog alert (step 10.1) leaves seed entries out of
-  its measure, so it pages only on new work waiting.
+  maintainer is not affected. The 72 h backlog alert (step 10.1) leaves seed entries and legacy
+  corrections out of its measure, so it pages only on new work waiting.
 - An Auditor's `unverified` conclusion leaves the concept stable, unverified in its current
-  version and off the backlog until a new generation or a push changes it; no work item tells
-  the maintainer (design §5.3's `attention:<path>` items come with W18's attention collector),
-  and no alert counts them. Concepts a legacy Codex audit corrected but left unverified are
-  generated by an auditor, so they never enter the backlog (A4). Until W18, the Auditor's run
-  comment names such paths: the owner reads them there, and reviews one with §14 or hands it
-  to the maintainer as new evidence.
+  version and off the backlog until a new generation or a push changes it; the next maintainer
+  run start queues an `attention:<path>` item (priority 45; at most 20 new a run start, oldest
+  first); no separate alert counts them, but `maint_ready_stale` fires after 72 h. Legacy
+  corrections (Codex, and auditor corrections that stamped themselves verified: up to 216, §15)
+  are due as `legacy` corrections after new work and before seeds. Any auditor run may review
+  them; the 72 h alert ignores them.
 - An image a member submits is committed to Git as sent at intake: nothing can redact an
   image, and Git history keeps what it commits, so removing a secret someone sent in one
   means rewriting the history of the remote and every mirror. The member notice says so (§1).

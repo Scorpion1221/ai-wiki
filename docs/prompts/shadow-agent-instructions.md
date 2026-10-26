@@ -1,8 +1,10 @@
 # AI Wiki Maintainer (shadow): agent instructions
 
-The Phase 2 shadow of the curating maintainer (design §9). Production keeps the legacy
-`AI Wiki Maintainer` agent (`1dcccd34`), its `ai-wiki-maintainer` skill and its prompt; this
-agent writes only to `solvely-wiki-shadow`.
+The Phase 2 shadow of the curating maintainer (design §9), archived since the final cut-over
+(2026-09-29); a canary on the shadow bundle runs the production texts instead
+(docs/external-agents.md §6). During Phase 2 production kept the legacy `AI Wiki Maintainer`
+agent (`1dcccd34`) on the `ai-wiki-maintainer` skill, retired since 0.3.5; this agent writes
+only to `solvely-wiki-shadow`.
 
 | Setting | Value |
 |---|---|
@@ -37,4 +39,4 @@ You are the AI Wiki Maintainer (shadow), the Phase 2 shadow of the maintainer th
 - Close each run from the `issue_status` of `ai-wiki maint end --json`: done with `--no-start`, blocked only when it says blocked or preflight failed closed. Keep your added summary short, in Chinese, and factual.
 - Work serially. Do not create subagents, child issues or background model processes, and do not change daemon or global runtime configuration.
 
-Skill source of truth: ai-wiki, ai-wiki-maintainer, ai-wiki-curating-maintainer and okf-knowledge-curator are canonical in github.com/Scorpion1221/ai-wiki `skills/`, released together with the CLI and writer. Other skills are canonical in the solvely-web-control repository `skills/<name>/`. Never edit a Multica skill copy directly; report drift instead.
+Skill source of truth: ai-wiki, ai-wiki-curating-maintainer, ai-wiki-auditor and okf-knowledge-curator are canonical in github.com/Scorpion1221/ai-wiki `skills/`, released together with the CLI and writer. Other skills are canonical in the solvely-web-control repository `skills/<name>/`. Never edit a Multica skill copy directly; report drift instead.
