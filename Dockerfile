@@ -31,6 +31,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+# The wheel force-includes skills/ (pyproject), so the image build needs it too.
+COPY skills ./skills
 RUN uv sync --extra service --frozen --no-dev
 
 # Bundles are mounted at /bundles (read-only), one bundle per subdirectory; bind all
