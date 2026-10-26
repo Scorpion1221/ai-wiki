@@ -463,6 +463,23 @@ def test_the_newest_correction_names_the_run_whatever_order_receipts_are_read(tm
         assert reviewed[("m.md", "c1")] < corrected[("m.md", "c1")]["order"]  # it settles nothing
 
 
+def test_receipts_finished_within_one_second_keep_their_order(tmp_path) -> None:
+    """A correction and the review after it can finish in the same second (CI does): their order
+    comes from ``finished_ns``, never from the random job ids, or the review would not settle it."""
+    jobs = tmp_path / ".okf" / "jobs"
+    jobs.mkdir(parents=True)
+    second = "2026-10-17T02:00:00Z"
+    for job_id, ns, review in (
+            ("ffff", 1, {"verdict": "corrected", "outcome": "corrected", "base": "b0", "run": "AUD-2"}),
+            ("0000", 2, {"verdict": "unverified", "outcome": "unverified", "base": "c1", "run": "AUD-3"})):
+        (jobs / f"{job_id}.json").write_text(json.dumps({
+            "id": job_id, "kind": "audit", "mode": "changeset", "status": "done", "run": review["run"],
+            "started": second, "finished": second, "finished_ns": ns,
+            "reviews": [{"path": "m.md", "content_hash": "c1", **review}]}), encoding="utf-8")
+    reviewed, _seeded, corrected = audit.review_records(tmp_path)
+    assert reviewed[("m.md", "c1")] > corrected[("m.md", "c1")]["order"]  # the later review settles it
+
+
 def test_legacy_corrections_wait_behind_new_work_and_never_page(gate) -> None:
     """Legacy corrections (rule 4): an auditor's correction that stamped itself verified before
     A4 (rule 1 reads it unverified), or a Codex audit's left unverified, has no receipt written

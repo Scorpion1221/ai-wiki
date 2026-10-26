@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -1071,8 +1072,8 @@ def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping
 def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], dict[tuple[str, str], dict]]:
     """For each ``(path, content hash)`` a done audit changeset judged, the order of its newest
     judgement; the seed paths among them; and the newest correction that wrote each, ``{run,
-    at, order, legacy}``. Jobs are ordered by finish, then start and id (the writer runs them
-    one at a time), never by the order their files are listed in. An admin-reverted audit is
+    at, order, legacy}``. Jobs are ordered by finish (to the second, then ``finished_ns``), then start
+    and id (the writer runs them one at a time), never by the order their files are listed in. An admin-reverted audit is
     no review: its concepts are due again. A correction judges nothing it wrote, nor does an
     older judgement of the same bytes settle it: only a verified or unverified review after the
     correction does, so the version a correction leaves is a ``correction`` for a later run
@@ -1086,7 +1087,8 @@ def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], 
     receipted: set[tuple[str, str]] = set()
     jobs = sorted((job for job in I.changeset_jobs(bundle) if job.get("kind") == "audit"
                    and job.get("status") == "done" and job.get("id") not in reverted),
-                  key=lambda job: tuple(str(job.get(key) or "") for key in ("finished", "started", "id")))
+                  key=lambda job: (str(job.get("finished") or ""), int(job.get("finished_ns") or 0),
+                                   str(job.get("started") or ""), str(job.get("id") or "")))
     for order, job in enumerate(jobs):  # oldest first: the newest record of a version wins
         for review in job.get("reviews") or []:
             if not isinstance(review, dict) or not isinstance(review.get("path"), str):
@@ -1838,6 +1840,9 @@ def run_changeset(
         rollback()
     finally:
         job["finished"] = curate._now()
+        # Receipts that finish within one second are ordered by this, never by their random ids:
+        # review_records needs the newest correction of a version (§5.4 A4).
+        job["finished_ns"] = time.time_ns()
         if job.get("status") == "failed" and not isinstance(job.get("failure"), dict):
             job["failure"] = classify(job)
         if job.get("status") == "done" and on_done is not None:
