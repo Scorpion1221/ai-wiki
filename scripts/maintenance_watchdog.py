@@ -639,7 +639,8 @@ def check_audit(name: str, args: argparse.Namespace, now: datetime) -> tuple[dic
         raise CheckError(f"GET /maint/status?bundle={name} has no audit section")
     oldest = parse_ts(audit.get("oldest_finished"))
     facts = {"mode": audit.get("mode"), "pending": audit.get("pending"), "oldest": iso(oldest),
-             "age_hours": age_h(now, oldest), "seed": audit.get("seed")}
+             "age_hours": age_h(now, oldest), "seed": audit.get("seed"),
+             "triage": status.get("triage")}  # the skips the auditor re-checks: counted, no alert yet
     alerts: list[dict] = []
     if audit.get("mode") != "external":
         return facts, alerts

@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.5 -->
+<!-- ai-wiki:version 0.3.6 -->
 
 # AI Wiki Curating Maintainer
 
@@ -34,9 +34,7 @@ on with the installed version. A failed `ai-wiki update` → report it in one li
 install by hand; go on only if `ai-wiki skill` shows this skill `current`, else stop blocked. Never
 update between `maint begin` and `maint end`: the run holds the lease.
 
-```sh
-ai-wiki -b "$bundle" doctor --role curator
-```
+Then `ai-wiki -b "$bundle" doctor --role curator`:
 
 - Exit `0`: continue. Exit `4` lists the failed checks (`config`; `whoami`; `api`: this CLI is
   older than the writer's `client.min`; `scopes`: exactly read, submit, curate; `actor`; `writer`:
@@ -68,11 +66,7 @@ judge none of this. Run `begin` and `propose` with a 600 s tool timeout; rerun a
 
 Read `$WS/SCHEMA.md` and `$WS/purpose.md` once per run. Then repeat until §3.1 says stop.
 
-### 3.1 Claim
-
-```sh
-ai-wiki -b "$bundle" maint next --json
-```
+### 3.1 Claim: `ai-wiki -b "$bundle" maint next --json`
 
 - Exit `0`: a brief of at most 2 KB (`item`, `topic_key`, `origin`, `brief`, `attempts`,
   `evidence_dir`, `files`, `commands`). `resumed: true`: an earlier attempt of this run claimed
@@ -116,6 +110,11 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
     D_NO_EVIDENCE: the concept cites no frozen source; add one, or skip.
   - `stale` (basis `declared`, or `default`: 90 days after generation): check the claims against
     evidence newer than the generation (a Git file or an issue, not a copy of a source it cites).
+- A brief opening `Triage tr_…`: the Auditor found knowledge your skip or duplicate dropped. Its
+  `triage.md` quotes each missed claim, its lines and target concept: facts, never evidence (alone it
+  is `notice_not_evidence`). Write each claim the item's own files support into its target, citing
+  those files. A skip or duplicate again is refused without a `--note` of 40+ characters naming which
+  claim is wrong and why (`triage_note_required`).
 
 **Evidence boundary.** Task logs are signals, not pages to mirror: prefer a task root's current
 README, status, PRD, report or diagnosis, durable docs, shared memory and solution docs.

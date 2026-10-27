@@ -15,7 +15,9 @@ needs_human; that only raises an alert and never blocks any other item. A new ru
 the writer's attention items (``service.attention``, design §5.3) through the same enqueue
 path. A member submission (``origin.kind`` member, see ``service.inbox``) is queued without a
 lease and records the commit of its redacted copy (``intake``), and an unfinished one leaves
-the queue as requeued when an admin hands it back to the Codex path.
+the queue as requeued when an admin hands it back to the Codex path. A skip or duplicate the
+auditor's triage review found missed knowledge in reopens as ready (``triage_reopen``, see
+``service.triage``), and the maintainer may close it so again only with a note saying why.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -67,6 +69,8 @@ MAX_CHILDREN = 20
 ATTENTION_CAP = 20  # new attention items one run start creates; the oldest go first, the rest wait
 MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
 REQUEUEABLE = frozenset({"ready", "parked", "needs_human"})  # member items the inbox rollback hands to Codex
+TRIAGE_MISSED = "triage_missed"  # the reopen reason of a triage review's ``missed`` verdict (service.triage)
+TRIAGE_NOTE = 40  # characters a skip of a triage-reopened item must explain itself in
 _ID = re.compile(r"it_[0-9a-f]{12}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -517,7 +521,7 @@ def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principa
         _write_blobs(bundle, target["id"], files)
         target["versions"].append({"item_key": key, "merged_at": _iso(now), "origin": target["origin"],
                                    "brief": target["brief"], "replaced": replaced})
-        target.update(files=list(by_name.values()), origin=spec["origin"], brief=spec["brief"],
+        target.update(files=list(by_name.values()), origin=spec["origin"], brief=_briefed(target, spec["brief"]),
                       priority=max(target["priority"], spec["priority"]), collected_by=principal,
                       collected_at=_iso(now))
         _save(bundle, target, now)
@@ -581,10 +585,7 @@ def intake(bundle: Path, planned: dict, *, principal: str, outcome: str | None =
         elif result["result"] == "duplicate" and item["origin"].get("job") != job:
             item["origin"] = {**item["origin"], "job": job}
             if item["status"] == "requeued":
-                item.setdefault("reopened", []).append({"by": principal, "at": _iso(now), "from": "requeued",
-                                                        "resolution": item.get("resolution"), "reason": "resubmitted"})
-                item["attempts"].update(started=0, counted=0)
-                item.update(status="ready", resolution=None, current_run=None)
+                _reopen(item, by=principal, reason="resubmitted", now=now)
             _save(bundle, item, now)
         return item
 
@@ -720,6 +721,11 @@ def _split(bundle: Path, parent: dict, children: object, principal: str, now: da
     return [_enqueue(bundle, spec, files, principal, current, now)["id"] for spec, files in loaded]
 
 
+def _triage_reopened(item: dict) -> bool:
+    reopened = item.get("reopened") or []
+    return bool(reopened) and isinstance(reopened[-1], dict) and reopened[-1].get("reason") == TRIAGE_MISSED
+
+
 def _check_reason(outcome: str, reason: object) -> str:
     reason = _text(reason, "reason", 500)
     if outcome == "skipped" and reason not in SKIP_REASONS and not (
@@ -743,6 +749,11 @@ def resolve(bundle: Path, item_id: str, body: object, *, principal: str, run: st
         now = _now()
         _hold(bundle, "maintainer", principal, run, now)
         item = _in_progress(bundle, item_id, run)
+        if outcome in ("skipped", "duplicate") and _triage_reopened(item) and len((note or "").strip()) < TRIAGE_NOTE:
+            # The auditor showed what this item holds (triage.md): the same close again needs new grounds.
+            raise MaintError(400, "triage_note_required", f"{item_id} was reopened by a triage review: closing it "
+                             f"{outcome} again needs a note of at least {TRIAGE_NOTE} characters saying which missed "
+                             "claim of triage.md is wrong and why")
         if outcome == "parked":
             _fail_attempt(item, run=run, cls=cls,
                           detail=_text(body.get("reason"), "reason", 2000, required=False), now=now)
@@ -835,12 +846,55 @@ def admin_retry(bundle: Path, item_id: str, *, principal: str, reason: str | Non
         reverted = item["status"] == "curated" and (item.get("resolution") or {}).get("job") in I.reverted_by(bundle)
         if item["status"] not in REOPENABLE and not reverted:
             raise MaintError(409, "not_reopenable", f"{item_id} is {item['status']}", status=item["status"])
-        item.setdefault("reopened", []).append({"by": principal, "at": _iso(now), "from": item["status"],
-                                                "resolution": item.get("resolution"), "reason": reason})
-        item["attempts"].update(started=0, counted=0)
-        item.update(status="ready", resolution=None, current_run=None)
+        _reopen(item, by=principal, reason=reason, now=now)
         _save(bundle, item, now)
         return item
+
+
+def _reopen(item: dict, *, by: str, reason: str | None, now: datetime, **extra) -> None:
+    """Back to ready with fresh attempt counters; ``reopened`` keeps what it was, by whom and why."""
+    item.setdefault("reopened", []).append({"by": by, "at": _iso(now), "from": item["status"],
+                                            "resolution": item.get("resolution"), "reason": reason, **extra})
+    item["attempts"].update(started=0, counted=0)
+    item.update(status="ready", resolution=None, current_run=None)
+
+
+def triage_reopen(bundle: Path, item_id: str, *, by: str, review: str, file: tuple[dict, bytes], lead: str,
+                  priority: int) -> dict:
+    """Reopen a skipped or duplicate item whose triage review found missed knowledge (service.triage):
+    ready with fresh attempt counters and ``file`` (its triage.md) attached, ``lead`` (what was missed,
+    what to do) above its brief, and at least ``priority``. Idempotent by ``review``: a resend finds
+    the reopen already made and changes nothing, whatever the item became since."""
+    meta, data = file
+    with _LOCK:
+        now = _now()
+        item = _load(bundle, item_id)
+        if any(isinstance(entry, dict) and entry.get("review") == review for entry in item.get("reopened", [])):
+            return item
+        if item["status"] not in ("skipped", "duplicate"):
+            raise MaintError(409, "not_reopenable", f"{item_id} is {item['status']}", status=item["status"])
+        if any(f["name"] == meta["name"] for f in item["files"]):
+            raise MaintError(409, "file_exists", f"{item_id} already holds a file named {meta['name']}")
+        _check_size([*item["files"], meta])
+        _write_blobs(bundle, item_id, [(meta, data)])
+        item["files"].append({**meta, "added_by": by, "added_at": _iso(now)})
+        _reopen(item, by=by, reason=TRIAGE_MISSED, now=now, review=review)
+        earlier = item["triage"] if isinstance(item.get("triage"), dict) else {}  # never a lead on a lead
+        collected = earlier["brief"] if isinstance(earlier.get("brief"), str) else item["brief"]
+        item.update(priority=max(item["priority"], priority), triage={"review": review, "lead": lead})
+        item["brief"] = _briefed(item, collected)
+        _save(bundle, item, now)
+        return item
+
+
+def _briefed(item: dict, collected: str) -> str:
+    """The brief of ``collected``: after a triage reopen, what was missed comes first (``maint next``
+    shows 300 characters) and survives a merge of newer evidence; the collected brief stays apart."""
+    triage = item.get("triage")
+    if not isinstance(triage, dict) or not isinstance(triage.get("lead"), str):
+        return collected
+    triage["brief"] = collected
+    return f"{triage['lead']} Collected: {collected}"[:4000]
 
 
 def admin_resolve(bundle: Path, item_id: str, body: object, *, principal: str) -> dict:

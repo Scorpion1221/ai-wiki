@@ -198,7 +198,8 @@ def test_sighup_handler_needs_a_principals_file() -> None:
 # --- through the service ---------------------------------------------------------------
 
 MODE_ENV = ("AIWIKI_INTAKE", "AIWIKI_AUDIT", "AIWIKI_CHANGESETS_COMMIT", "AIWIKI_RESTRUCTURE",
-            "AIWIKI_CODEX_AUDIT_MANUAL", "AIWIKI_BACKLOG_EPOCH", "AIWIKI_AUDIT_SEED_PER_DAY", "AIWIKI_LLM")
+            "AIWIKI_CODEX_AUDIT_MANUAL", "AIWIKI_BACKLOG_EPOCH", "AIWIKI_AUDIT_SEED_PER_DAY", "AIWIKI_LLM",
+            "AIWIKI_TRIAGE_EPOCH")
 # (method, path, query, body, scopes of which any one passes; None = any valid token).
 # Bodies/ids are chosen so an authorized call stops at a harmless 4xx/200 without side effects.
 ROUTES = [
@@ -238,6 +239,8 @@ ROUTES = [
     ("POST", "/maint/items/it_000000000000/resolve", {"bundle": "kb-a"}, {}, {"curate"}),
     ("GET", "/maint/status", {"bundle": "kb-a"}, None, {"read"}),
     ("GET", "/audit/backlog", {"bundle": "kb-a"}, None, {"read"}),
+    ("GET", "/audit/backlog/triage", {"bundle": "kb-a"}, None, {"read"}),
+    ("POST", "/audit/backlog/triage", {"bundle": "kb-a"}, {}, {"audit"}),
     ("POST", "/admin/items/it_000000000000/retry", {"bundle": "kb-a"}, {}, {"admin"}),
     ("POST", "/admin/items/it_000000000000/resolve", {"bundle": "kb-a"}, {}, {"admin"}),
     ("POST", "/admin/inbox/requeue", {"bundle": "kb-a"}, {}, {"admin"}),

@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on a correction your own run wrote.
 ---
-<!-- ai-wiki:version 0.3.5 -->
+<!-- ai-wiki:version 0.3.6 -->
 
 # AI Wiki Auditor
 
@@ -17,10 +17,10 @@ verification with its own clock, restores what a review may not change and refus
 downgrades what breaks its rules. Your judgment is only this: is each claim of the concept
 supported by the frozen evidence the concept cites? Work serially, without subagents.
 
-The automation prompt supplies `bundle`, `run` (the issue id), `max` (at most 20 concepts)
-and `cfg` (the collector config with `repos.root`). Shell variables do not survive between
-tool calls: write the values into every command, and pass `-b "$bundle"` to every `ai-wiki`
-command. `$WS` is the `workspace` path `review begin` prints.
+The automation prompt supplies `bundle`, `run` (the issue id), `max` (at most 20 concepts),
+`triage_max` (at most 20 triage items, §3.6) and `cfg` (the collector config with `repos.root`).
+Shell variables do not survive between tool calls: write the values into every command, and pass
+`-b "$bundle"` to every `ai-wiki` command. `$WS` is the `workspace` path `review begin` prints.
 
 ## Trust boundary
 
@@ -51,24 +51,21 @@ on with the installed version. A failed `ai-wiki update` → report it in one li
 install by hand; go on only if `ai-wiki skill` shows this skill `current`, else stop blocked. Never
 update between `review begin` and `review end`: the run holds the lease.
 
-```sh
-ai-wiki -b "$bundle" doctor --role auditor
-```
-
-Exit `0`: continue. Exit `4` lists failed checks (`scopes` must be exactly read and audit;
-`actor`; `writer`, a read mirror answered; `okf_version`; `state_dir`; `disk`; `tool:git|uv`).
-Stop and report it blocked (§5). Never swap tokens or edit `~/.ai-wiki/config.json` to pass.
+Then `ai-wiki -b "$bundle" doctor --role auditor`: exit `0`, continue. Exit `4` lists failed checks
+(`scopes` must be exactly read and audit; `actor`; `writer`, a read mirror answered; `okf_version`;
+`state_dir`; `disk`; `tool:git|uv`): stop, blocked (§5). Never swap tokens or edit
+`~/.ai-wiki/config.json` to pass.
 
 ## 2. Begin
 
 ```sh
-ai-wiki -b "$bundle" review begin --run "$run" --max "$max" --json
+ai-wiki -b "$bundle" review begin --run "$run" --max "$max" --triage-max "$triage_max" --json
 ```
 
 It reruns doctor, takes the auditor lease (3 h, one auditor run at a time), pulls the published
-bundle into `$WS` and prints the backlog size. Exit `4`: `failed` names `doctor`, `update_running`
-(an install held the CLI past 900 s; no lease was taken), `lease` (`holder` shows who holds it) or
-`workspace`: stop (§5, blocked). Rerunning `begin` with the same run is safe.
+bundle into `$WS` and prints the backlog sizes (`triage` too). Exit `4`: `failed` names `doctor`,
+`update_running` (an install held the CLI past 900 s; no lease was taken), `lease` (`holder` shows
+who holds it) or `workspace`: stop (§5, blocked). Rerunning `begin` with the same run is safe.
 
 ## 3. The review loop
 
@@ -76,32 +73,25 @@ Read `$WS/SCHEMA.md` once. Then repeat.
 
 ### 3.1 Take
 
-```sh
-ai-wiki -b "$bundle" review next --json
-```
-
-Exit `0`: `path`, `base` (the content hash your verdict judges), `reason`, `concept` (the file in
-`$WS`) and `evidence` (its frozen sources in `$WS`). Exit `10` (backlog empty) or `11` (budget
-spent): go to §3.5, then §4. Reasons: `generation` (new content); `external` (a push past the
-service changed it or a source it cites); `seed` (an older unaudited concept); `correction`: an
-auditor's narrowing nobody has confirmed yet. Its backlog entry names `corrected_run` (the run that
-wrote it; `legacy: true` for one from before this rule, which any run may review) and
-`reviewable_at`, 12 h after it. You may review it only in another run and from `reviewable_at`, by
-the writer's clock; renaming your run does not help, and `review next` skips the rest. Judge it like
-new content against its cited evidence: `verified` confirms it, `unverified` leaves it unconfirmed
-for the maintainer, `corrected` writes a new correction that another run reviews 12 h later.
+`ai-wiki -b "$bundle" review next --json`. Exit `0`: `path`, `base` (the content hash your verdict
+judges), `reason`, `concept` (the file in `$WS`) and `evidence` (its frozen sources in `$WS`). Exit
+`10` (backlog empty) or `11` (budget spent): go to §3.5, then §3.6. Reasons: `generation` (new
+content); `external` (a push past the service changed it or a source it cites); `seed` (an older
+unaudited concept); `correction`: an auditor's narrowing nobody has confirmed yet. Its backlog entry
+names `corrected_run` (the run that wrote it; `legacy: true` for one from before this rule, which
+any run may review) and `reviewable_at`, 12 h after it. You may review it only in another run and
+from `reviewable_at`, by the writer's clock; renaming your run does not help, and `review next`
+skips the rest. Judge it like new content against its cited evidence: `verified` confirms it,
+`unverified` leaves it unconfirmed, `corrected` writes a new correction another run reviews later.
 
 ### 3.2 Check the evidence
 
-```sh
-ai-wiki -b "$bundle" review evidence <path> --config "$cfg" --json
-```
-
-Each cited source: `frozen` (matches the service's hash ledger), `unrecorded`, `drifted` or
-`missing` (unreliable: the writer does not count it as evidence either), `external` (a URL:
-not evidence). Each Git part of a packet re-read on this host:
-`match`, `differs (truncated or redacted)` (the frozen copy was clipped; read the re-read copy
-the row names), `differs` (the frozen text is not what Git holds: unreliable) or `unavailable`.
+`ai-wiki -b "$bundle" review evidence <path> --config "$cfg" --json` rates each cited source:
+`frozen` (matches the service's hash ledger), `unrecorded`, `drifted` or `missing` (unreliable: the
+writer does not count it as evidence either), `external` (a URL: not evidence). Each Git part of a
+packet re-read on this host: `match`, `differs (truncated or redacted)` (the frozen copy was
+clipped; read the re-read copy the row names), `differs` (the frozen text is not what Git holds:
+unreliable) or `unavailable`.
 `related`: up to 5 uncited frozen sources (`source`, `matches`, `identifiers`; see Trust boundary).
 Read evidence with `head`, `sed -n` or `rg`, never whole batches.
 
@@ -148,13 +138,10 @@ Hold each to the evidence boundary:
   reviews it at least 12 h later.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is
   unreliable, or the concept cites no frozen source (`D_NO_EVIDENCE`: a note is never evidence).
-  An earlier verification of the version stops being current, and the maintainer gets an
-  attention item: it brings new evidence; never "fix" a concept by writing facts.
+  Its verification stops being current and the maintainer gets an attention item to bring new
+  evidence; never "fix" a concept by writing facts.
 
-```sh
-ai-wiki -b "$bundle" review verdict <path> verified --note "<which part supports which claims>"
-```
-
+`ai-wiki -b "$bundle" review verdict <path> verified --note "<which part supports which claims>"`:
 `corrected` takes your edit of `<path>` in `$WS` and puts the file back; `verified` and
 `unverified` refuse a file you edited (restore it first). Keep the note to two lines naming
 evidence parts (`S1`, a source file) and claims; it goes into the receipt, never into evidence.
@@ -162,11 +149,7 @@ Give a concept about 10 minutes; out of time, record `unverified` with the reaso
 
 ### 3.5 Submit
 
-After 5 verdicts, and whenever `next` exits `10` or `11`:
-
-```sh
-ai-wiki -b "$bundle" review submit --json
-```
+After 5 verdicts, and whenever `next` exits `10` or `11`: `ai-wiki -b "$bundle" review submit --json`.
 
 | Exit | Meaning | Action |
 |---|---|---|
@@ -179,6 +162,24 @@ ai-wiki -b "$bundle" review submit --json
 pending. When `begin` printed `mode: codex` the writer still runs Codex audits: every submit
 is then such a dry-run that settles its verdicts (`shadow: true`), and nothing is committed.
 
+### 3.6 Triage review
+
+Then re-check the maintainer's skips and duplicates, up to `triage_max`, with
+`ai-wiki -b "$bundle" review triage next --json`. Exit `0`: `item`, `status` (skipped or duplicate),
+`reason`, `note`, `files` (its frozen files, each `path` on this host) and `duplicate_of` (that
+concept in `$WS`). Exit `10` or `11`: submit, then §4. Judge only against those files, never live
+sources. `missed` needs a claim of medium or higher value that a file states and the bundle lacks
+(the `duplicate_of` concept above all): a decision, a status change, a number, an identifier, a
+caveat that changes how a reader acts. A low-value omission (wording, tooling noise, a restated
+fact) is `upheld`. Never write the concept yourself: `missed` reopens the item for the maintainer.
+`ai-wiki -b "$bundle" review triage verdict <item> upheld --note "<why>"`, or write 1 to 10 claims
+as a JSON list of `{"claim": "<one line>", "evidence": {"file": "<name>", "lines": [<first>,
+<last>]}, "target": "<concept path or new <type>/<name>.md>"}` (the lines, as `sed -n` counts
+them, at most 50, that state it; the writer quotes them) and record
+`ai-wiki -b "$bundle" review triage verdict <item> missed --note "<what>" --missed-file <file>`.
+After 10 verdicts and at the end: `ai-wiki -b "$bundle" review triage submit --json`. Exit `6`:
+`dropped` names each refused item and code (`not_due`, `self_review`, `evidence`); the rest landed.
+
 ## 4. End and report
 
 ```sh
@@ -187,11 +188,10 @@ ai-wiki -b "$bundle" review end --run "$run" --json > "${TMPDIR:-/tmp}/ai-wiki-r
 
 It releases the lease and summarizes: `reviewed`, `verified` (verified outcomes only; corrections
 count under `corrected`), `corrected`, `unverified`, `downgraded` codes, `dropped`, `unsubmitted`
-(must be empty: submit first), `backlog_remaining`, and `dry_run`: what the writer would have
-concluded for each dry-run.
-Post a comment with those counts (in a shadow run, also the `dry_run` rows as a JSON code
-block) and at most 5 lines on notable findings (concept paths and what did not hold), then set
-the issue done with `--no-start`:
+(must be empty: submit first), `backlog_remaining`, `dry_run` (what the writer would have
+concluded for each dry-run) and `triage` (`upheld`, `missed`, `dropped`, `unsubmitted`: empty).
+Post a comment with those counts (in a shadow run, also the `dry_run` rows as a JSON code block)
+and at most 5 lines on notable findings, then set the issue done with `--no-start`:
 
 ```sh
 multica issue comment add "$MULTICA_ISSUE_ID" --content-stdin < "${TMPDIR:-/tmp}/ai-wiki-review-comment-$run.md"
@@ -200,9 +200,8 @@ multica issue status "$MULTICA_ISSUE_ID" done --no-start
 
 ## 5. Blocked
 
-Only a failed preflight or `begin` blocks the issue: post the command output with the failed
-check and set the issue `blocked`. A backlog that stays large, unverified outcomes and dropped
-reviews never block; a deterministic watchdog pages humans.
+Only a failed preflight or `begin` blocks the issue: post the command output with the failed check
+and set it `blocked`. A large backlog, unverified outcomes and dropped reviews never block.
 
 ## 6. Hard prohibitions
 
@@ -214,7 +213,7 @@ reviews never block; a deterministic watchdog pages humans.
 - Never write `generated`, `verified` or `status`, and never claim verification in prose.
 - Never touch `SCHEMA.md`, `purpose.md`, `index.md`, `log.md`, `sources/` or `$WS/.ai-wiki/`,
   never run Git in `$WS`, and never delete or rename a file.
-- Never hand-POST, curl, poll jobs or retry outside §3.5; the CLI owns the writer calls.
+- Never hand-POST, curl, poll jobs or retry outside §3.5 and §3.6; the CLI owns the writer calls.
 - Use only the injected `AIWIKI_TOKEN`: never print, copy or replace it. Never copy a secret
   from evidence into a note or a correction.
 - No subagents, child issues or background model processes.

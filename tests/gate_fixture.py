@@ -123,7 +123,8 @@ class Gate:
         self.monkeypatch.delenv("AIWIKI_DEFAULT_BUNDLE", raising=False)
         for name in ("AIWIKI_AUDIT", "AIWIKI_INTAKE", "AIWIKI_RESTRUCTURE", "AIWIKI_CODEX_AUDIT_MANUAL", "AIWIKI_LLM",
                      "AIWIKI_CHANGESETS_PER_HOUR", "AIWIKI_CHANGESETS_PER_DAY", "AIWIKI_DEPRECATIONS_PER_DAY",
-                     "AIWIKI_REVIEWS_PER_DAY", "AIWIKI_BACKLOG_EPOCH", "AIWIKI_AUDIT_SEED_PER_DAY"):
+                     "AIWIKI_REVIEWS_PER_DAY", "AIWIKI_BACKLOG_EPOCH", "AIWIKI_AUDIT_SEED_PER_DAY",
+                     "AIWIKI_TRIAGE_EPOCH"):
             self.monkeypatch.delenv(name, raising=False)
         for name, value in settings.items():
             self.monkeypatch.setenv(name, value)

@@ -1362,6 +1362,31 @@ describe that day.
   (§13 step 3). Publish the four skills (AGENTS.md §5). The `ai-wiki maintain` command stays as a
   legacy CLI command.
 
+**2026-10-27, release 0.3.6: triage review** (operator note). The first 0.3.5 run closed 37
+items as skipped or duplicate, and a re-check found durable knowledge lost in 32 of them (13 with
+member decisions, status changes, wrong identifiers or caveats; 24 of the 28 duplicates judged by
+topic alone). The owner chose a structural second look over more skill rules: after its concept
+reviews, each Auditor run re-checks up to `triage_max` (20) of the maintainer's skips and
+duplicates against the items' own frozen files (`review triage` next, verdict and submit, skill
+§3.6). `missed` reopens the item ready at priority 45 with `triage.md` (the missed claims, quoted
+verbatim; never evidence), and the maintainer may skip it again only with a 40+ character note.
+
+- **Enable.** It is off until the writer has `AIWIKI_TRIAGE_EPOCH`: add
+  `Environment=AIWIKI_TRIAGE_EPOCH=<the deploy time, e.g. 2026-10-28T00:00:00Z>` to the step 6
+  drop-in and restart idle (as in step 6). Only decisions resolved at or after it are listed, so
+  the backlog starts empty; an invalid value refuses to start. Unset, the routes answer an empty
+  list and `triage_off`, and the Auditor's `review triage next` exits 10.
+- **No tunnel change.** The routes are `GET|POST /audit/backlog/triage`, under the existing
+  `audit/backlog` writer rule; the read mirror refuses them (`AIWIKI_DISABLE` includes audit).
+- **Watch.** `maint status --json` shows `triage` (`backlog`, `oldest_resolved_at`,
+  `reopened.open|total`), and the watchdog records it under the audit check; no alert yet. A
+  review counts against the Auditor's `reviews_per_day` (200), shared with concept reviews.
+  Receipts are `.okf/triage/<id>.json` on the writer.
+- **Agent texts.** Publish the skills (AGENTS.md §5) and paste the Auditor's updated
+  `docs/prompts/auditor-autopilot-prompt.md` (`triage_max=20`) and agent instructions into Multica.
+- **Rollback.** Remove the variable and restart: nothing more is listed or accepted; items a
+  review reopened stay in the queue as ordinary ready items.
+
 ## Open risks
 
 - Step 2's isolation gate may fail on the Multica check: a runtime whose daemon is logged in

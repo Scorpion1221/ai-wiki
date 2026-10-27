@@ -8,13 +8,18 @@
               list related frozen sources it does not cite
     verdict   record verified, corrected (the workspace edit) or unverified, with a note
     submit    send the recorded verdicts as audit changesets of at most 5 reviews
+    triage next | verdict | submit
+              re-check the maintainer's skips and duplicates (service/triage.py): take the next
+              one the writer lists with its frozen files, record upheld or missed (the claims it
+              lost, quoting those files), send the verdicts
     end       release the lease and summarize the run
 
 The writer derives the backlog and judges every verdict (§5.4): it stamps ``verified`` and
 ``generated``, restores what a review may not change, and downgrades a correction that adds
 anything to unverified. Nothing here reads a curator's hand-off: only the concept, its cited
 sources and what this host re-reads. A run keeps ``<state-dir>/reviews/<run>/review.json`` and
-its workspace ``ws/``; ``reviews/current-<bundle>.json`` names the bundle's run.
+its workspace ``ws/`` and the triage items' frozen files under ``triage/<item>/``;
+``reviews/current-<bundle>.json`` names the bundle's run.
 
 Exit codes: 0 ok, 1 an unexpected failure, 2 usage, 4 preflight failed, 6 some reviews were
 dropped (rejected or conflicting), 8 no final answer (resend with submit), 10 the backlog
@@ -29,6 +34,7 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import yaml
 
@@ -40,6 +46,7 @@ from aiwiki.runtime.changeset import VERDICTS
 
 OK, FAILED, USAGE, PREFLIGHT, DROPPED, TRANSIENT, EMPTY, BUDGET = 0, 1, 2, 4, 6, 8, 10, 11
 BATCH = 5  # reviews per audit changeset (design §2.3)
+TRIAGE_MAX = 20  # triage items a run takes unless begin says otherwise
 # Related evidence: the concept's distinctive identifiers (backticked names, file paths, camelCase,
 # snake_case, UPPER_CASE and dotted names) found in frozen sources it does not cite. An audit that
 # reads only the cited sources re-verified graph-jsx while a newer uncited source showed
@@ -87,7 +94,7 @@ def _backlog(bundle: str) -> dict:
 
 
 def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace_dir: Path | None,
-          as_human: bool = False) -> tuple[int, dict]:
+          as_human: bool = False, triage_max: int = TRIAGE_MAX) -> tuple[int, dict]:
     """doctor → auditor lease → workspace pull → the backlog's size. ``as_human`` preflights a
     human reviewer (design §5.5), whom the writer does not hold to the backlog."""
     from aiwiki.cli import doctor, update, workspace
@@ -98,6 +105,7 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
     if state["bundle"] != bundle:
         raise MaintError(f"run {run} reviews bundle {state['bundle']!r}, not {bundle!r}", USAGE)
     state["human"] = as_human
+    _triage(state, triage_max)
     checked = doctor.run("reviewer" if as_human else "auditor", bundle=bundle, state_dir=state_dir, skills_dir=None)
     if not checked["ok"]:
         failed = [row for row in checked["checks"] if not row["ok"]]
@@ -121,6 +129,10 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
                 maint._call("DELETE", "/maint/lease/auditor", bundle=bundle, run=run)
             return PREFLIGHT, {"run": run, "failed": "workspace", "error": str(exc)}
         state["mode"] = found.get("mode")  # codex: the writer still runs Codex audits, so this run shadows them
+        try:
+            triaged = _triage_backlog(bundle, 1)
+        except MaintError:
+            triaged = None  # the triage backlog never holds the concept reviews back
         _save(state_dir, state)
         maint._write(_pointer(state_dir, bundle), {"run": run, "bundle": bundle})
     finally:
@@ -129,6 +141,8 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
                 "lease_expires_at": lease.get("expires_at"), "mode": found.get("mode"), "epoch": found.get("epoch"),
                 "backlog": found.get("total"), "seed": found.get("seed"),
                 "budget": {"max": state["max"], "taken": len(state["taken"])},
+                "triage": {"backlog": triaged and triaged.get("total"), "epoch": triaged and triaged.get("epoch"),
+                           "max": _triage(state)["max"], "taken": len(_triage(state)["taken"])},
                 "next": f"ai-wiki -b {bundle} review next --json"}
 
 
@@ -414,6 +428,161 @@ def submit(state_dir: Path, bundle: str | None, *, dry_run: bool, wait: float) -
                   "pending": len(state["pending"])}
 
 
+# --- triage review: the maintainer's skips and duplicates (service/triage.py) -----------------------
+
+
+def _triage(state: dict, max_items: int = TRIAGE_MAX) -> dict:
+    """The run's triage record, made with ``max_items`` the first time (as ``max``, a begin
+    repeated within the run keeps it); a run begun by an older CLI gets the default budget."""
+    return state.setdefault("triage", {"max": max_items, "taken": [], "entries": {}, "pending": {},
+                                       "submitted": [], "dropped": [], "pulled": False})
+
+
+def _triage_backlog(bundle: str, limit: int = 1000) -> dict | None:
+    """The writer's triage backlog; None from a writer without the route (older than 0.3.6)."""
+    try:
+        return maint._call("GET", "/audit/backlog/triage", bundle=bundle, params={"limit": limit})[1]
+    except MaintError as exc:
+        if exc.status != 404:
+            raise
+        return None
+
+
+def triage_next(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
+    """The first triage item this run has not taken, its frozen evidence files fetched into
+    ``triage/<item>/`` (checked by sha256), and the concept a duplicate_of names in the workspace."""
+    from aiwiki.cli import workspace
+
+    state = _load(state_dir, bundle)
+    record = _triage(state)
+    tail = f"ai-wiki -b {state['bundle']} review triage submit" if record["pending"] else \
+        f"ai-wiki -b {state['bundle']} review end --run {state['run']}"
+    if len(record["taken"]) >= record["max"]:
+        return BUDGET, {"stopped": "budget", "taken": len(record["taken"]), "pending": len(record["pending"]),
+                        "next": tail}
+    found = _triage_backlog(state["bundle"]) or {}
+    entry = next((row for row in found.get("items") or [] if row["item"] not in record["taken"]), None)
+    if entry is None:
+        return EMPTY, {"stopped": "backlog_empty", "epoch": found.get("epoch"), "pending": len(record["pending"]),
+                       "next": tail}
+    item = entry["item"]
+    if not changeset._WORK_ITEM.fullmatch(item):  # it names a folder here
+        raise MaintError(f"the triage backlog names an unusable item {item!r}")
+    folder, files = _folder(state_dir, state["run"]) / "triage" / item, []
+    for file in entry["files"]:
+        if not changeset._ITEM_FILE.fullmatch(f"{item}/{file['name']}"):
+            raise MaintError(f"triage item {item} names an unusable file {file['name']!r}")
+        status, _headers, data = cli._http("GET", f"/maint/items/{item}/files/{quote(file['name'], safe='')}",
+                                           bundle=state["bundle"])
+        if status != 200 or hashlib.sha256(data).hexdigest() != file["sha256"]:
+            raise MaintError(f"evidence {item}/{file['name']} could not be fetched intact ({status})")
+        (folder / file["name"]).parent.mkdir(parents=True, exist_ok=True)
+        (folder / file["name"]).write_bytes(data)
+        files.append({"name": file["name"], "bytes": file["bytes"], "path": str(folder / file["name"])})
+    root = Path(state["workspace"])
+    if entry.get("duplicate_of") and not record.get("pulled"):
+        # The concept a duplicate_of names, as published: one pull for the triage part of the run
+        # (the writer archives the bundle for every pull, 304 or not).
+        workspace.pull(root, state["bundle"])
+        record["pulled"] = True
+    target = entry.get("duplicate_of")  # the maintainer wrote it: only a concept path names a workspace file
+    target = target if isinstance(target, str) and changeset._path_error(target) is None else None
+    record["taken"].append(item)
+    record["entries"][item] = {"files": {file["name"]: file["path"] for file in files}}
+    _save(state_dir, state)
+    return OK, {
+        "item": item, "topic_key": entry["topic_key"], "origin": entry["origin"], "brief": entry.get("brief"),
+        "status": entry["status"], "reason": entry["reason"], "note": entry.get("note"),
+        "resolved_at": entry.get("resolved_at"), "dir": str(folder), "files": files,
+        "duplicate_of": entry.get("duplicate_of") and {
+            "path": entry["duplicate_of"], "concept": target and str(root / target),
+            "exists": bool(target) and (root / target).is_file()},
+        "budget": {"taken": len(record["taken"]), "max": record["max"], "pending": len(record["pending"])},
+        "commands": [f"ai-wiki -b {state['bundle']} review triage verdict {item} upheld --note '<why>'",
+                     f"ai-wiki -b {state['bundle']} review triage verdict {item} missed --note '<why>' "
+                     "--missed-file <claims.json>"],
+    }
+
+
+def triage_verdict(state_dir: Path, bundle: str | None, item: str, value: str, note: str,
+                   missed_file: Path | None) -> tuple[int, dict]:
+    """Record upheld, or missed with the claims of ``missed_file`` (a JSON list of {claim,
+    evidence: {file, lines: [first, last]}, target}), checked as the writer checks them."""
+    from aiwiki.service import triage
+
+    state = _load(state_dir, bundle)
+    record = _triage(state)
+    entry = record["entries"].get(item)
+    if entry is None:
+        raise MaintError(f"{item} is not a triage item this run took; run ai-wiki review triage next", USAGE)
+    if (value == "missed") != (missed_file is not None):
+        raise MaintError("missed takes --missed-file <claims.json>; upheld takes none", USAGE)
+    try:
+        missed = json.loads(missed_file.read_text(encoding="utf-8")) if missed_file else []
+    except (OSError, ValueError) as exc:
+        raise MaintError(f"--missed-file: {exc}", USAGE) from None
+    review, errors = triage._shape({"item": item, "verdict": value, "missed": missed, "note": note})
+    for index, claim in enumerate(review["missed"] if not errors else [], 1):
+        path = entry["files"].get(claim["evidence"]["file"])
+        found = triage.lines(Path(path).read_bytes()) if path else None
+        if found is None or claim["evidence"]["lines"][1] > len(found):
+            errors.append({"code": "evidence", "message": f"claim {index}: {claim['evidence']['file']} is not a text "
+                           f"file of {item} with lines {claim['evidence']['lines']}" + (
+                               f" (it has {len(found)})" if found is not None else "")})
+    if errors:
+        raise MaintError("; ".join(f"{error['code']}: {error['message']}" for error in errors), USAGE)
+    record["pending"][item] = {key: review[key] for key in ("verdict", "missed", "note")}
+    _save(state_dir, state)
+    return OK, {"item": item, "verdict": value, "missed": len(review["missed"]), "pending": len(record["pending"]),
+                "next": f"ai-wiki -b {state['bundle']} review triage next --json"}
+
+
+def triage_submit(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
+    """Send the pending triage verdicts, at most 10 a request. The writer refuses a request
+    whole; a review it names (not_due, self_review, evidence, secret_detected…) is dropped with
+    its code and the rest are sent again. A resend after a lost answer returns the receipts."""
+    from aiwiki.service import triage
+
+    state = _load(state_dir, bundle)
+    record = _triage(state)
+    results, dropped, code, refusal = [], [], OK, None
+    pending = dict(record["pending"])
+    while pending:
+        batch = dict(list(pending.items())[:triage.MAX_REVIEWS])
+        try:
+            status, answer = maint._call("POST", "/audit/backlog/triage", bundle=state["bundle"], run=state["run"],
+                                         body={"reviews": [{"item": item, **review} for item, review in batch.items()]},
+                                         ok=(200, 400, 409, 413, 422))
+        except MaintError as exc:
+            # Unreachable or 5xx: a later submit resends the same reviews and gets their receipts.
+            code, refusal = (TRANSIENT, None) if exc.status is None or exc.status >= 500 else (exc.code, exc)
+            break
+        if status == 200:
+            results += [{key: row.get(key) for key in ("id", "item", "verdict", "status", "missed")}
+                        for row in answer.get("reviews") or []]
+            for item in batch:
+                pending.pop(item)
+            continue
+        refused = {error.get("item"): error.get("code") for error in answer.get("errors") or []
+                   if isinstance(error, dict)}
+        if not refused.keys() & batch.keys():  # lease_required or a malformed request: nothing to drop
+            refusal = MaintError(f"the writer refused the triage reviews ({status}): " + "; ".join(
+                f"{error.get('code')}: {error.get('message')}" for error in answer.get("errors") or []
+                if isinstance(error, dict)), FAILED, status=status, detail=answer.get("errors"))
+            break
+        for item in refused.keys() & batch.keys():
+            dropped.append({"item": item, "code": refused[item]})
+            pending.pop(item)
+        code = DROPPED
+    record.update(pending=pending)
+    record["dropped"] += dropped
+    record["submitted"] += results
+    _save(state_dir, state)  # what landed before a refusal stays recorded
+    if refusal is not None:
+        raise refusal
+    return code, {"reviews": results, "dropped": dropped, "pending": len(pending)}
+
+
 def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
     """Release the auditor lease and summarize the run from its recorded receipts."""
     state = maint._read(_folder(state_dir, run) / "review.json")
@@ -430,6 +599,13 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
     except MaintError:
         remaining = None
     outcomes = [row.get("outcome") for row in state["submitted"]]
+    record = _triage(state)
+    try:
+        triaged = _triage_backlog(state["bundle"], 1)
+    except MaintError:
+        triaged = None
+    # missed counts the reviews that reopened their item; void ones judged nothing (service/triage.py).
+    verdicts = [(row.get("verdict"), row.get("status")) for row in record["submitted"]]
     if (maint._read(_pointer(state_dir, state["bundle"])) or {}).get("run") == run:
         _pointer(state_dir, state["bundle"]).unlink()
     return OK, {"run": run, "bundle": state["bundle"], "shadow": state.get("mode") == "codex",
@@ -439,7 +615,12 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
                 "lease": released, "jobs": sorted({row["job"] for row in state["submitted"] if row.get("job")}),
                 # What the writer would have concluded (a dry-run commits nothing): compare with Codex.
                 "dry_run": [{key: row.get(key) for key in ("path", "base", "verdict", "outcome", "downgrade")}
-                            for _path, row in sorted((state.get("dry_run") or {}).items())]}
+                            for _path, row in sorted((state.get("dry_run") or {}).items())],
+                "triage": {"reviewed": len(record["submitted"]), "upheld": verdicts.count(("upheld", "done")),
+                           "missed": verdicts.count(("missed", "done")),
+                           "void": sum(status == "void" for _verdict, status in verdicts),
+                           "dropped": record["dropped"], "unsubmitted": sorted(record["pending"]),
+                           "backlog_remaining": triaged and triaged.get("total")}}
 
 
 # --- the command line ----------------------------------------------------------------------------
@@ -469,6 +650,8 @@ def add_parser(sub, common: dict) -> None:
     begin_.add_argument("--dir", type=Path, help="the workspace (default: <state-dir>/reviews/<run>/ws)")
     begin_.add_argument("--as-human", action="store_true",
                         help="a human reviewer (human: principal with human_verify): verdicts are human-reviewed")
+    begin_.add_argument("--triage-max", type=cli._positive, default=TRIAGE_MAX,
+                        help=f"triage items this run may take (default: {TRIAGE_MAX})")
     take = verb("next", "take the next backlog concept (exit 10 backlog empty, 11 budget spent)",
                 "ai-wiki review next --json", "ai-wiki review next --path metrics/x.md  # a human run")
     take.add_argument("--path", help="a human run: take this concept, in the backlog or not")
@@ -489,6 +672,33 @@ def add_parser(sub, common: dict) -> None:
     send.add_argument("--wait", type=cli._positive, default=600, help="seconds to follow a queued job (default: 600)")
     finish = verb("end", "release the lease and summarize the run", 'ai-wiki review end --run "$MULTICA_ISSUE_ID"')
     finish.add_argument("--run", required=True, type=cli._run)
+    triage_ = verbs.add_parser("triage", help="re-check the maintainer's skips and duplicates: next, verdict, submit",
+                               command_path="ai-wiki review triage", epilog=cli._examples(
+                                   "ai-wiki review triage next --json",
+                                   "ai-wiki review triage verdict it_3f2a9c1b7d10 upheld --note 'nothing durable'"),
+                               **common)
+    triage_verbs = triage_.add_subparsers(dest="triage_action", required=True)
+
+    def triage_verb(name: str, help_: str, *examples: str) -> argparse.ArgumentParser:
+        parser = triage_verbs.add_parser(name, help=help_, command_path=f"ai-wiki review triage {name}",
+                                         epilog=cli._examples(*examples), **common)
+        parser.add_argument("--state-dir", type=Path, default=cli._STATE_DIR, help=f"default: {cli._STATE_DIR}")
+        parser.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
+        return parser
+
+    triage_verb("next", "take the next skip or duplicate to re-check, with its frozen files (exit 10 none, "
+                        "11 budget spent)", "ai-wiki review triage next --json")
+    judged = triage_verb("verdict", "record upheld, or missed with the claims it lost",
+                         "ai-wiki review triage verdict it_3f2a9c1b7d10 upheld --note 'only lockfile bumps'",
+                         "ai-wiki review triage verdict it_3f2a9c1b7d10 missed --note 'a member decision' "
+                         "--missed-file claims.json")
+    judged.add_argument("item")
+    judged.add_argument("verdict", choices=("upheld", "missed"))
+    judged.add_argument("--note", required=True, help="why, for the receipt (never evidence)")
+    judged.add_argument("--missed-file", type=Path,
+                        help="missed: a JSON list of {claim, evidence: {file, lines: [first, last]}, target}")
+    triage_verb("submit", "send the recorded triage verdicts (exit 6 some dropped, 8 no final answer)",
+                "ai-wiki review triage submit --json")
 
 
 def command(a: argparse.Namespace, selected: str | None) -> int:
@@ -498,7 +708,7 @@ def command(a: argparse.Namespace, selected: str | None) -> int:
     try:
         if a.action == "begin":
             code, result = begin(maint._bundle(selected), run=a.run, state_dir=state_dir, max_reviews=a.max,
-                                 workspace_dir=a.dir, as_human=a.as_human)
+                                 workspace_dir=a.dir, as_human=a.as_human, triage_max=a.triage_max)
         elif a.action == "next":
             code, result = next_concept(state_dir, selected, a.path)
         elif a.action == "evidence":
@@ -507,6 +717,13 @@ def command(a: argparse.Namespace, selected: str | None) -> int:
             code, result = verdict(state_dir, selected, a.path, a.verdict, a.note)
         elif a.action == "submit":
             code, result = submit(state_dir, selected, dry_run=a.dry_run, wait=a.wait)
+        elif a.action == "triage" and a.triage_action == "next":
+            code, result = triage_next(state_dir, selected)
+        elif a.action == "triage" and a.triage_action == "verdict":
+            code, result = triage_verdict(state_dir, selected, a.item, a.verdict, a.note,
+                                          a.missed_file and a.missed_file.expanduser())
+        elif a.action == "triage":
+            code, result = triage_submit(state_dir, selected)
         else:
             code, result = end(state_dir, selected, a.run)
     except (MaintError, workspace.WorkspaceError, OSError, ValueError) as exc:
@@ -514,6 +731,7 @@ def command(a: argparse.Namespace, selected: str | None) -> int:
         if a.json:
             print(json.dumps({"error": str(exc), "detail": getattr(exc, "detail", None)}, ensure_ascii=False))
             return code
-        cli._fail(str(exc), help_command=f"ai-wiki review {a.action} --help", code=code)
-    maint._print(result, a.json, a.action)
+        verb = f"{a.action} {a.triage_action}" if a.action == "triage" else a.action
+        cli._fail(str(exc), help_command=f"ai-wiki review {verb} --help", code=code)
+    maint._print(result, a.json, f"triage_{a.triage_action}" if a.action == "triage" else a.action)
     return code

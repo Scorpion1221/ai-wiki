@@ -301,9 +301,9 @@ def build(root: Path, state: dict, *, item: str | None = None, upload: Path | No
     evidence: list[changeset.EvidenceFile] = []
     if item:
         evidence, claimed = _item_evidence(root, state["bundle"], item)
-        # An attention notice is no evidence (the gate refuses it): cite the files added beside
-        # it. One alone stays in, so the gate's answer tells the maintainer to add evidence first.
-        evidence = [file for file in evidence if file.origin.get("kind") != changeset.NOTICE_KIND] or evidence
+        # An attention notice or a triage record is no evidence (the gate refuses it): cite the
+        # files beside it. One alone stays in, so the gate's answer tells the maintainer to add evidence.
+        evidence = [file for file in evidence if file.origin.get("kind") not in changeset.NON_EVIDENCE] or evidence
         run = run or claimed
         request.update(work_items=[item], close_items=close,
                        evidence={"id": source_id, "item_files": [file.name for file in evidence]})
