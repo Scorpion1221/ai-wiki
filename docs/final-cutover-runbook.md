@@ -737,7 +737,7 @@ the unverified ones, including the concepts of H8's pending-audit ingests and R2
 `audit_pending`, the newest legacy curations. The backlog releases seed oldest first, so at the
 default 10 a day the newest would wait about a week, and the 72 h alert does not measure seed
 or legacy corrections.
-The Auditor runs once a day (07:00 CST, after the maintainer's 04:00 run) and reviews up to
+The Auditor runs once a day (07:00 CST, after the maintainer's 02:00 run) and reviews up to
 20 concepts a run. New work comes first in its backlog, so 30 seed a day releases a seed of
 about 70 to 80 concepts (the unverified count `ai-wiki health` shows, plus verifications
 older than their version) within three days, and the Auditor reviews it over about four days,
@@ -934,7 +934,7 @@ solvely-wiki-shadow`).
 
 ## 10. Watchdog and deploy procedure
 
-The watchdog runs once a day, at 07:00 CST after the 04:00 maintainer run, on the writer
+The watchdog runs once a day, at 07:00 CST after the 02:00 maintainer run, on the writer
 (`--bundle`) and on the runtime host (`--multica --no-checkpoint`), as
 docs/maintenance-watchdog.md "Final state" describes.
 
@@ -950,7 +950,7 @@ cp -a /usr/local/bin/ai-wiki-watchdog $FS/ai-wiki-watchdog.before
 install -m 0755 -o root -g root /home/admin/app/scripts/maintenance_watchdog.py /usr/local/bin/ai-wiki-watchdog
 install -d -m 0755 /etc/systemd/system/ai-wiki-watchdog.timer.d
 cat > /etc/systemd/system/ai-wiki-watchdog.timer.d/daily.conf <<'EOF'
-# Final state: once a day, after the 04:00 maintainer run (docs/final-cutover-runbook.md step 10).
+# Final state: once a day, after the 02:00 maintainer run (docs/final-cutover-runbook.md step 10).
 [Timer]
 OnCalendar=
 OnCalendar=*-*-* 07:00:00 Asia/Shanghai
@@ -1104,9 +1104,9 @@ The deploy script lives outside this repository. Apply before step 0's deploy:
    esac
    ```
 
-2. **Run windows**: besides the existing 03:30–06:30 CST rule (the maintainer's 04:00 run),
+2. **Run windows**: besides a 01:30–06:30 CST rule (the maintainer's 02:00 run, up to 4 h),
    refuse from 30 minutes before to 30 minutes after the Auditor's start (its cron, today
-   07:00 CST once a day): together, no deploy from 03:30 to 07:30 CST.
+   07:00 CST once a day): together, no deploy from 01:30 to 07:30 CST.
 3. **After the deploy**, compare the writer's `/whoami` `.modes` with the ones before it,
    read with the token the script already uses for its health checks: the flags live in
    drop-ins, not the app directory, so a deploy must not change them. Compare only the keys

@@ -120,7 +120,7 @@ evidence is; an image is committed as sent, so never submit one that shows a sec
 answer and `ai-wiki jobs <id>` show that commit under `intake`; when the push failed, `intake`
 says so, the item still waits for the maintainer, and the writer retries the commit on its
 own. A link sent alone has nothing to commit until the maintainer reads it. The maintainer
-runs once a day at 04:00 CST, so a submission waits at most about a day to be curated;
+runs once a day at 02:00 CST (up to 4 h), so a submission waits at most about a day to be curated;
 `ai-wiki jobs <id>` follows the item until a changeset curates it (with its commit) or the
 maintainer skips it (with the reason). PDF and other opaque formats, and text that is not
 UTF-8, stay `needs-conversion` rather than being guessed, and are not committed: convert them
