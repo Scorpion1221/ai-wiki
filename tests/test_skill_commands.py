@@ -93,7 +93,8 @@ def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     assert len(text.splitlines()) <= 220
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert verbs == {"update", "skill", "--version", "doctor", "review begin", "review next", "review evidence",
-                     "review verdict", "review submit", "review end"}
+                     "review verdict", "review submit", "review triage next", "review triage verdict",
+                     "review triage submit", "review end"}
     prompt = (PROMPT.parent / "auditor-autopilot-prompt.md").read_text(encoding="utf-8")
     assert "ai-wiki-auditor" in prompt and not {resolve(root, command)[0] for command in commands(prompt)} - verbs
 

@@ -32,6 +32,8 @@ Config via env (read at import):
                          default changeset quotas of a principal without its own `limits`
   AIWIKI_SUBMISSIONS_PER_DAY  default member submissions a principal may queue into one bundle a
                          day under inbox intake (30); its own `limits.submissions_per_day` wins
+  AIWIKI_TRIAGE_EPOCH    the auditor's triage review of maintainer skips and duplicates resolved
+                         from this time on (service/triage.py); unset, it is off and lists nothing
 
 The writer must receive /whoami, /workspace, /changesets, /maint, /audit/backlog and /admin
 as well as /ingest and /jobs (the Cloudflare route regex of design §2.1); a read mirror
@@ -68,7 +70,7 @@ from ..runtime import changeset, secrets
 from ..runtime import curate as curate_runtime
 from ..runtime.config import LLM_MODES
 from ..runtime.failure import failure
-from . import attention, auth, inbox, worker
+from . import attention, auth, inbox, triage, worker
 from . import bundle as B
 from . import ingest as I
 from . import maint_state as M
@@ -127,6 +129,7 @@ MODES = {
 }
 try:  # an unusable epoch or seed rate refuses to start, like an unknown mode
     _EPOCH = audit_runtime.backlog_settings()[0]
+    TRIAGE_EPOCH = triage.settings()
 except ValueError as exc:
     raise RuntimeError(str(exc)) from None
 if MODES["audit"] == "external" and _EPOCH is None:
@@ -792,19 +795,25 @@ def _instant(value: object) -> datetime | None:
     return parsed if parsed.tzinfo else None
 
 
-def _throttle(principal: auth.Principal, request: dict) -> None:
-    """G2: the principal's changeset and deprecation quotas over all its bundles, else 429."""
+def _throttle(principal: auth.Principal, request: dict, wanted: dict[str, int] | None = None) -> None:
+    """G2: the principal's changeset and deprecation quotas over all its bundles, else 429.
+    ``wanted`` replaces what ``request`` asks for (a triage review asks reviews_per_day only)."""
     now = datetime.now(UTC)
-    jobs = [job for name, path in _registry().items() if principal.allows(name)
-            for job in I.changeset_jobs(path, principal.id)]
-    wanted = {"changesets_per_hour": 1, "changesets_per_day": 1,
-              "deprecations_per_day": sum(entry.get("op") == "deprecate" for entry in request.get("files") or []),
-              "reviews_per_day": len(request.get("reviews") or [])}
+    allowed = [path for name, path in _registry().items() if principal.allows(name)]
+    jobs = [job for path in allowed for job in I.changeset_jobs(path, principal.id)]
+    wanted = wanted or {
+        "changesets_per_hour": 1, "changesets_per_day": 1,
+        "deprecations_per_day": sum(entry.get("op") == "deprecate" for entry in request.get("files") or []),
+        "reviews_per_day": len(request.get("reviews") or [])}
     for name, (window, env, default) in QUOTAS.items():
-        if not wanted[name]:
+        if not wanted.get(name):
             continue
         limit = principal.limits.get(name, int(os.environ.get(env, default)))
         used = []
+        if name == "reviews_per_day":  # a triage review is a review too: one budget (service/triage.py)
+            used += [(created, 1) for path in allowed for receipt in triage.receipts(path, principal.id)
+                     if receipt.get("status") in ("applying", "done")
+                     and (created := _instant(receipt.get("at"))) is not None and created > now - window]
         for job in jobs:
             created = _instant(job.get("created"))
             if created is None or created <= now - window:
@@ -1215,7 +1224,9 @@ def maint_item_resolve(item_id: str, body: dict, bundle: str | None = None,
 def maint_status(bundle: str | None = None, authorization: str | None = Header(default=None)):
     """SLO snapshot: cursor ages, item counts and oldest ages, needs_human, leases, audit backlog."""
     with _maint(bundle, authorization, "read") as (path, _principal_id):
-        status = M.status(path)
+        # What the triage review (service/triage.py) has yet to judge, and the skips it reopened:
+        # from the same scan of the items.
+        status = M.status(path, triage=lambda items: triage.summary(path, items, epoch=TRIAGE_EPOCH))
     if status["audit"]["mode"] == "external":  # the backlog, not Codex jobs, is what waits
         try:
             found = audit_runtime.backlog(path, auditors=_auditors(), now=datetime.now(UTC))
@@ -1262,6 +1273,54 @@ def audit_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | N
     return {"revision": revision, "mode": MODES["audit"], "epoch": found["epoch"], "seed": found["seed"],
             "concepts": concepts[:limit], "shown": min(limit, len(concepts)), "total": len(concepts),
             "truncated": len(concepts) > limit}
+
+
+# Triage review (service/triage.py): the auditor re-checks the maintainer's skips and duplicates.
+# Under /audit/backlog, because the tunnel routes ^/(…|audit/backlog|…) to the writer: a bare
+# /audit/triage would reach the read mirror, which refuses it.
+
+
+@app.get("/audit/backlog/triage")
+def audit_triage_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | None = None,
+                         authorization: str | None = Header(default=None)):
+    """The skipped and duplicate items due for a triage review, the oldest decision first; nothing
+    while AIWIKI_TRIAGE_EPOCH is unset. Each names its item, topic_key, origin, brief, status,
+    reason (and the ``duplicate_of`` concept), the maintainer's note, when and in which run it was
+    resolved, and its evidence files (an attention notice or triage record is none)."""
+    principal = _auth(authorization, "read")
+    _enabled("audit")
+    if not CURATE_ON:  # the items and receipts live on the writer
+        raise HTTPException(status_code=403, detail="/audit/backlog/triage requires the writer (AIWIKI_CURATE "
+                                                    "enabled)")
+    # A read of item and receipt files, each written atomically: outside the lifecycle lock that
+    # ingest and changeset commits take, as /audit/backlog is.
+    _name, path = _resolve(bundle, principal)
+    return triage.backlog(path, epoch=TRIAGE_EPOCH, limit=limit)
+
+
+@app.post("/audit/backlog/triage")
+def audit_triage_submit(body: dict, bundle: str | None = None, x_aiwiki_run: str | None = Header(default=None),
+                        authorization: str | None = Header(default=None)):
+    """Record triage reviews ``{reviews: [{item, verdict: upheld|missed, missed?, note}]}``, at most
+    10, from the run that holds the auditor lease; each counts against reviews_per_day. A
+    ``missed`` review reopens its item for the maintainer with ``triage.md``. All or nothing: a
+    refusal names each review's item and code (400, 409 not_due/self_review/lease_required, 413,
+    422 evidence/secret_detected, 429). A resend of the same reviews returns their receipts."""
+    principal = _auth(authorization, "audit")  # its limits; _maint checks it again and that it has an actor
+    try:
+        with _maint(bundle, authorization, "audit", area="audit", write=True) as (path, _principal_id):
+            if x_aiwiki_run is not None:  # none at all is the lease check's 409, as for an audit changeset
+                M._check_run(x_aiwiki_run)
+                if secrets.scan(x_aiwiki_run):  # the receipt shows the run to every reader
+                    raise M.MaintError(400, "input", "X-AIWiki-Run carries a secret")
+            return triage.submit(path, body.get("reviews"), principal=principal.id, actor=principal.actor,
+                                 run=x_aiwiki_run, epoch=TRIAGE_EPOCH, charge=lambda count: _throttle(
+                                     principal, {}, {"reviews_per_day": count}))
+    except triage.Rejected as rejected:
+        return JSONResponse(status_code=rejected.status, content=rejected.body())
+    except _Rejected as rejected:
+        return JSONResponse(status_code=rejected.result["http_status"], content=rejected.result,
+                            headers=rejected.headers)
 
 
 @app.post("/admin/items/{item_id}/retry")

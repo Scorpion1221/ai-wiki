@@ -851,6 +851,7 @@ def _status_lines(status: dict) -> list[list[str]]:
         table_lines("leases", ({"role": role, **(lease or {})} for role, lease in (status.get("leases") or {}).items()),
                     ("role", "holder", "run", "expires_at", "active")),
         object_lines("audit", {key: audit.get(key) for key in ("mode", "pending", "oldest_finished", "queued")}),
+        object_lines("triage", status.get("triage") or {}),
     ]
 
 
@@ -923,7 +924,7 @@ def export_manifest(bundle: str, path: Path) -> dict:
     for item in sorted(items, key=lambda item: (item["created_at"], item["id"])):
         files = []
         for entry in item["files"]:
-            if (entry.get("origin") or {}).get("kind") == changeset.NOTICE_KIND:
+            if (entry.get("origin") or {}).get("kind") in changeset.NON_EVIDENCE:
                 continue
             status, _headers, data = cli._http(
                 "GET", f"/maint/items/{item['id']}/files/{quote(entry['name'], safe='')}", bundle=bundle)

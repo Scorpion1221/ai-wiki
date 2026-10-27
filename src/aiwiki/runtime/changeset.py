@@ -46,11 +46,14 @@ HASH_PREFIX = "ch1:"
 # Keys the service stamps. They never count toward a concept's content hash.
 SERVICE_KEYS = frozenset(bookkeeping.SERVICE_KEYS["changeset"])
 VERDICTS = ("verified", "corrected", "unverified")
-# Stored origin kinds of work-item files (service.attention, maint add-evidence source:): an
-# attention notice says what is wrong and is never evidence; a bundle source is a file directly
+# Stored origin kinds of work-item files (service.attention, service.triage, maint add-evidence
+# source:): an attention notice says what is wrong and a triage record what a skip missed; both
+# are facts about the item, never evidence (NON_EVIDENCE). A bundle source is a file directly
 # under the bundle's sources/ whose bytes the writer matched against sources/.hashes.yaml before
 # storing. Bytes the bundle already holds never extend a concept's stale_after.
 NOTICE_KIND = "attention"
+TRIAGE_KIND = "triage"
+NON_EVIDENCE = frozenset({NOTICE_KIND, TRIAGE_KIND})
 SOURCE_KIND = "bundle-source"
 
 
@@ -105,7 +108,7 @@ HINTS = {
     "self_verification": "no reviewer verifies its own generation, nor an auditor another auditor's (a "
                          "correction is a later run's to review); drop it",
     "notice_not_evidence": "add evidence first (ai-wiki maint add-evidence <item> source:sources/<file>, a Git "
-                           "file or an issue) and cite that file, never the notice",
+                           "file or an issue) and cite that file, never the notice or the triage record",
     "stale_after_needs_new_evidence": "freshness is extended only on evidence from outside the bundle: add a Git "
                                       "file or an issue (ai-wiki maint add-evidence) and cite it, or keep "
                                       "stale_after as it was",
@@ -567,14 +570,14 @@ def build_packet(
         missing = [name for name in evidence["item_files"] if name not in provided]
         if missing:
             return None, [_error("input", f"evidence file(s) not provided: {', '.join(missing)}")]
-        # By the origin the writer stored with the file, never its name: a notice is no source.
-        # It is left out, so a CLI that lists every file of the item (0.3.1 and older) still
-        # proposes once evidence sits beside it; a packet of notices alone is refused.
-        named = [name for name in evidence["item_files"] if provided[name].origin.get("kind") != NOTICE_KIND]
+        # By the origin the writer stored with the file, never its name: a notice or a triage
+        # record is no source. It is left out, so a CLI that lists every file of the item (0.3.1
+        # and older) still proposes once evidence sits beside it; a packet of them alone is refused.
+        named = [name for name in evidence["item_files"] if provided[name].origin.get("kind") not in NON_EVIDENCE]
         if not named:
             return None, [_error("notice_not_evidence", f"{', '.join(evidence['item_files'])}: an attention "
-                                                        "notice says what is wrong with a concept, not why a "
-                                                        "claim holds, and the packet holds nothing else")]
+                                                        "notice or a triage record says what is wrong or missing, "
+                                                        "not why a claim holds, and the packet holds nothing else")]
         members = []
         for index, name in enumerate(named, start=1):
             item, file = name.split("/", 1)
