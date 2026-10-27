@@ -113,8 +113,8 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
 - A brief opening `Triage tr_…`: the Auditor found knowledge your skip or duplicate dropped. Its
   `triage.md` quotes each missed claim, its lines and target concept: facts, never evidence (alone it
   is `notice_not_evidence`). Write each claim the item's own files support into its target, citing
-  those files. A skip or duplicate again is refused without a `--note` of 40+ characters naming which
-  claim is wrong and why (`triage_note_required`).
+  those files. Any close without a changeset (a split's children too) is refused without a `--note`
+  of 40+ characters naming which claim is wrong and why (`triage_note_required`).
 
 **Evidence boundary.** Task logs are signals, not pages to mirror: prefer a task root's current
 README, status, PRD, report or diagnosis, durable docs, shared memory and solution docs.

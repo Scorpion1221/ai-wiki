@@ -1369,23 +1369,42 @@ topic alone). The owner chose a structural second look over more skill rules: af
 reviews, each Auditor run re-checks up to `triage_max` (20) of the maintainer's skips and
 duplicates against the items' own frozen files (`review triage` next, verdict and submit, skill
 §3.6). `missed` reopens the item ready at priority 45 with `triage.md` (the missed claims, quoted
-verbatim; never evidence), and the maintainer may skip it again only with a 40+ character note.
+verbatim; never evidence). From then on the item (and any split child of it) closes without a
+changeset only with a 40+ character note, and that answer is not reviewed again.
 
-- **Enable.** It is off until the writer has `AIWIKI_TRIAGE_EPOCH`: add
-  `Environment=AIWIKI_TRIAGE_EPOCH=<the deploy time, e.g. 2026-10-28T00:00:00Z>` to the step 6
-  drop-in and restart idle (as in step 6). Only decisions resolved at or after it are listed, so
-  the backlog starts empty; an invalid value refuses to start. Unset, the routes answer an empty
-  list and `triage_off`, and the Auditor's `review triage next` exits 10.
+- **Enable.** It is off until the writer has `AIWIKI_TRIAGE_EPOCH`. Check the value first (a bad
+  one stops the writer at start), then add it to the step 6 drop-in and restart idle:
+
+  ```bash
+  TRIAGE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  as_admin env AIWIKI_TRIAGE_EPOCH=$TRIAGE /home/admin/app/.venv/bin/python -c \
+    'from aiwiki.service import triage; print(triage.settings())' || echo 'STOP: unusable epoch'
+  echo "Environment=AIWIKI_TRIAGE_EPOCH=$TRIAGE" >> $DROPIN/phase3-final.conf
+  systemctl daemon-reload && restart_idle
+  ```
+
+  Only decisions resolved at or after it are listed, so the backlog starts empty. Unset, the
+  routes answer an empty list and `triage_off`, and the Auditor's `review triage next` exits 10.
 - **No tunnel change.** The routes are `GET|POST /audit/backlog/triage`, under the existing
   `audit/backlog` writer rule; the read mirror refuses them (`AIWIKI_DISABLE` includes audit).
+- **Drain.** About 90 items a day, 40% closed skipped or duplicate: some 36 decisions a day
+  enter the backlog. At `triage_max=20` it grows by about 16 a day, oldest first, so raise
+  `triage_max` toward 40 once the first runs show the Auditor's time per item (each review
+  counts against its `reviews_per_day`: its `limits` in principals.json, else 200, shared with
+  concept reviews).
 - **Watch.** `maint status --json` shows `triage` (`backlog`, `oldest_resolved_at`,
-  `reopened.open|total`), and the watchdog records it under the audit check; no alert yet. A
-  review counts against the Auditor's `reviews_per_day` (200), shared with concept reviews.
+  `reopened.open|curated|total`), and the watchdog records it under the audit check; no alert
+  yet, so look at the age of `oldest_resolved_at` weekly: growing past a week means raise
+  `triage_max`. `review end` lists `unfetched` items (a damaged blob, passed over that run).
   Receipts are `.okf/triage/<id>.json` on the writer.
-- **Agent texts.** Publish the skills (AGENTS.md §5) and paste the Auditor's updated
-  `docs/prompts/auditor-autopilot-prompt.md` (`triage_max=20`) and agent instructions into Multica.
-- **Rollback.** Remove the variable and restart: nothing more is listed or accepted; items a
-  review reopened stay in the queue as ordinary ready items.
+- **Agent texts.** Publish the skills (AGENTS.md §5) and the agent instructions. In the live
+  Auditor prompt add only the `triage_max=20` line, the §3.6 review-point line and the triage
+  words of the 执行方式 and 结项 lines from `docs/prompts/auditor-autopilot-prompt.md`; keep the
+  live `max` (100) and `cfg` (`maint-solvely-wiki.json`), which the repository copy does not hold.
+- **Rollback.** Removing the variable and restarting stops the listing and new reviews only:
+  items a review reopened keep `triage.md`, the `Triage tr_…` lead and the 40+ character note
+  rule. Never roll the writer back below 0.3.6 while any item holds a `triage` file: 0.3.5 takes
+  it as evidence, so first close those items (`maint status`: `triage.reopened.open` is 0).
 
 ## Open risks
 

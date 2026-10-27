@@ -6,25 +6,28 @@ first 0.3.5 run (2026-10-27) found durable knowledge lost in 32 of 37 such items
 rule in the maintainer skill did not change that. So each decision gets a structural second
 look: the auditor, another model, judges it against the item's own frozen files.
 
-``backlog`` lists the items due: skipped or duplicate, closed by a maintainer run (``resolve``
-under the lease: never an admin's hand close or the service's own close), at or after
-``AIWIKI_TRIAGE_EPOCH``, holding at least one evidence file, and judged by no done review yet.
-An item is judged once: a maintainer who closes a reopened item again must say why (its note),
-and the auditor does not review that answer, so the two never loop. Without the epoch the
-feature is off and the list is empty. A review is ``upheld`` (the item stays closed) or
-``missed``: 1 to ``MAX_MISSED`` claims, each naming lines of one of the item's frozen evidence
-files and the concept it belongs in. A missed review reopens the item as ready
-(``maint_state.triage_reopen``) with ``triage.md`` attached: each claim with those lines quoted
-verbatim, the auditor and the time, facts only. Like an attention notice it is never evidence
-(origin kind ``triage``, ``changeset.NON_EVIDENCE``): the gate leaves it out of a packet and
-refuses a packet of nothing else, so the maintainer updates the concept from the item's own files.
+``backlog`` lists the decisions due: an item skipped or duplicate, closed by a maintainer run
+(``resolve`` under the lease: never an admin's hand close or the service's own close), at or
+after ``AIWIKI_TRIAGE_EPOCH``, holding at least one evidence file, and that close (its time and
+run) judged by no done review yet: a new close after an admin reopen is another decision. An
+item a missed review reopened carries it (``triage``, its split children too): the maintainer
+closes it again only with a note saying why, and the auditor does not review that answer, so the
+two never loop. Without the epoch the feature is off and the list is empty. A review is
+``upheld`` (the item stays closed) or ``missed``: 1 to ``MAX_MISSED`` claims, each naming lines
+of one of the item's frozen evidence files and the concept it belongs in. A missed review
+reopens the item as ready (``maint_state.triage_reopen``) with ``triage.md`` attached: each
+claim with those lines quoted verbatim, the auditor and the time, facts only. Like an attention
+notice it is never evidence (origin kind ``triage``, ``changeset.NON_EVIDENCE``): the gate leaves
+it out of a packet and refuses a packet of nothing else, so the maintainer updates the concept
+from the item's own files. It is no evidence either for the item's caps, so any item can take
+one; ``MAX_RECORD`` bounds it.
 
 Every review is a durable receipt, ``.okf/triage/<id>.json``, written ``applying`` before its
 effect and ``done`` (or ``void``: the item could not be reopened, so it judged nothing) after
 it; ``triage.md`` is derived from the receipt alone. The next request finishes a receipt a crash
 left applying, and a resend of the same review returns its receipt (idempotent by item and
-receipt); an item counts as judged only once its receipt is done. A receipt read back from disk
-must be well formed and name its own file, or it is skipped.
+receipt); a decision counts as judged only once its receipt is done. A receipt read back from
+disk must be well formed (every field its replay reads) and name its own file, or it is skipped.
 """
 from __future__ import annotations
 
@@ -52,6 +55,7 @@ MAX_MISSED = 10  # claims one missed review names
 MAX_CLAIM = 500
 MAX_NOTE = 2000
 MAX_QUOTE = 50  # lines one claim quotes: the evidence for it, not a copy of the file
+MAX_RECORD = 512 * 1024  # bytes of one triage.md: fifty long lines of a minified file are no quote
 STATUS = {"input": 400, "too_large": 413, "not_due": 409, "self_review": 409, "lease_required": 409,
           "evidence": 422, "secret_detected": 422}
 _RECEIPT = re.compile(r"tr_[0-9a-f]{12}")
@@ -106,32 +110,64 @@ def _path(bundle: Path, receipt_id: str) -> Path:
     return bundle / ".okf" / "triage" / f"{receipt_id}.json"
 
 
+def _str(value: object) -> bool:
+    return isinstance(value, str)
+
+
+def _claim(claim: object) -> bool:
+    evidence = claim.get("evidence") if isinstance(claim, dict) else None
+    return (isinstance(evidence, dict) and _str(claim.get("claim")) and _str(claim.get("target"))
+            and _str(evidence.get("file")) and isinstance(evidence.get("lines"), list)
+            and len(evidence["lines"]) == 2 and all(type(n) is int for n in evidence["lines"]))
+
+
+def _well_formed(receipt: object, stem: str) -> bool:
+    """Every field ``_apply``, ``record`` and ``_lead`` read: a malformed applying receipt would
+    otherwise fail every later request that replays it."""
+    if not (isinstance(receipt, dict) and _RECEIPT.fullmatch(stem) and receipt.get("id") == stem
+            and _str(receipt.get("item")) and receipt.get("verdict") in VERDICTS
+            and receipt.get("status") in ("applying", "done", "void")
+            and all(_str(receipt.get(key)) for key in ("at", "actor", "principal"))
+            and isinstance(receipt.get("judged"), dict) and _str(receipt["judged"].get("status"))
+            and isinstance(receipt.get("missed"), list) and all(_claim(claim) for claim in receipt["missed"])):
+        return False
+    quotes, file = receipt.get("quotes"), receipt.get("file")
+    return receipt["verdict"] == "upheld" or (
+        isinstance(quotes, list) and len(quotes) == len(receipt["missed"])
+        and all(isinstance(quote, list) and all(_str(line) for line in quote) for quote in quotes)
+        and isinstance(file, dict) and _str(file.get("name")) and isinstance(file.get("origin"), dict))
+
+
 def receipts(bundle: Path, principal: str | None = None) -> list[dict]:
     """The bundle's well-formed triage receipts, or one principal's; a malformed file is skipped."""
     found = []
     for path in sorted((bundle / ".okf" / "triage").glob("tr_*.json")):
         receipt = M._read_json(path)
-        if (receipt is not None and _RECEIPT.fullmatch(path.stem) and receipt.get("id") == path.stem
-                and isinstance(receipt.get("item"), str) and receipt.get("verdict") in VERDICTS
-                and isinstance(receipt.get("judged"), dict) and isinstance(receipt.get("missed"), list)
-                and (receipt["verdict"] == "upheld" or isinstance(receipt.get("quotes"), list)
-                     and len(receipt["quotes"]) == len(receipt["missed"]) and isinstance(receipt.get("file"), dict))
-                and principal in (None, receipt.get("principal"))):
+        if _well_formed(receipt, path.stem) and principal in (None, receipt.get("principal")):
             found.append(receipt)
     return found
 
 
-def _judged(bundle: Path) -> set[str]:
-    return {receipt["item"] for receipt in receipts(bundle) if receipt.get("status") == "done"}
+def _decision(item: dict) -> tuple:
+    """The close a review judges: the item, and its resolution's time and run."""
+    resolution = item.get("resolution") or {}
+    return item["id"], resolution.get("at"), resolution.get("run")
 
 
-def _due(item: dict, epoch: datetime, judged: set[str]) -> bool:
+def _judged(known: list[dict]) -> set[tuple]:
+    return {(receipt["item"], receipt["judged"].get("at"), receipt["judged"].get("run")) for receipt in known
+            if receipt.get("status") == "done"}
+
+
+def _due(item: dict, epoch: datetime, judged: set[tuple]) -> bool:
     resolution = item.get("resolution") or {}
     at = M._parse(resolution.get("at"))
     # A maintainer's resolve holds the lease, so it names its run; an admin's close is marked
-    # admin and has no run. An item reopened since is not closed, whoever reopened it.
+    # admin and has no run. An item reopened since is not closed, whoever reopened it; one that
+    # answers a missed review (``triage``) is the maintainer's to explain, never reviewed again.
     return (item["status"] in CLOSED and bool(resolution.get("run")) and not resolution.get("admin")
-            and at is not None and at >= epoch and item["id"] not in judged and bool(evidence_files(item)))
+            and at is not None and at >= epoch and _decision(item) not in judged and not M._triage_reopened(item)
+            and bool(evidence_files(item)))
 
 
 def _entry(item: dict) -> dict:
@@ -150,22 +186,24 @@ def backlog(bundle: Path, *, epoch: datetime | None, limit: int = 20) -> dict:
     """The skips and duplicates due for a triage review, the oldest decision first."""
     if epoch is None:
         return {"epoch": None, "items": [], "shown": 0, "total": 0, "truncated": False}
-    judged = _judged(bundle)
+    judged = _judged(receipts(bundle))
     due = sorted((item for item in M._items(bundle) if _due(item, epoch, judged)),
                  key=lambda item: (item["resolution"]["at"], item["id"]))
     return {"epoch": M._iso(epoch), "items": [_entry(item) for item in due[:limit]], "shown": min(limit, len(due)),
             "total": len(due), "truncated": len(due) > limit}
 
 
-def summary(bundle: Path, *, epoch: datetime | None) -> dict:
-    """For /maint/status: the backlog and its oldest decision, and the items a missed review
-    reopened (``open``: not yet closed again by the maintainer)."""
-    items = M._items(bundle)
-    judged = _judged(bundle) if epoch is not None else set()
+def summary(bundle: Path, items: list[dict], *, epoch: datetime | None) -> dict:
+    """For /maint/status, from its scan of ``items``: the backlog and its oldest decision, and
+    the items carrying a missed review (``open``: not yet closed again; ``curated``: closed by a
+    changeset; the rest the maintainer closed without one, with a note)."""
+    judged = _judged(receipts(bundle)) if epoch is not None else set()
     due = sorted(item["resolution"]["at"] for item in items if epoch is not None and _due(item, epoch, judged))
-    reopened = [item for item in items if M._triage_reopened(item)]
+    # A split parent handed its review on to its children, which count instead.
+    reopened = [item for item in items if M._triage_reopened(item) and item["status"] != "split"]
     return {"epoch": epoch and M._iso(epoch), "backlog": len(due), "oldest_resolved_at": due[0] if due else None,
-            "reopened": {"open": sum(item["status"] not in M.TERMINAL for item in reopened), "total": len(reopened)}}
+            "reopened": {"open": sum(item["status"] not in M.TERMINAL for item in reopened),
+                         "curated": sum(item["status"] == "curated" for item in reopened), "total": len(reopened)}}
 
 
 # --- reviews -------------------------------------------------------------------------------------
@@ -217,6 +255,8 @@ def _shape(raw: object) -> tuple[dict, list[dict]]:
             if not isinstance(target, str) or changeset._path_error(target) is not None or "/" not in target:
                 error("input", f"claim {index}: target must be a concept path: an existing one or a new "
                                "<type>/<name>.md")
+            elif secrets.scan(target):  # it reaches triage.md and the brief as the claim does
+                error("secret_detected", f"claim {index}: target carries a secret")
             claims.append({"claim": text, "evidence": {"file": evidence["file"], "lines": span}, "target": target})
     return {"item": item, "verdict": verdict, "missed": claims, "note": note}, errors
 
@@ -251,7 +291,7 @@ def _id(principal: str, decision: list, review: dict) -> str:
 def record(receipt: dict) -> bytes:
     """triage.md, from the receipt alone: facts in fixed lines, never guidance (the brief guides)."""
     judged = receipt["judged"]
-    out = [f"# Triage review: {receipt['item']}", "", f"- review: {receipt['id']} at {receipt['at']}",
+    out = [f"# Triage review: {receipt['item']}", "", f"- review: {receipt['id']} at {receipt.get('at')}",
            f"- auditor: {receipt['actor']}",
            f"- judged: {judged.get('status')} ({judged.get('reason')}) by {judged.get('by')} at {judged.get('at')}",
            f"- verdict: missed, {len(receipt['missed'])} claim(s)"]
@@ -264,34 +304,49 @@ def record(receipt: dict) -> bytes:
 
 
 def _lead(receipt: dict) -> str:
-    """What the reopened item asks for, front-loaded (``maint next`` shows 300 characters), then
-    what was missed; triage.md holds each claim with its quote."""
+    """What was missed first (``maint next`` shows 300 characters of the brief), then what to do;
+    triage.md holds each claim with its quote."""
     targets = ", ".join(dict.fromkeys(claim["target"] for claim in receipt["missed"]))
-    return (f"Triage {receipt['id']}: this {receipt['judged']['status']} missed {len(receipt['missed'])} claim(s), "
-            f"quoted in {receipt['file']['name']} (facts, never evidence). Closing it again needs a --note on which "
-            f"claim is wrong and why. Update {targets} from this item's own frozen files. Missed: "
-            + "; ".join(claim["claim"] for claim in receipt["missed"]))
+    return (f"Triage {receipt['id']}: this {receipt['judged']['status']} missed {len(receipt['missed'])} claim(s): "
+            + " | ".join(claim["claim"] for claim in receipt["missed"])
+            + f" (quoted in {receipt['file']['name']}: facts, never evidence). Update {targets} from this item's own "
+            f"frozen files; closing it without a changeset needs a --note of {M.TRIAGE_NOTE}+ characters on which "
+            "claim is wrong and why.")
+
+
+def _void(bundle: Path, receipt: dict, detail: str) -> dict:
+    receipt.update(status="void", finished=M._iso(M._now()), detail=detail[:300])
+    M._write_json(_path(bundle, receipt["id"]), receipt)
+    return receipt
 
 
 def _apply(bundle: Path, receipt: dict) -> dict:
     """The receipt's effect, then ``done``. A missed review reopens its item (idempotent by the
-    receipt id). One that cannot (an admin reopened the item meanwhile, or it has no room left) is
-    ``void``: it judges nothing, so the item stays due, and a receipt never stays applying to stop
-    every later review."""
+    receipt id). One that cannot (the item is no longer the close it judged: an admin reopened
+    it meanwhile, maybe the maintainer closed it again) is ``void``: it judges nothing, so a new
+    close is due, and a receipt never stays applying to stop every later review."""
     if receipt["verdict"] == "missed":
         data = record(receipt)
         meta = {**receipt["file"], "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+        judged = receipt["judged"]
         try:
             item = M.triage_reopen(bundle, receipt["item"], by=receipt["actor"], review=receipt["id"],
-                                   file=(meta, data), lead=_lead(receipt), priority=planner.PRIORITY["attention"])
+                                   decision=(judged.get("at"), judged.get("run")), file=(meta, data),
+                                   lead=_lead(receipt), priority=planner.PRIORITY["attention"])
         except M.MaintError as exc:
-            receipt.update(status="void", finished=M._iso(M._now()), detail=f"{exc.code}: {exc}"[:300])
-            M._write_json(_path(bundle, receipt["id"]), receipt)
-            return receipt
+            return _void(bundle, receipt, f"{exc.code}: {exc}")
         receipt["reopened"] = {"status": item["status"], "priority": item["priority"]}
     receipt.update(status="done", finished=M._iso(M._now()))
     M._write_json(_path(bundle, receipt["id"]), receipt)
     return receipt
+
+
+def _finish(bundle: Path, receipt: dict) -> dict:
+    """Replay a receipt a crash left applying; one that still cannot be applied is void."""
+    try:
+        return _apply(bundle, receipt)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        return _void(bundle, receipt, f"malformed: {type(exc).__name__}: {exc}")
 
 
 def _view(receipt: dict, deduplicated: bool) -> dict:
@@ -325,9 +380,9 @@ def submit(bundle: Path, reviews: object, *, principal: str, actor: str, run: st
         raise Rejected(errors)
     with _LOCK:
         # A receipt a crash left applying is finished first, so every other is done or void.
-        known = [_apply(bundle, receipt) if receipt.get("status") == "applying" else receipt
+        known = [_finish(bundle, receipt) if receipt.get("status") == "applying" else receipt
                  for receipt in receipts(bundle)]
-        judged = {receipt["item"] for receipt in known if receipt.get("status") == "done"}
+        judged = _judged(known)
         answers, fresh = [], []
         for review, _found in shaped:
             try:
@@ -341,16 +396,17 @@ def submit(bundle: Path, reviews: object, *, principal: str, actor: str, run: st
             # The decision judged: its time and run, and how often the item was reopened before it.
             decision = [resolution.get("at"), resolution.get("run"), len(item.get("reopened") or [])]
             receipt_id = _id(principal, decision, review)
-            # A resend after a lost answer gets its receipt: a done one whatever the item became since
-            # (a missed review reopened it), a void one unless the item is due again (then it is new).
+            # A resend after a lost answer gets its receipt (a done one first) while the item is not
+            # due: its close was judged, or a missed review reopened it. Due again, it is a new close.
             sent = sorted((receipt for receipt in known if receipt.get("principal") == principal
                            and all(receipt.get(key) == review[key] for key in ("item", "verdict", "missed", "note"))),
                           key=lambda receipt: receipt.get("status") != "done")
-            if sent and (sent[0].get("status") == "done" or not _due(item, epoch, judged)):
+            if sent and not _due(item, epoch, judged):
                 answers.append((sent[0], True))
                 continue
             if not _due(item, epoch, judged):
-                why = "already judged" if item["id"] in judged else f"it is {item['status']}"
+                why = ("already judged" if _decision(item) in judged else "it answers a triage review"
+                       if M._triage_reopened(item) else f"it is {item['status']}")
                 errors.append({"item": item["id"], "code": "not_due",
                                "message": f"{item['id']} is not in the triage backlog ({why})"})
                 continue
@@ -359,18 +415,19 @@ def submit(bundle: Path, reviews: object, *, principal: str, actor: str, run: st
                                "resolved by this principal; another reviews it"})
                 continue
             quotes, found = _quotes(bundle, item, review) if review["verdict"] == "missed" else ([], [])
-            if review["verdict"] == "missed" and len(item["files"]) >= M.MAX_FILES:
-                found.append({"item": item["id"], "code": "too_large",
-                              "message": f"{item['id']} holds {M.MAX_FILES} files: no room for a triage record"})
-            errors += found
             names = {file["name"] for file in item["files"]}
-            fresh.append({
+            receipt = {
                 "id": receipt_id, "item": item["id"], **{key: review[key] for key in ("verdict", "missed", "note")},
                 "quotes": quotes, "judged": {"status": item["status"],
                                              **{key: resolution.get(key) for key in ("reason", "by", "at", "run")}},
                 "principal": principal, "actor": actor, "run": run, "status": "applying",
                 "file": {"name": FILE if FILE not in names else f"triage-{receipt_id}.md",
-                         "origin": {"kind": KIND, "review": receipt_id, "auditor": actor}}})
+                         "origin": {"kind": KIND, "review": receipt_id, "auditor": actor}}}
+            if review["verdict"] == "missed" and not found and len(record(receipt)) > MAX_RECORD:
+                found.append({"item": item["id"], "code": "too_large", "message": f"triage.md would pass {MAX_RECORD} "
+                              "bytes: quote fewer or shorter lines"})
+            errors += found
+            fresh.append(receipt)
         if errors:
             raise Rejected(errors)
         if fresh:  # as an audit changeset: a resend returns its receipt, new reviews need the run's lease

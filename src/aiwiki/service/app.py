@@ -1224,9 +1224,9 @@ def maint_item_resolve(item_id: str, body: dict, bundle: str | None = None,
 def maint_status(bundle: str | None = None, authorization: str | None = Header(default=None)):
     """SLO snapshot: cursor ages, item counts and oldest ages, needs_human, leases, audit backlog."""
     with _maint(bundle, authorization, "read") as (path, _principal_id):
-        status = M.status(path)
-    # What the triage review (service/triage.py) has yet to judge, and the skips it reopened.
-    status["triage"] = triage.summary(path, epoch=TRIAGE_EPOCH)
+        # What the triage review (service/triage.py) has yet to judge, and the skips it reopened:
+        # from the same scan of the items.
+        status = M.status(path, triage=lambda items: triage.summary(path, items, epoch=TRIAGE_EPOCH))
     if status["audit"]["mode"] == "external":  # the backlog, not Codex jobs, is what waits
         try:
             found = audit_runtime.backlog(path, auditors=_auditors(), now=datetime.now(UTC))
@@ -1287,8 +1287,15 @@ def audit_triage_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: 
     while AIWIKI_TRIAGE_EPOCH is unset. Each names its item, topic_key, origin, brief, status,
     reason (and the ``duplicate_of`` concept), the maintainer's note, when and in which run it was
     resolved, and its evidence files (an attention notice or triage record is none)."""
-    with _maint(bundle, authorization, "read", area="audit") as (path, _principal_id):
-        return triage.backlog(path, epoch=TRIAGE_EPOCH, limit=limit)
+    principal = _auth(authorization, "read")
+    _enabled("audit")
+    if not CURATE_ON:  # the items and receipts live on the writer
+        raise HTTPException(status_code=403, detail="/audit/backlog/triage requires the writer (AIWIKI_CURATE "
+                                                    "enabled)")
+    # A read of item and receipt files, each written atomically: outside the lifecycle lock that
+    # ingest and changeset commits take, as /audit/backlog is.
+    _name, path = _resolve(bundle, principal)
+    return triage.backlog(path, epoch=TRIAGE_EPOCH, limit=limit)
 
 
 @app.post("/audit/backlog/triage")

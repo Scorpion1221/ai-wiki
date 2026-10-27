@@ -178,7 +178,7 @@ as a JSON list of `{"claim": "<one line>", "evidence": {"file": "<name>", "lines
 them, at most 50, that state it; the writer quotes them) and record
 `ai-wiki -b "$bundle" review triage verdict <item> missed --note "<what>" --missed-file <file>`.
 After 10 verdicts and at the end: `ai-wiki -b "$bundle" review triage submit --json`. Exit `6`:
-`dropped` names each refused item and code (`not_due`, `self_review`, `evidence`); the rest landed.
+`dropped` names each refused item and code (`not_due`, `evidence`, `triage_off`…); the rest landed.
 
 ## 4. End and report
 
@@ -189,7 +189,7 @@ ai-wiki -b "$bundle" review end --run "$run" --json > "${TMPDIR:-/tmp}/ai-wiki-r
 It releases the lease and summarizes: `reviewed`, `verified` (verified outcomes only; corrections
 count under `corrected`), `corrected`, `unverified`, `downgraded` codes, `dropped`, `unsubmitted`
 (must be empty: submit first), `backlog_remaining`, `dry_run` (what the writer would have
-concluded for each dry-run) and `triage` (`upheld`, `missed`, `dropped`, `unsubmitted`: empty).
+concluded for each dry-run) and `triage` (`upheld`, `missed`, `dropped`, `unfetched`, `unsubmitted`: empty).
 Post a comment with those counts (in a shadow run, also the `dry_run` rows as a JSON code block)
 and at most 5 lines on notable findings, then set the issue done with `--no-start`:
 

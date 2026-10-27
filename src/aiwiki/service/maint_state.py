@@ -17,7 +17,9 @@ path. A member submission (``origin.kind`` member, see ``service.inbox``) is que
 lease and records the commit of its redacted copy (``intake``), and an unfinished one leaves
 the queue as requeued when an admin hands it back to the Codex path. A skip or duplicate the
 auditor's triage review found missed knowledge in reopens as ready (``triage_reopen``, see
-``service.triage``), and the maintainer may close it so again only with a note saying why.
+``service.triage``) and carries the review (``triage``, passed on to its split children): the
+maintainer closes it without a changeset only with a note saying why, however often it is
+reopened or parked in between.
 
 The in-place Codex audit can write ``.okf``, so nothing read back from disk is trusted: an
 item.json must be well formed and name its own directory, every evidence blob is re-hashed
@@ -40,6 +42,7 @@ from pathlib import Path
 
 from aiwiki.version import build, service_identity
 
+from ..runtime.changeset import NON_EVIDENCE
 from ..runtime.failure import CLASSES, redact
 from . import ingest as I
 
@@ -70,7 +73,10 @@ ATTENTION_CAP = 20  # new attention items one run start creates; the oldest go f
 MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
 REQUEUEABLE = frozenset({"ready", "parked", "needs_human"})  # member items the inbox rollback hands to Codex
 TRIAGE_MISSED = "triage_missed"  # the reopen reason of a triage review's ``missed`` verdict (service.triage)
-TRIAGE_NOTE = 40  # characters a skip of a triage-reopened item must explain itself in
+TRIAGE_NOTE = 40  # characters a close of a triage-reopened item without a changeset must explain itself in
+# Every close a maintainer run makes without a changeset: of a triage-reopened item, each needs
+# that note (a split hands the review to its children, a park closes nothing).
+TRIAGE_ANSWERS = AGENT_OUTCOMES - {"parked", "split"}
 _ID = re.compile(r"it_[0-9a-f]{12}")
 _SHA = re.compile(r"[0-9a-f]{64}")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -704,6 +710,10 @@ def _split(bundle: Path, parent: dict, children: object, principal: str, now: da
         unknown = sorted(set(names) - set(by_name))
         if unknown or seen & set(names) or len(set(names)) != len(names):
             raise MaintError(400, "input", f"child {index}: unknown or repeated files: {unknown or names}")
+        if all((by_name[n].get("origin") or {}).get("kind") in NON_EVIDENCE for n in names):
+            # A notice or a triage record alone is no evidence: such a child could only be skipped.
+            raise MaintError(400, "input", f"child {index}: {', '.join(names)} hold(s) no evidence (an attention "
+                                           "notice or a triage record); put it in a child with evidence")
         seen.update(names)
         topic = _text(child.get("topic_key", f"{parent['topic_key']}#split-{index}"), "topic_key", 512)
         if topic in topics:
@@ -718,12 +728,21 @@ def _split(bundle: Path, parent: dict, children: object, principal: str, now: da
         raise MaintError(400, "input", f"split must place every file in a child; missing: {missing}")
     loaded = [(spec, [(meta, _blob(bundle, parent["id"], meta)) for meta in files]) for spec, files in specs]
     current = _items(bundle)
-    return [_enqueue(bundle, spec, files, principal, current, now)["id"] for spec, files in loaded]
+    ids = [_enqueue(bundle, spec, files, principal, current, now)["id"] for spec, files in loaded]
+    if _triage_reopened(parent):  # the review's ask and its note rule go with the evidence
+        for child in (_load(bundle, child_id) for child_id in dict.fromkeys(ids)):
+            # A child that is an item already closed (the same files and topic) stays as it was.
+            if child["status"] not in TERMINAL and (child.get("triage") or {}).get("review") != \
+                    parent["triage"].get("review"):
+                _mark(child, review=parent["triage"].get("review"), lead=parent["triage"].get("lead"),
+                      priority=parent["priority"])
+                _save(bundle, child, now)
+    return ids
 
 
 def _triage_reopened(item: dict) -> bool:
-    reopened = item.get("reopened") or []
-    return bool(reopened) and isinstance(reopened[-1], dict) and reopened[-1].get("reason") == TRIAGE_MISSED
+    """A triage review reopened the item (or its split parent): kept whatever reopens it since."""
+    return isinstance(item.get("triage"), dict)
 
 
 def _check_reason(outcome: str, reason: object) -> str:
@@ -749,10 +768,11 @@ def resolve(bundle: Path, item_id: str, body: object, *, principal: str, run: st
         now = _now()
         _hold(bundle, "maintainer", principal, run, now)
         item = _in_progress(bundle, item_id, run)
-        if outcome in ("skipped", "duplicate") and _triage_reopened(item) and len((note or "").strip()) < TRIAGE_NOTE:
-            # The auditor showed what this item holds (triage.md): the same close again needs new grounds.
+        if outcome in TRIAGE_ANSWERS and _triage_reopened(item) and len((note or "").strip()) < TRIAGE_NOTE:
+            # The auditor showed what this item holds (triage.md): closing it without the knowledge
+            # needs new grounds, after an admin retry or a park too.
             raise MaintError(400, "triage_note_required", f"{item_id} was reopened by a triage review: closing it "
-                             f"{outcome} again needs a note of at least {TRIAGE_NOTE} characters saying which missed "
+                             f"{outcome} needs a note of at least {TRIAGE_NOTE} characters saying which missed "
                              "claim of triage.md is wrong and why")
         if outcome == "parked":
             _fail_attempt(item, run=run, cls=cls,
@@ -859,32 +879,41 @@ def _reopen(item: dict, *, by: str, reason: str | None, now: datetime, **extra) 
     item.update(status="ready", resolution=None, current_run=None)
 
 
-def triage_reopen(bundle: Path, item_id: str, *, by: str, review: str, file: tuple[dict, bytes], lead: str,
-                  priority: int) -> dict:
+def triage_reopen(bundle: Path, item_id: str, *, by: str, review: str, decision: tuple, file: tuple[dict, bytes],
+                  lead: str, priority: int) -> dict:
     """Reopen a skipped or duplicate item whose triage review found missed knowledge (service.triage):
     ready with fresh attempt counters and ``file`` (its triage.md) attached, ``lead`` (what was missed,
-    what to do) above its brief, and at least ``priority``. Idempotent by ``review``: a resend finds
-    the reopen already made and changes nothing, whatever the item became since."""
+    what to do) above its brief, and at least ``priority``. Only the ``decision`` reviewed (its
+    resolution's at and run) reopens: a close made since is another decision. Idempotent by
+    ``review``: a resend finds the reopen already made and changes nothing, whatever the item
+    became since. triage.md is no evidence, so the item's evidence caps leave room for it (the
+    review bounds its size)."""
     meta, data = file
     with _LOCK:
         now = _now()
         item = _load(bundle, item_id)
         if any(isinstance(entry, dict) and entry.get("review") == review for entry in item.get("reopened", [])):
             return item
-        if item["status"] not in ("skipped", "duplicate"):
-            raise MaintError(409, "not_reopenable", f"{item_id} is {item['status']}", status=item["status"])
+        resolution = item.get("resolution") or {}
+        if item["status"] not in ("skipped", "duplicate") or (resolution.get("at"), resolution.get("run")) != decision:
+            raise MaintError(409, "not_reopenable", f"{item_id} is {item['status']}, not the decision reviewed",
+                             status=item["status"])
         if any(f["name"] == meta["name"] for f in item["files"]):
             raise MaintError(409, "file_exists", f"{item_id} already holds a file named {meta['name']}")
-        _check_size([*item["files"], meta])
         _write_blobs(bundle, item_id, [(meta, data)])
         item["files"].append({**meta, "added_by": by, "added_at": _iso(now)})
         _reopen(item, by=by, reason=TRIAGE_MISSED, now=now, review=review)
-        earlier = item["triage"] if isinstance(item.get("triage"), dict) else {}  # never a lead on a lead
-        collected = earlier["brief"] if isinstance(earlier.get("brief"), str) else item["brief"]
-        item.update(priority=max(item["priority"], priority), triage={"review": review, "lead": lead})
-        item["brief"] = _briefed(item, collected)
+        _mark(item, review=review, lead=lead, priority=priority)
         _save(bundle, item, now)
         return item
+
+
+def _mark(item: dict, *, review: object, lead: object, priority: int) -> None:
+    """Carry a triage review: its lead above the collected brief, and at least ``priority``."""
+    earlier = item["triage"] if isinstance(item.get("triage"), dict) else {}  # never a lead on a lead
+    collected = earlier["brief"] if isinstance(earlier.get("brief"), str) else item["brief"]
+    item.update(priority=max(item["priority"], priority), triage={"review": review, "lead": lead})
+    item["brief"] = _briefed(item, collected)
 
 
 def _briefed(item: dict, collected: str) -> str:
@@ -970,8 +999,9 @@ def _last_changeset(jobs: list[dict]) -> dict | None:
     return latest and {k: latest.get(k) for k in ("id", "status", "created", "finished", "commit")}
 
 
-def status(bundle: Path) -> dict:
-    """Deterministic SLO snapshot for ``maint status`` and the gate watchdog."""
+def status(bundle: Path, *, triage: Callable[[list[dict]], dict] | None = None) -> dict:
+    """Deterministic SLO snapshot for ``maint status`` and the gate watchdog. ``triage``
+    (``service.triage.summary``) counts its section from the same scan of the items."""
     now = _now()
     with _LOCK:
         items, corrupt = _scan(bundle)
@@ -1017,4 +1047,5 @@ def status(bundle: Path) -> dict:
         "auditor_independence": "strong" if mode == "codex" else None,
         "last_changeset": _last_changeset(jobs),
         "service": service_identity(),
+        **({"triage": triage(items)} if triage else {}),
     }

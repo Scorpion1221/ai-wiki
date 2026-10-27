@@ -135,7 +135,7 @@ def test_without_an_epoch_the_feature_is_off_and_one_later_counts_only_newer_dec
     assert refused.status_code == 409 and refused.json()["detail"]["code"] == "triage_off"
     status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers()).json()
     assert status["triage"] == {"epoch": None, "backlog": 0, "oldest_resolved_at": None,
-                                "reopened": {"open": 0, "total": 0}}
+                                "reopened": {"open": 0, "curated": 0, "total": 0}}
 
     later = (datetime.now(UTC) + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     gate.app(AIWIKI_TRIAGE_EPOCH=later)
@@ -146,13 +146,16 @@ def test_without_an_epoch_the_feature_is_off_and_one_later_counts_only_newer_dec
 
 def test_the_read_mirror_and_a_disabled_audit_area_refuse_triage(gate) -> None:
     item_id = skipped(gate)
+    # The read mirror (writer off, every write area disabled), and a writer with only the audit area off.
     for env in ({"AIWIKI_CURATE": "off"}, {"AIWIKI_DISABLE": "ingest,audit,create,delete,changesets,workspace,"
-                                                             "maint,admin"}):
+                                                             "maint,admin"}, {"AIWIKI_DISABLE": "audit"}):
         gate.app(AIWIKI_TRIAGE_EPOCH=EPOCH, **env)
         assert gate.client.get("/audit/backlog/triage", params={"bundle": "kb-a"},
                                headers=gate.headers("auditor")).status_code == 403, env
         assert send(gate, upheld(item_id)).status_code == 403, env
     assert triage.receipts(gate.writer) == []
+    gate.app(AIWIKI_TRIAGE_EPOCH=EPOCH, AIWIKI_DISABLE="maint")  # the triage routes are the audit area's
+    assert listed(gate, "auditor")["total"] == 1
 
 
 # --- reviews ------------------------------------------------------------------------------------
@@ -221,7 +224,8 @@ def test_missed_reopens_the_item_with_a_triage_record_that_is_never_evidence(gat
     # Verbatim from the frozen file; facts only, never guidance.
     assert "> Decision: keep the retry cap at 3 (member, 2026-10-20)\n> Status: rolled back on 2026-10-21\n" in text
     assert "skip" not in text.lower().replace("judged: skipped", "")
-    assert item["brief"].startswith(f"Triage {row['id']}: this skipped missed 1 claim(s), quoted in triage.md")
+    assert item["brief"].startswith(f"Triage {row['id']}: this skipped missed 1 claim(s): A member decided to keep "
+                                    "the retry cap at 3 on 2026-10-20. (quoted in triage.md")
     assert METRIC in item["brief"] and item["brief"].endswith(f"Collected: {before['brief']}")
     assert listed(gate)["total"] == 0  # judged: a reopened item is no longer a skip to review
 
@@ -267,7 +271,7 @@ def test_a_missed_claim_must_quote_a_frozen_text_file_of_the_item(gate) -> None:
                   claim(evidence={"file": "S1-status.md", "lines": [1, 51]}), claim(claim="x" * 501),
                   claim(claim="two\nlines"), claim(target="sources/x.md"), claim(target="../x.md"),
                   claim(target="x.md"), claim(target="metrics/x.txt"), {"claim": "c", "target": METRIC}],
-        "secret_detected": [claim(claim="the key is AKIA" + "Q" * 16)],
+        "secret_detected": [claim(claim="the key is AKIA" + "Q" * 16), claim(target="metrics/ghp_" + "A" * 36 + ".md")],
     }
     for code, claims in cases.items():
         for bad in claims:
@@ -355,7 +359,7 @@ def test_a_crash_between_the_receipt_and_its_effect_is_finished_by_the_next_requ
     assert M.get_item(gate.writer, item_id)["status"] == "ready"
     assert [entry["reason"] for entry in M.get_item(gate.writer, item_id)["reopened"]] == ["triage_missed"]
     # Reopening twice under one receipt changes nothing.
-    again = M.triage_reopen(gate.writer, item_id, by=AUDITOR, review=receipt["id"],
+    again = M.triage_reopen(gate.writer, item_id, by=AUDITOR, review=receipt["id"], decision=(None, None),
                             file=({"name": "x.md", "sha256": "0" * 64, "bytes": 1, "origin": {}}, b"x"),
                             lead="x", priority=45)
     assert [f["name"] for f in again["files"]] == ["S1-status.md", "triage.md"]
@@ -390,8 +394,7 @@ def test_a_missed_review_whose_item_an_admin_reopened_meanwhile_judges_nothing(g
     assert again["status"] == "done" and again["id"] != row["id"]
     # A receipt that does not name its own file is never read.
     forged = gate.writer / ".okf" / "triage" / "tr_000000000000.json"
-    forged.write_text(json.dumps({"id": "tr_ffffffffffff", "item": item_id, "verdict": "upheld", "status": "done",
-                                  "judged": {}, "missed": []}), encoding="utf-8")
+    forged.write_text(json.dumps({**triage.receipts(gate.writer)[0], "id": "tr_ffffffffffff"}), encoding="utf-8")
     assert len(triage.receipts(gate.writer)) == 2
 
 
@@ -421,7 +424,8 @@ def test_the_maintainer_closes_a_triage_reopened_item_again_only_with_grounds(ga
     # Judged once: the second close is not reviewed again, so the two never loop.
     assert listed(gate)["total"] == 0
     status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers()).json()["triage"]
-    assert status == {"epoch": EPOCH, "backlog": 0, "oldest_resolved_at": None, "reopened": {"open": 0, "total": 1}}
+    assert status == {"epoch": EPOCH, "backlog": 0, "oldest_resolved_at": None,
+                      "reopened": {"open": 0, "curated": 0, "total": 1}}
 
 
 def test_maint_status_counts_the_triage_backlog_and_reopened_items(gate) -> None:
@@ -432,11 +436,11 @@ def test_maint_status_counts_the_triage_backlog_and_reopened_items(gate) -> None
     status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers()).json()["triage"]
 
     assert status == {"epoch": EPOCH, "backlog": 2, "oldest_resolved_at": resolved,
-                      "reopened": {"open": 0, "total": 0}}
+                      "reopened": {"open": 0, "curated": 0, "total": 0}}
     lease(gate, "auditor", AUD, "auditor")
     assert send(gate, missed(first), upheld(second)).status_code == 200
     status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers()).json()["triage"]
-    assert status["backlog"] == 0 and status["reopened"] == {"open": 1, "total": 1}
+    assert status["backlog"] == 0 and status["reopened"] == {"open": 1, "curated": 0, "total": 1}
 
 
 def test_a_triage_lead_survives_a_merge_of_newer_evidence(gate) -> None:
@@ -517,7 +521,7 @@ def test_the_review_triage_verbs_end_to_end(gate, capsys, monkeypatch, tmp_path)
     assert M.get_item(gate.writer, first)["status"] == "ready"
     code, report = wiki(capsys, "review", "end", "--run", AUD, "--state-dir", state)
     assert code == 0 and report["triage"] == {"reviewed": 2, "upheld": 1, "missed": 1, "void": 0, "dropped": [],
-                                              "unsubmitted": [], "backlog_remaining": 1}, report
+                                              "unsubmitted": [], "unfetched": [], "backlog_remaining": 1}, report
     assert report["lease"]["released"] is True
 
     # The maintainer's next run: the reopened item first, triage.md beside its evidence.
@@ -568,3 +572,186 @@ def test_review_triage_submit_drops_what_the_writer_refuses_and_sends_the_rest(g
     assert code == 6 and sent["dropped"] == [{"item": second, "code": "not_due"}] and sent["pending"] == 0, sent
     assert [row["item"] for row in sent["reviews"]] == [first]
     assert wiki(capsys, "review", "end", "--run", AUD, "--state-dir", state)[1]["triage"]["dropped"] == sent["dropped"]
+
+
+# --- review findings (2026-10-27) ---------------------------------------------------------------
+
+
+def resolve(gate: Gate, item_id: str, run: str, body: dict):
+    return gate.client.post(f"/maint/items/{item_id}/resolve", params={"bundle": "kb-a"},
+                            headers=gate.headers(run=run), json=body)
+
+
+def test_a_malformed_receipt_left_applying_never_blocks_later_reviews(gate) -> None:
+    """``.okf`` is untrusted: a receipt missing a field its replay reads is skipped, and one that
+    names no reopenable item is finished void, so no later POST fails on it."""
+    first, second = skipped(gate), skipped(gate, "repo:x#second", {"S1.md": b"second\n"}, run="WAIO-2")
+    folder = gate.writer / ".okf" / "triage"
+    folder.mkdir(parents=True)
+    (folder / "tr_aaaaaaaaaaaa.json").write_text(json.dumps({
+        "id": "tr_aaaaaaaaaaaa", "item": first, "verdict": "missed", "status": "applying", "judged": {},
+        "missed": [{}], "quotes": [[]], "file": {}, "principal": AUDITOR}), encoding="utf-8")
+    assert triage.receipts(gate.writer) == []
+    lease(gate, "auditor", AUD, "auditor")
+    assert send(gate, upheld(second)).status_code == 200
+    # Well formed, but its item is gone: finished void, never retried.
+    claim = {"claim": "c", "evidence": {"file": "S1.md", "lines": [1, 1]}, "target": METRIC}
+    (folder / "tr_bbbbbbbbbbbb.json").write_text(json.dumps({
+        "id": "tr_bbbbbbbbbbbb", "item": "it_000000000000", "verdict": "missed", "status": "applying",
+        "at": "2026-10-27T00:00:00Z", "actor": AUDITOR, "principal": AUDITOR, "run": AUD,
+        "judged": {"status": "skipped", "at": "2026-10-27T00:00:00Z", "run": RUN}, "missed": [claim],
+        "quotes": [["x"]], "note": "n", "file": {"name": "triage.md", "origin": {"kind": "triage"}}}), encoding="utf-8")
+    assert send(gate, upheld(first)).status_code == 200
+    forged = json.loads((folder / "tr_bbbbbbbbbbbb.json").read_text(encoding="utf-8"))
+    assert forged["status"] == "void" and forged["detail"].startswith("not_found")
+
+
+def test_a_confirmed_miss_keeps_its_note_rule_through_admin_retries_and_every_close(gate) -> None:
+    """The rule follows the review (``item.triage``), not the latest reopen: an admin retry after
+    needs_human, or a close as needs_access or needs_conversion, never drops it silently."""
+    item_id = skipped(gate)
+    lease(gate, "auditor", AUD, "auditor")
+    assert send(gate, missed(item_id)).status_code == 200
+    for attempt in range(M.MAX_COUNTED):  # a parked item is ready again at the next run's start
+        lease(gate, "maintainer", f"WAIO-P{attempt}", "curator")
+        M.next_item(gate.writer, principal=CURATOR, run=f"WAIO-P{attempt}")
+        parked = resolve(gate, item_id, f"WAIO-P{attempt}", {"outcome": "parked", "class": "model_output"})
+        assert parked.status_code == 200, parked.text
+        release(gate, "maintainer", f"WAIO-P{attempt}", "curator")
+    assert M.get_item(gate.writer, item_id)["status"] == "needs_human"
+    lease(gate, "maintainer", "WAIO-2", "curator")
+    M.admin_retry(gate.writer, item_id, principal="human:owner", reason="attempt cap")
+    M.next_item(gate.writer, principal=CURATOR, run="WAIO-2")
+
+    for body in ({"outcome": "skipped", "reason": "no_durable_knowledge"},
+                 {"outcome": "needs_conversion", "reason": "x"}, {"outcome": "needs_access", "reason": "x"}):
+        refused = resolve(gate, item_id, "WAIO-2", body)
+        assert refused.status_code == 400 and refused.json()["detail"]["code"] == "triage_note_required", body
+
+    grounds = "the decision on line 4 was withdrawn on line 5; nothing durable remains of claim 1"
+    assert resolve(gate, item_id, "WAIO-2", {"outcome": "needs_conversion", "reason": "x",
+                                             "note": grounds}).status_code == 200
+    assert listed(gate)["total"] == 0  # the maintainer's answer to a review is never reviewed again
+    status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers()).json()["triage"]
+    assert status["reopened"] == {"open": 0, "curated": 0, "total": 1}
+
+
+def test_a_split_hands_the_review_to_its_children_and_never_leaves_triage_md_alone(gate) -> None:
+    item_id = skipped(gate, files={"S1-status.md": STATUS, "S2-notes.md": b"notes\n"})
+    lease(gate, "auditor", AUD, "auditor")
+    assert send(gate, missed(item_id)).status_code == 200
+    lease(gate, "maintainer", "WAIO-2", "curator")
+    M.next_item(gate.writer, principal=CURATOR, run="WAIO-2")
+    alone = resolve(gate, item_id, "WAIO-2", {"outcome": "split", "children": [
+        {"files": ["S1-status.md", "S2-notes.md"]}, {"files": ["triage.md"]}]})
+    assert alone.status_code == 400 and "no evidence" in alone.json()["detail"]["message"]
+
+    split = resolve(gate, item_id, "WAIO-2", {"outcome": "split", "children": [
+        {"files": ["S1-status.md", "triage.md"]}, {"files": ["S2-notes.md"]}]})
+
+    assert split.status_code == 200, split.text
+    lead = M.get_item(gate.writer, item_id)["triage"]["lead"]
+    children = [M.get_item(gate.writer, child) for child in split.json()["resolution"]["children"]]
+    for child in children:
+        assert child["triage"]["review"] == M.get_item(gate.writer, item_id)["triage"]["review"]
+        assert child["brief"].startswith(lead) and child["priority"] >= 45
+    for _child in children:
+        served = M.next_item(gate.writer, principal=CURATOR, run="WAIO-2")["item"]["id"]
+        refused = resolve(gate, served, "WAIO-2", {"outcome": "skipped", "reason": "no_durable_knowledge"})
+        assert refused.status_code == 400 and refused.json()["detail"]["code"] == "triage_note_required"
+        assert resolve(gate, served, "WAIO-2", {"outcome": "skipped", "reason": "no_durable_knowledge",
+                                                "note": "x" * M.TRIAGE_NOTE}).status_code == 200
+    assert listed(gate)["total"] == 0  # no loop: the children answer the review
+    status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers()).json()["triage"]
+    assert status["reopened"] == {"open": 0, "curated": 0, "total": 2}  # the split parent counts as its children
+
+
+def test_a_new_close_after_an_admin_reopen_is_another_decision_to_review(gate) -> None:
+    item_id = skipped(gate)
+    lease(gate, "auditor", AUD, "auditor")
+    [first] = send(gate, upheld(item_id)).json()["reviews"]
+    M.admin_retry(gate.writer, item_id, principal="human:owner", reason="look again")
+    lease(gate, "maintainer", "WAIO-7", "curator")
+    M.next_item(gate.writer, principal=CURATOR, run="WAIO-7")
+    M.resolve(gate.writer, item_id, {"outcome": "skipped", "reason": "out_of_scope"}, principal=CURATOR, run="WAIO-7")
+
+    assert [(row["item"], row["run"]) for row in listed(gate)["items"]] == [(item_id, "WAIO-7")]
+    [second] = send(gate, upheld(item_id)).json()["reviews"]  # the same words, another decision
+    assert second["id"] != first["id"] and second["deduplicated"] is False and listed(gate)["total"] == 0
+
+
+def test_a_receipt_left_applying_never_reopens_a_later_close(gate, monkeypatch) -> None:
+    item_id = skipped(gate)
+    lease(gate, "auditor", AUD, "auditor")
+    reopen = M.triage_reopen
+
+    def crash(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(M, "triage_reopen", crash)
+    with pytest.raises(OSError):
+        send(gate, missed(item_id))
+    monkeypatch.setattr(M, "triage_reopen", reopen)
+    M.admin_retry(gate.writer, item_id, principal="human:owner", reason="look again")
+    lease(gate, "maintainer", "WAIO-5", "curator")
+    M.next_item(gate.writer, principal=CURATOR, run="WAIO-5")
+    M.resolve(gate.writer, item_id, {"outcome": "duplicate", "reason": f"duplicate_of:{METRIC}"}, principal=CURATOR,
+              run="WAIO-5")
+    release(gate, "maintainer", "WAIO-5", "curator")
+    other = skipped(gate, "repo:x#other", {"S1.md": b"other\n"}, run="WAIO-6")
+
+    assert send(gate, upheld(other)).status_code == 200
+
+    [stale] = [receipt for receipt in triage.receipts(gate.writer) if receipt["item"] == item_id]
+    assert stale["status"] == "void" and stale["detail"].startswith("not_reopenable")
+    item = M.get_item(gate.writer, item_id)
+    assert (item["status"], item["resolution"]["run"], len(item["files"])) == ("duplicate", "WAIO-5", 1)
+    assert [row["item"] for row in listed(gate)["items"]] == [item_id]  # the WAIO-5 close is still due
+
+
+def test_an_item_at_the_file_cap_still_takes_its_triage_record(gate) -> None:
+    files = {f"S{n}.md": f"line {n}\n".encode() for n in range(M.MAX_FILES)}
+    item_id = skipped(gate, files=files)
+    huge = skipped(gate, "repo:x#huge", {"S1.md": ("x" * 20000 + "\n").encode() * 50}, run="WAIO-2")
+    lease(gate, "auditor", AUD, "auditor")
+
+    answer = send(gate, missed(item_id, {"claim": "Line 3 holds a decision.", "evidence": {"file": "S3.md",
+                                                                                           "lines": [1, 1]},
+                                         "target": METRIC}))
+
+    assert answer.status_code == 200 and answer.json()["reviews"][0]["status"] == "done", answer.text
+    item = M.get_item(gate.writer, item_id)
+    assert item["status"] == "ready" and len(item["files"]) == M.MAX_FILES + 1
+    refused = send(gate, missed(huge, {"claim": "c", "evidence": {"file": "S1.md", "lines": [1, 50]},
+                                       "target": METRIC}))
+    assert refused.status_code == 413 and codes(refused) == [(huge, "too_large")]
+
+
+def test_review_triage_next_passes_over_an_item_it_cannot_fetch(gate, capsys, monkeypatch, tmp_path) -> None:
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    gate.app(AIWIKI_TRIAGE_EPOCH=EPOCH, AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH="2026-09-20T00:00:00Z")
+    first = skipped(gate)
+    second = skipped(gate, "repo:x#second", {"S1.md": b"second\n"}, run="WAIO-2")
+    blob = M.get_item(gate.writer, first)["files"][0]["sha256"]
+    (gate.writer / ".okf" / "maint" / "items" / first / "files" / blob).write_bytes(b"damaged\n")
+    gate.connect("auditor")
+    state = tmp_path / "auditor-state"
+    assert wiki(capsys, "review", "begin", "--run", AUD, "--state-dir", state)[0] == 0
+
+    code, taken = wiki(capsys, "review", "triage", "next", "--state-dir", state)
+
+    assert code == 0 and taken["item"] == second, taken
+    assert [row["item"] for row in taken["unfetched"]] == [first] and "500" in taken["unfetched"][0]["error"]
+    assert wiki(capsys, "review", "triage", "next", "--state-dir", state)[0] == 10
+    # The operator turns the feature off before the verdict lands: a clean stop, nothing left pending.
+    assert wiki(capsys, "review", "triage", "verdict", second, "upheld", "--note", "nothing durable",
+                "--state-dir", state)[0] == 0
+    gate.app(AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH="2026-09-20T00:00:00Z")
+    code, sent = wiki(capsys, "review", "triage", "submit", "--state-dir", state)
+    assert code == 6 and sent["dropped"] == [{"item": second, "code": "triage_off"}] and sent["pending"] == 0, sent
+    report = wiki(capsys, "review", "end", "--run", AUD, "--state-dir", state)[1]["triage"]
+    assert report["unfetched"][0]["item"] == first and report["unsubmitted"] == []

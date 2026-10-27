@@ -434,8 +434,10 @@ def submit(state_dir: Path, bundle: str | None, *, dry_run: bool, wait: float) -
 def _triage(state: dict, max_items: int = TRIAGE_MAX) -> dict:
     """The run's triage record, made with ``max_items`` the first time (as ``max``, a begin
     repeated within the run keeps it); a run begun by an older CLI gets the default budget."""
-    return state.setdefault("triage", {"max": max_items, "taken": [], "entries": {}, "pending": {},
-                                       "submitted": [], "dropped": [], "pulled": False})
+    record = state.setdefault("triage", {"max": max_items, "taken": [], "entries": {}, "pending": {},
+                                         "submitted": [], "dropped": [], "pulled": False})
+    record.setdefault("unfetched", [])  # a run recorded by the first 0.3.6 build has none
+    return record
 
 
 def _triage_backlog(bundle: str, limit: int = 1000) -> dict | None:
@@ -448,9 +450,29 @@ def _triage_backlog(bundle: str, limit: int = 1000) -> dict | None:
         return None
 
 
+def _pull_triage(state_dir: Path, run: str, bundle: str, entry: dict) -> tuple[list[dict] | None, str | None]:
+    """The entry's frozen evidence files, written to ``triage/<item>/`` and checked by sha256, or
+    None and why one could not be fetched intact."""
+    item = entry["item"]
+    folder, files = _folder(state_dir, run) / "triage" / item, []
+    for file in entry["files"]:
+        if not changeset._ITEM_FILE.fullmatch(f"{item}/{file['name']}"):
+            return None, f"unusable file name {file['name']!r}"
+        status, _headers, data = cli._http("GET", f"/maint/items/{item}/files/{quote(file['name'], safe='')}",
+                                           bundle=bundle)
+        if status != 200 or hashlib.sha256(data).hexdigest() != file["sha256"]:
+            return None, f"{file['name']} could not be fetched intact ({status})"
+        (folder / file["name"]).parent.mkdir(parents=True, exist_ok=True)
+        (folder / file["name"]).write_bytes(data)
+        files.append({"name": file["name"], "bytes": file["bytes"], "path": str(folder / file["name"])})
+    return files, None
+
+
 def triage_next(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
     """The first triage item this run has not taken, its frozen evidence files fetched into
-    ``triage/<item>/`` (checked by sha256), and the concept a duplicate_of names in the workspace."""
+    ``triage/<item>/`` (checked by sha256), and the concept a duplicate_of names in the workspace.
+    An item whose files cannot be fetched intact (a damaged blob) is passed over for this run
+    (``unfetched``, reported by ``review end``), so it never holds the rest of the backlog back."""
     from aiwiki.cli import workspace
 
     state = _load(state_dir, bundle)
@@ -460,25 +482,25 @@ def triage_next(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
     if len(record["taken"]) >= record["max"]:
         return BUDGET, {"stopped": "budget", "taken": len(record["taken"]), "pending": len(record["pending"]),
                         "next": tail}
-    found = _triage_backlog(state["bundle"]) or {}
-    entry = next((row for row in found.get("items") or [] if row["item"] not in record["taken"]), None)
-    if entry is None:
-        return EMPTY, {"stopped": "backlog_empty", "epoch": found.get("epoch"), "pending": len(record["pending"]),
-                       "next": tail}
-    item = entry["item"]
-    if not changeset._WORK_ITEM.fullmatch(item):  # it names a folder here
-        raise MaintError(f"the triage backlog names an unusable item {item!r}")
-    folder, files = _folder(state_dir, state["run"]) / "triage" / item, []
-    for file in entry["files"]:
-        if not changeset._ITEM_FILE.fullmatch(f"{item}/{file['name']}"):
-            raise MaintError(f"triage item {item} names an unusable file {file['name']!r}")
-        status, _headers, data = cli._http("GET", f"/maint/items/{item}/files/{quote(file['name'], safe='')}",
-                                           bundle=state["bundle"])
-        if status != 200 or hashlib.sha256(data).hexdigest() != file["sha256"]:
-            raise MaintError(f"evidence {item}/{file['name']} could not be fetched intact ({status})")
-        (folder / file["name"]).parent.mkdir(parents=True, exist_ok=True)
-        (folder / file["name"]).write_bytes(data)
-        files.append({"name": file["name"], "bytes": file["bytes"], "path": str(folder / file["name"])})
+    passed: list[dict] = []
+    while True:
+        seen = {*record["taken"], *(row["item"] for row in record["unfetched"])}
+        # Oldest first: the first entry this run has not seen is among the first len(seen) + 1.
+        found = _triage_backlog(state["bundle"], min(len(seen) + 1, 1000)) or {}
+        entry = next((row for row in found.get("items") or [] if row["item"] not in seen), None)
+        if entry is None:
+            _save(state_dir, state)
+            return EMPTY, {"stopped": "backlog_empty", "epoch": found.get("epoch"),
+                           "pending": len(record["pending"]), "next": tail, **({"unfetched": passed} if passed else {})}
+        item = entry["item"]
+        if not changeset._WORK_ITEM.fullmatch(item):  # it names a folder here
+            raise MaintError(f"the triage backlog names an unusable item {item!r}")
+        files, why = _pull_triage(state_dir, state["run"], state["bundle"], entry)
+        if files is not None:
+            break
+        passed.append({"item": item, "error": why})
+        record["unfetched"].append(passed[-1])
+    folder = _folder(state_dir, state["run"]) / "triage" / item
     root = Path(state["workspace"])
     if entry.get("duplicate_of") and not record.get("pulled"):
         # The concept a duplicate_of names, as published: one pull for the triage part of the run
@@ -498,6 +520,7 @@ def triage_next(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
             "path": entry["duplicate_of"], "concept": target and str(root / target),
             "exists": bool(target) and (root / target).is_file()},
         "budget": {"taken": len(record["taken"]), "max": record["max"], "pending": len(record["pending"])},
+        **({"unfetched": passed} if passed else {}),
         "commands": [f"ai-wiki -b {state['bundle']} review triage verdict {item} upheld --note '<why>'",
                      f"ai-wiki -b {state['bundle']} review triage verdict {item} missed --note '<why>' "
                      "--missed-file <claims.json>"],
@@ -552,7 +575,7 @@ def triage_submit(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
         try:
             status, answer = maint._call("POST", "/audit/backlog/triage", bundle=state["bundle"], run=state["run"],
                                          body={"reviews": [{"item": item, **review} for item, review in batch.items()]},
-                                         ok=(200, 400, 409, 413, 422))
+                                         ok=(200, 400, 409, 413, 422, 429))
         except MaintError as exc:
             # Unreachable or 5xx: a later submit resends the same reviews and gets their receipts.
             code, refusal = (TRANSIENT, None) if exc.status is None or exc.status >= 500 else (exc.code, exc)
@@ -563,12 +586,19 @@ def triage_submit(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
             for item in batch:
                 pending.pop(item)
             continue
-        refused = {error.get("item"): error.get("code") for error in answer.get("errors") or []
-                   if isinstance(error, dict)}
+        detail = answer.get("detail")  # a refusal before the reviews were read: {code, message}
+        if isinstance(detail, dict) and detail.get("code") == "triage_off":
+            # The operator turned it off (AIWIKI_TRIAGE_EPOCH unset): nothing pending can land.
+            dropped += [{"item": item, "code": "triage_off"} for item in pending]
+            pending, code = {}, DROPPED
+            break
+        errors = [error for error in answer.get("errors") or [] if isinstance(error, dict)] or (
+            [detail] if isinstance(detail, dict) else [{"code": "refused", "message": str(detail)}])
+        refused = {error.get("item"): error.get("code") for error in errors}
         if not refused.keys() & batch.keys():  # lease_required or a malformed request: nothing to drop
             refusal = MaintError(f"the writer refused the triage reviews ({status}): " + "; ".join(
-                f"{error.get('code')}: {error.get('message')}" for error in answer.get("errors") or []
-                if isinstance(error, dict)), FAILED, status=status, detail=answer.get("errors"))
+                f"{error.get('code')}: {error.get('message')}" for error in errors), FAILED, status=status,
+                detail=errors)
             break
         for item in refused.keys() & batch.keys():
             dropped.append({"item": item, "code": refused[item]})
@@ -620,7 +650,7 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
                            "missed": verdicts.count(("missed", "done")),
                            "void": sum(status == "void" for _verdict, status in verdicts),
                            "dropped": record["dropped"], "unsubmitted": sorted(record["pending"]),
-                           "backlog_remaining": triaged and triaged.get("total")}}
+                           "unfetched": record["unfetched"], "backlog_remaining": triaged and triaged.get("total")}}
 
 
 # --- the command line ----------------------------------------------------------------------------
