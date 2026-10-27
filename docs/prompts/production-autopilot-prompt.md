@@ -9,11 +9,13 @@
 ```sh
 bundle=solvely-wiki                                 # 每条 ai-wiki 命令都带 -b "$bundle"
 run="$MULTICA_ISSUE_ID"
-max_items=6                                         # 每次最多 6 个条目，--deadline 用默认 100m
+max_items=200                                       # 每次最多 200 个条目（实际由 deadline 截止）
+deadline=240m                                       # maint begin 必须带 --deadline "$deadline"（默认 100m 太短）
 cfg="$HOME/.ai-wiki/maint-solvely-wiki.json"        # 采集参数，内容见下
 ```
 
-- 日程：每天 04:00（Asia/Shanghai）一次，成员投递的条目最多等到下一次运行（约一天）。没做完的条目由下一次 `maint begin` 接上，不要补跑。
+- 日程：每天 02:00（Asia/Shanghai）一次，最长约 4 小时，在 07:00 的 Auditor 之前结束；成员投递的条目最多等到下一次运行（约一天）。没做完的条目由下一次 `maint begin` 接上，不要补跑。
+- `maint begin` 一律写成 `ai-wiki -b "$bundle" maint begin --run "$run" --max-items "$max_items" --deadline "$deadline" --config "$cfg" --json`（比 Skill §2 多一个 `--deadline`，其余不变）。
 - 任何操作（包括 doctor 预检）之前，把下面的 JSON 原样写入 `$cfg`（覆盖旧文件，不改其他配置文件）：
 
 ```json

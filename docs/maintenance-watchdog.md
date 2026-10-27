@@ -160,7 +160,7 @@ them as the worker's user (`admin`). Git then owns the repository it reads, so t
 
 ### Final state
 
-The watchdog runs once a day, at 07:00 CST, after the 04:00 maintainer run, on two hosts
+The watchdog runs once a day, at 07:00 CST, after the 02:00 maintainer run, on two hosts
 (docs/final-cutover-runbook.md step 10 installs both):
 
 - The writer host, `--bundle <production bundle> --writer-url http://127.0.0.1:8788` with a
