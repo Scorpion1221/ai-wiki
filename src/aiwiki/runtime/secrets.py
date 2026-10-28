@@ -9,6 +9,13 @@ from __future__ import annotations
 
 import re
 
+# A standalone Lark document word right before the key (``docx token``, never ``ai-wiki token``).
+_LARK_DOCUMENT = "(?:" + "|".join(
+    rf"(?<=(?<![A-Za-z0-9_-]){word}[ \t])" for word in ("doc", "docs", "docx", "wiki", "sheet", "sheets", "bitable")
+) + ")"
+# An environment name in capitals with at least one underscore (``CS_IDENTITY_REQUEUE_MAX``).
+_ENV_NAME = r"(?-i:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"
+
 RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # The whole block when it is complete, so redaction removes the key material too.
     ("private_key", re.compile(
@@ -37,13 +44,21 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # The value must be 12+ characters mixing letters and digits, so prose, booleans, numbers, ``${VAR}``
     # templates and code expressions (anything with a dot) never match. A hash or an id the key names as one
     # is not a secret; a key word in prose (``tokens: 1234…``) has no assignment shape and is not either.
-    # Only the ``value`` group is replaced, so the key name stays readable.
+    # A value that assigns an environment name (``Secret: QUEUE_MAX=2000``) is checked after the ``=``.
+    # Two public ids pass in their exact shape only: a Lark document's token in prose (``PRD docx token:``
+    # and 27 letters and digits) and an Adjust app token (``appToken: '…'``, 12 lowercase letters and digits,
+    # which the web SDK ships to every browser). Only the ``value`` group is replaced, so the key name
+    # stays readable.
     ("credential_assignment", re.compile(
-        r"(?i)(?<![A-Za-z0-9])[\"']?"
+        r"(?i)(?<![A-Za-z0-9_.-])[\"']?"
         r"(?![A-Za-z0-9_.-]*(?:sha\d*|hash|digest|fingerprint|_id|_ids|name|ref|tokens|count)[\"']?[ \t]*[:=])"
+        r"(?!" + _LARK_DOCUMENT + r"token[ \t]*[:=][ \t]*[A-Za-z0-9]{27}(?![A-Za-z0-9+/_=.-]))"
+        r"(?!(?:[A-Za-z0-9_.-]*[_.-])?(?:adjust[_-]?)?app[_-]?token[\"']?[ \t]*[:=][ \t]*[\"']?"
+        r"(?-i:[a-z0-9]{12})(?![A-Za-z0-9+/_=.-]))"
         r"[A-Za-z0-9_.-]*(?:secret|token|api_?key|password|passwd|private_?key|access_?key|auth_?key)"
-        r"[A-Za-z0-9_-]*[\"']?[ \t]*[:=][ \t]*[\"']?"
-        r"(?P<value>(?=[A-Za-z0-9+/_=-]*[0-9])(?=[A-Za-z0-9+/_=-]*[A-Za-z])[A-Za-z0-9+/_=-]{12,})"
+        r"[A-Za-z0-9_-]*[\"']?[ \t]*[:=][ \t]*[\"']?(?:" + _ENV_NAME + r"=)?"
+        r"(?P<value>(?!" + _ENV_NAME + r"=)"
+        r"(?=[A-Za-z0-9+/_=-]*[0-9])(?=[A-Za-z0-9+/_=-]*[A-Za-z])[A-Za-z0-9+/_=-]{12,})"
         # A dotted value is a code expression (``process.env.X``, ``config.s2s.key``), never a literal.
         r"(?![A-Za-z0-9+/_=.-])")),
 )

@@ -48,6 +48,16 @@ def test_prose_placeholders_and_templates_are_not_secrets() -> None:
     "E2B_API_" + "KEY=" + "e2b_" + "0f1e2d3c4b5a69788796a5b4c3d2e1f0aa11bb22",
     "      apiKey: " + "Zx81" * 6,
     "CURSOR_AUTOMATIONS_API_" + "KEY = 'crsr_" + "77ab" * 15 + "'",
+    "CLIENT_SEC" + "RET: " + "q7Lm2Xc9Vb4Nz8Pk3Rt6Ws1==",
+    "DB_PASS" + "WORD=" + "Kq7=Zp2Lm9Xw4Rt8",  # an "=" inside the value
+    "dev/web Sec" + "ret: HMAC_KEY=" + "Xk9mP2qL8vR4tY7wZz1a",  # an environment name, then the value
+    # Near the public-id shapes below, still credentials.
+    "PRD access " + "token: " + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",
+    "wiki pass" + "word: " + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",
+    "ai-wiki " + "token: " + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",
+    "docx tenantAccess" + "Token: " + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",
+    "ADJUST_API_" + "TOKEN=" + "abc123def456",
+    "      appToken: '" + "Abc123def456" + "',",
 ])
 def test_a_bare_value_under_a_credential_key_is_a_secret_and_the_key_stays(line: str) -> None:
     redacted, count = secrets.redact(line)
@@ -65,9 +75,15 @@ def test_a_bare_value_under_a_credential_key_is_a_secret_and_the_key_stays(line:
     "api_key 字段 is optional; set API_KEY=${API_KEY} in .env",
     "password: changeme",
     "JWT_SECRET=true",
+    # Public ids in their exact shape; frozen sources of the bundle held each of these lines.
+    "> - PRD docx " + "token: " + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",  # a Lark document
+    "Wiki " + "token: " + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",
+    "      appToken: '" + "abc123def456" + "',",  # an Adjust app token
+    '"scope": "dev/solvely-waio-next Sec' + 'ret: CS_IDENTITY_REQUEUE_MAX=2000 so the worker re-matches"',
 ])
 def test_code_expressions_digests_ids_and_placeholders_are_not_secrets(line: str) -> None:
     assert secrets.scan(line) == []
+    assert secrets.redact(line) == (line, 0)
 
 
 def test_a_value_a_specific_rule_names_is_reported_once() -> None:
