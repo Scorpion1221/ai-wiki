@@ -13,7 +13,7 @@ the writer reports but cannot see, so set them up here.
 | Sandbox (Codex runtimes) | `custom_args` `["-c","sandbox_mode=workspace-write","-c","sandbox_workspace_write.network_access=true","-c","sandbox_workspace_write.writable_roots=[\"<home>/.ai-wiki\"]"]`: the CLI needs the network and a writable `~/.ai-wiki/state`; without them `doctor --role auditor` fails inside the sandbox and the run passes only if the model escalates |
 | Concurrency | `max_concurrent_tasks=1`, `max_attempts=2`, task timeout 3 h; the auditor lease also serializes runs |
 | Custom env | `AIWIKI_TOKEN=<aiw_a_ token of process:ai-wiki-auditor>`: scopes exactly `read` and `audit`, bound to the bundles it audits |
-| Autopilot | `create_issue`, title `[AUTO] AI Wiki audit {{date}}`, cron `0 7 * * *` Asia/Shanghai (once a day, after the maintainer's 04:00 run), prompt `docs/prompts/auditor-autopilot-prompt.md` |
+| Autopilot | `create_issue`, title `[AUTO] AI Wiki audit {{date}}`, cron `0 7 * * *` Asia/Shanghai (once a day, after the maintainer's 02:00 run), prompt `docs/prompts/auditor-autopilot-prompt.md` |
 
 Prerequisites: the writer runs with `AIWIKI_AUDIT=external` and `AIWIKI_BACKLOG_EPOCH` set (it
 refuses to start otherwise), the tunnel routes `audit/backlog` to the writer, and the host has

@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.6 -->
+<!-- ai-wiki:version 0.3.7 -->
 
 # AI Wiki Curating Maintainer
 
@@ -194,7 +194,8 @@ ai-wiki -b "$bundle" maint park <item> --class model_output --detail "<codes, wh
 Parking reverts the item's edits; the item returns at the next run's `begin`. `model_output`,
 `context` and `internal` count: the third counted park sends the item to needs_human, which alerts
 a person and blocks nothing else. Give an item about 20 minutes and at most 3 proposals; out of
-time or context, park it `--class context`. When your context grows long, finish the item, go to §5.
+time, park it `--class context`. The run ends only at exit `10`/`11` (§3.1), never because the
+conversation is long: the writer and `$WS` hold all state, and §4 resumes a run that dies.
 
 ## 4. Failures and resuming
 

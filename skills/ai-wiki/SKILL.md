@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.6 -->
+<!-- ai-wiki:version 0.3.7 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -160,7 +160,7 @@ ai-wiki jobs <job-id>
 Ingest submits sources; it never edits concepts. The server runs no LLM: a submission is
 committed to the wiki's Git at once (text redacted of secrets; an image as sent, so never
 submit one that shows a secret) and becomes a work item that the maintainer agent
-curates on its next run (once a day at 04:00 CST, so within about a day). The answer and
+curates on its next run (once a day at 02:00 CST, so within about a day). The answer and
 `ai-wiki jobs <id>` show that intake commit, or say the writer is still retrying it; the job
 then follows the item until a changeset curates it (with the commit) or the maintainer skips
 it (with the reason); do not poll it in a loop. Re-submitting identical content is a

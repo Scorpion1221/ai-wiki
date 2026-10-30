@@ -42,6 +42,7 @@ import io
 import json
 import os
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
@@ -51,6 +52,7 @@ from aiwiki.cli.toon import emit, object_lines, table_lines
 
 OK, FAILED, USAGE, NEEDS_HUMAN, PREFLIGHT, PARTIAL, EMPTY, BUDGET, DIRTY = 0, 1, 2, 3, 4, 5, 10, 11, 12
 COLLECTORS = ("repos", "issues")
+COLLECT_RETRY_S = 60  # before the one rerun of a collector the network failed
 # ``--only inbox``: the writer queues member submissions as they arrive, so the inbox needs no
 # collecting; a run begun with only it just drains the member queue (the design's inbox trigger).
 INBOX = "inbox"
@@ -128,6 +130,12 @@ def _call(method: str, route: str, *, bundle: str | None, run: str | None = None
         raise MaintError(f"{method} {route} answered {status}" + (f": {message}" if message else ""), code,
                          status=status, detail=detail)
     return status, payload
+
+
+def _network(exc: Exception) -> bool:
+    """A failure of the connection, never of the answer: ``_call`` raises it for an OSError."""
+    return isinstance(exc, OSError) or (isinstance(exc, MaintError) and exc.status is None
+                                        and "the writer is unreachable" in str(exc))
 
 
 def _cursor(bundle: str, name: str) -> dict | None:
@@ -327,16 +335,24 @@ def _collect_issues(bundle: str, run: str | None, work: Path, _cache: Path, conf
 
 def collect(bundle: str, *, run: str | None, work: Path, state_dir: Path, config: dict,
             only: tuple[str, ...]) -> dict:
-    """Each requested collector's result. A collector that fails leaves its cursor where it was."""
+    """Each requested collector's result. A collector that fails leaves its cursor where it was.
+
+    A collector the network failed (the writer unreachable, a timeout) runs once more after
+    ``COLLECT_RETRY_S``: a day's issues hang on one GET, and the cursor CAS makes a rerun safe."""
     results = {}
     for name in COLLECTORS:
         if name not in only:
             continue
         collector = _collect_repos if name == "repos" else _collect_issues
-        try:
-            results[name] = collector(bundle, run, work / name, state_dir / "cache", config.get(name))
-        except (MaintError, OSError, ValueError, KeyError) as exc:
-            results[name] = {"status": "failed", "error": str(exc)[:500]}
+        for attempt in (1, 2):
+            try:
+                results[name] = collector(bundle, run, work / name, state_dir / "cache", config.get(name))
+            except (MaintError, OSError, ValueError, KeyError) as exc:
+                results[name] = {"status": "failed", "error": str(exc)[:500]}
+                if attempt == 1 and _network(exc):
+                    time.sleep(COLLECT_RETRY_S)
+                    continue
+            break
     if INBOX in only:
         try:
             members = _call("GET", "/maint/items", bundle=bundle, params={"status": "ready", "origin": "member",
