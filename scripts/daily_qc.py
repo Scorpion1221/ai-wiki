@@ -22,23 +22,19 @@ leaves them out. Each expectation is a
 row: ok, warn or bad, with the number it read and the threshold. Thresholds are flags, so the
 owner tunes the bar without code.
 
-Prints one JSON document. With --feishu-webhook (or $AIWIKI_WATCHDOG_FEISHU_WEBHOOK) it posts
-one card per run, green when every row is ok, yellow with a warn, red with a bad. Exit 0 =
-report made (whatever the grade), 2 = a source could not be read or the post failed.
+Prints one JSON document whose ``card`` is a Feishu interactive card (schema 2.0), green when
+every row is ok, yellow with a warn, red with a bad. Delivery is the caller's: the owner's Hermes
+runs this over ssh and sends the card to a private chat with its own bot, so no chat credential
+lives on the writer. Exit 0 = report made (whatever the grade), 2 = a source could not be read.
 """
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import hmac
 import json
 import os
 import socket
 import subprocess
 import sys
-import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
@@ -316,7 +312,7 @@ def overall(rows: list[dict]) -> str:
     return "bad" if "bad" in grades else "warn" if "warn" in grades else "ok"
 
 
-# --- Feishu -----------------------------------------------------------------------------------
+# --- the card ---------------------------------------------------------------------------------
 
 
 def render_card(report: dict, label: str) -> dict:
@@ -349,25 +345,6 @@ def render_card(report: dict, label: str) -> dict:
             "body": {"elements": elements}}
 
 
-def post_feishu(url: str, secret: str | None, card: dict) -> None:
-    body: dict = {"msg_type": "interactive", "card": card}
-    if secret:  # Feishu custom bot signature, as the watchdog signs it
-        stamp = str(int(time.time()))
-        digest = hmac.new(f"{stamp}\n{secret}".encode(), b"", hashlib.sha256).digest()
-        body.update(timestamp=stamp, sign=base64.b64encode(digest).decode())
-    request = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode(),
-                                     headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310 - an operator-set URL
-            reply = json.loads(response.read() or b"{}")
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        reason = str(getattr(exc, "reason", exc)).replace(url, "<webhook>")
-        raise SourceError(f"feishu webhook failed: {type(exc).__name__}: {reason}") from None
-    code = reply.get("code", reply.get("StatusCode", 0)) if isinstance(reply, dict) else -1
-    if code != 0:
-        raise SourceError(f"feishu webhook rejected the card: code {code}")
-
-
 # --- entry point --------------------------------------------------------------------------
 
 
@@ -390,11 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--max-ready", type=int, default=150, help="items ready at the end of the window")
     t.add_argument("--max-triage-backlog", type=int, default=60, help="skips and duplicates waiting for triage")
     t.add_argument("--max-unverified-pct", type=float, default=20, help="published concepts unverified")
-    n = p.add_argument_group("notification")
-    n.add_argument("--feishu-webhook", default=os.environ.get("AIWIKI_WATCHDOG_FEISHU_WEBHOOK"))
-    n.add_argument("--feishu-secret", default=os.environ.get("AIWIKI_WATCHDOG_FEISHU_SECRET"))
-    n.add_argument("--no-post", action="store_true", help="print only, even with a webhook set (--now implies it)")
-    n.add_argument("--label", default=socket.gethostname())
+    p.add_argument("--label", default=socket.gethostname(), help="shown in the card's footer")
     return p
 
 
@@ -447,12 +420,7 @@ def main(argv: list[str] | None = None) -> int:
     except SourceError as exc:
         print(json.dumps({"grade": None, "errors": [{"source": "bundle", "error": str(exc)}]}, ensure_ascii=False))
         return 2
-    if args.feishu_webhook and not (args.no_post or args.now):
-        try:
-            post_feishu(args.feishu_webhook, args.feishu_secret, render_card(result, args.label))
-            result["posted"] = True
-        except SourceError as exc:
-            result["errors"].append({"source": "feishu", "error": str(exc)})
+    result["card"] = render_card(result, args.label)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 2 if result["errors"] else 0
 

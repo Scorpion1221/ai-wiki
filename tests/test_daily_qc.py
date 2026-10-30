@@ -238,6 +238,13 @@ def test_the_card_is_one_message_coloured_by_the_worst_row(bundle: Bundle) -> No
     assert "10-29 10:30 → 10-30 10:30" in text
 
 
+def test_the_report_carries_its_card_and_posts_nothing(bundle: Bundle) -> None:
+    full_day(bundle)
+    _code, result = qc(bundle, "--now", iso(NOW), "--label", "bwg",
+                       env={"AIWIKI_WATCHDOG_FEISHU_WEBHOOK": "http://127.0.0.1:9/never"})
+    assert result["card"]["header"]["template"] == "yellow" and "posted" not in result
+
+
 def test_a_missing_bundle_is_an_error_not_a_clean_day(tmp_path: Path) -> None:
     proc = subprocess.run([sys.executable, str(SCRIPT), "--bundle", str(tmp_path / "nope")],
                           capture_output=True, text=True, timeout=60)

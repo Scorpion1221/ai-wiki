@@ -5,7 +5,8 @@ watchdog pages when maintenance stops; this report says whether the day's work w
 It uses only the standard library, only reads, and runs no LLM.
 
 It runs on the writer host at 10:30 CST, after the 02:00 maintainer (up to 4 h) and the
-07:00 auditor. The window is the 24 hours before the run.
+07:00 auditor. The window is the 24 hours before the run. Its JSON carries the Feishu card
+(`card`); delivery is the caller's, so no chat credential lives on the writer.
 
 ## Rows
 
@@ -29,38 +30,21 @@ still holds its lease at report time.
 `--now <RFC 3339>` replays a past window from the receipts' timestamps (the work rows only:
 the queue and wiki rows describe the present) and never posts.
 
-Exit `0`: the report was made, whatever its grade. Exit `2`: a source could not be read,
-or the Feishu post failed. The JSON then lists them under `errors`, and the card notes them.
+Exit `0`: the report was made, whatever its grade. Exit `2`: a source could not be read.
+The JSON then lists it under `errors`, and the card notes it.
 
-## Install (writer host)
+## Install
 
-It reuses the watchdog's mode-600 `/etc/ai-wiki-watchdog.env`, which holds
-`AIWIKI_WATCHDOG_FEISHU_WEBHOOK` and the read token `AIWIKI_WATCHDOG_TOKEN`. The deploy
-copies `scripts/` into `/home/admin/app`.
+The deploy copies `scripts/` into `/home/admin/app` on the writer host. The script reads the
+watchdog's read token `AIWIKI_WATCHDOG_TOKEN` from its mode-600 `/etc/ai-wiki-watchdog.env`:
 
-```ini
-# /etc/systemd/system/ai-wiki-daily-qc.service
-[Unit]
-Description=AI Wiki daily quality check
-After=network-online.target
-
-[Service]
-Type=oneshot
-User=admin
-EnvironmentFile=/etc/ai-wiki-watchdog.env
-ExecStart=/home/admin/app/.venv/bin/python /home/admin/app/scripts/daily_qc.py --bundle /home/admin/solvely-wiki --writer-url http://127.0.0.1:8788 --mirror-url http://127.0.0.1:8787 --label bwg-la-writer
-TimeoutStartSec=300
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-
-# /etc/systemd/system/ai-wiki-daily-qc.timer
-[Timer]
-OnCalendar=*-*-* 02:30:00 UTC
-Persistent=true
-
-[Install]
-WantedBy=timers.target
+```bash
+set -a; . /etc/ai-wiki-watchdog.env; set +a
+sudo -u admin env AIWIKI_WATCHDOG_TOKEN="$AIWIKI_WATCHDOG_TOKEN" /home/admin/app/.venv/bin/python \
+  /home/admin/app/scripts/daily_qc.py --bundle /home/admin/solvely-wiki \
+  --writer-url http://127.0.0.1:8788 --mirror-url http://127.0.0.1:8787 --label bwg-la-writer
 ```
 
-Dry run without posting: `… daily_qc.py --bundle … --no-post`.
+The owner's Hermes runs exactly that over ssh every day at 10:30 CST (a no-agent cron job,
+`~/.hermes/scripts/ai_wiki_daily_qc.py`) and sends `card` to the owner's private chat with
+its own Feishu bot, not to the team group the watchdog pages.
