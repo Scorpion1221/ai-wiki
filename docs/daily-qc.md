@@ -28,7 +28,7 @@ A row is ✅ ok, ⚠️ warn or 🔴 bad. The card is green, yellow or red by it
 still holds its lease at report time.
 
 `--now <RFC 3339>` replays a past window from the receipts' timestamps (the work rows only:
-the queue and wiki rows describe the present) and never posts.
+the queue and wiki rows describe the present).
 
 Exit `0`: the report was made, whatever its grade. Exit `2`: a source could not be read.
 The JSON then lists it under `errors`, and the card notes it.
