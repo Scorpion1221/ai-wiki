@@ -7,7 +7,7 @@ description: >-
   leave generated/verified bookkeeping to the service without faking verification, and hand
   concept edits back to deterministic service gates.
 ---
-<!-- ai-wiki:version 0.3.6 -->
+<!-- ai-wiki:version 0.3.7 -->
 
 # OKF Knowledge Curator
 

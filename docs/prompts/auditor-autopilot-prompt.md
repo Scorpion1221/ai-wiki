@@ -10,7 +10,7 @@
 bundle=solvely-wiki                        # 每条 ai-wiki 命令都带 -b "$bundle"
 run="$MULTICA_ISSUE_ID"
 max=20                                     # 每次最多审 20 个概念，每个 changeset 最多 5 条
-triage_max=20                              # 之后最多复核 20 个 Maintainer 的 skip/duplicate（Skill §3.6）
+triage_max=60                              # 之后最多复核 60 个 Maintainer 的 skip/duplicate（Skill §3.6）
 cfg="$HOME/.ai-wiki/maint.json"            # 只读其中的 repos.root，用来在本机重读 Git 证据
 ```
 

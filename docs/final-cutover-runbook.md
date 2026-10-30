@@ -1391,7 +1391,9 @@ changeset only with a 40+ character note, and that answer is not reviewed again.
   enter the backlog. At `triage_max=20` it grows by about 16 a day, oldest first, so raise
   `triage_max` toward 40 once the first runs show the Auditor's time per item (each review
   counts against its `reviews_per_day`: its `limits` in principals.json, else 200, shared with
-  concept reviews).
+  concept reviews). 2026-10-30 (0.3.7): the 02:00 run at 240m closes about 73 a day as skipped
+  or duplicate and the backlog reached 71 in two days, so `triage_max` is 60; with `max=100`
+  concept reviews that stays within the auditor's 400 `reviews_per_day`.
 - **Watch.** `maint status --json` shows `triage` (`backlog`, `oldest_resolved_at`,
   `reopened.open|curated|total`), and the watchdog records it under the audit check; no alert
   yet, so look at the age of `oldest_resolved_at` weekly: growing past a week means raise

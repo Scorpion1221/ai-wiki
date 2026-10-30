@@ -24,6 +24,7 @@ from gate_fixture import CURATOR, METRIC, Gate, git
 from aiwiki import version
 from aiwiki.cli import main as cli
 from aiwiki.cli import maint, workspace
+from aiwiki.cli.maint import MaintError
 from aiwiki.engine.document import parse_document
 from aiwiki.maint import collect_repos
 from aiwiki.runtime import failure
@@ -340,6 +341,33 @@ def test_a_failed_collector_blocks_the_issue_but_not_the_loop(loop, capsys) -> N
     assert code == 0 and collected["run"] == "WAIO-10" and collected["collect"]["issues"]["candidates"] == 1
     code, report = wiki_json(capsys, "maint", "end", "--run", "WAIO-10", "--state-dir", st)
     assert code == 0 and report["issue_status"] == "done" and report["collect"]["issues"]["created"] == 1
+
+
+def test_a_collector_the_network_failed_runs_once_more(loop, capsys, monkeypatch) -> None:
+    # 2026-10-29: one GET of the issues cursor timed out at begin and a whole day's issues waited.
+    code, _ = wiki_json(capsys, "maint", "import-v4", v4(loop, loop["first"]))
+    assert code == 0
+    sleeps, cursor, reads = [], maint._cursor, []
+
+    def flaky(bundle: str, name: str) -> dict | None:
+        reads.append(name)
+        if reads.count("issues") == 2:  # begin reads it once for the report, then the collector times out
+            raise MaintError(f"GET /maint/cursors/{name}: the writer is unreachable (The read operation timed out)")
+        return cursor(bundle, name)
+
+    monkeypatch.setattr(maint, "_cursor", flaky)
+    monkeypatch.setattr(maint.time, "sleep", sleeps.append)
+    code, begun = wiki_json(capsys, "maint", "begin", "--run", RUN, "--state-dir", loop["st"],
+                            "--config", loop["config"])
+    assert code == 0 and begun["collect"]["issues"]["status"] == "ok", begun
+    assert begun["collect"]["issues"]["candidates"] == 1 and sleeps == [maint.COLLECT_RETRY_S]
+
+    # An answer the writer gave is no network failure: no second try, the collector fails as before.
+    monkeypatch.setattr(maint, "_cursor", lambda bundle, name: (_ for _ in ()).throw(
+        MaintError(f"GET /maint/cursors/{name} answered 500", status=500)))
+    code, again = wiki_json(capsys, "maint", "collect", "--only", "issues", "--state-dir", loop["st"],
+                            "--config", loop["config"])
+    assert code == 5 and again["collect"]["issues"]["status"] == "failed" and sleeps == [maint.COLLECT_RETRY_S]
 
 
 def test_the_budget_stops_the_run_and_a_preflight_failure_fails_closed(loop, capsys, monkeypatch) -> None:
