@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.7 -->
+<!-- ai-wiki:version 0.3.8 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -61,7 +61,7 @@ ai-wiki ls                  # directory map
 ```sh
 ai-wiki ls <dir>                         # known directory
 ai-wiki grep "<exact term>" --fixed      # exact event, field, table, path, price, symbol
-ai-wiki grep "<regex>"                   # regex across concepts
+ai-wiki grep "<regex>"                   # regex across concepts (always case-insensitive)
 ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
 ```
 

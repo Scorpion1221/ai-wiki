@@ -451,3 +451,24 @@ def test_aiwiki_token_env_wins_and_stays_out_of_the_config(monkeypatch, tmp_path
 
     monkeypatch.delenv("AIWIKI_TOKEN")
     assert cli._conn() == ("https://h/", "saved")
+
+
+def test_grep_accepts_grep_habits_and_stays_case_insensitive(monkeypatch, capsys) -> None:
+    calls = []
+    monkeypatch.setattr(cli, "_api", lambda path, **kw: calls.append((path, kw)) or {"hits": []})
+    assert cli.main(["grep", "-i", "Gotenberg"]) == 0
+    assert cli.main(["grep", "-F", "a.b(c)"]) == 0
+    capsys.readouterr()
+    assert calls[0][1]["q"] == "Gotenberg" and calls[0][1]["fixed"] is None
+    assert calls[1][1]["fixed"] == "true"
+
+
+def test_habit_verbs_name_the_real_command(capsys) -> None:
+    import pytest
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["show", "metrics/x.md"])
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "`show` is `ai-wiki cat` here" in out
+    assert '"ai-wiki cat --help"' in out and "ai-wiki show --help" not in out
