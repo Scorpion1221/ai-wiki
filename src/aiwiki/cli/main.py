@@ -46,6 +46,13 @@ _DESCRIPTION = "Read and maintain a curated OKF knowledge bundle over its servic
 _VERSION_FLAGS = {"-v", "-V", "--version"}
 _DEFAULT_CAT_CHARS = 8000
 _DEFAULT_GREP_LIMIT = 100
+# Verbs agents type from habit (cat/kubectl/git) and the command that does it here.
+_COMMAND_HABITS = {
+    "show": "cat", "read": "cat", "get": "cat", "view": "cat", "open": "cat", "print": "cat",
+    "find": "search", "query": "search", "lookup": "search",
+    "list": "ls", "tree": "ls -R",
+    "rg": "grep",
+}
 _STATE_DIR = Path("~/.ai-wiki/state")  # expanded when used, so help and tests never pin a home
 
 
@@ -57,11 +64,18 @@ class _AxiParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> None:
+        commands = [f"{self.command_path} --help"]
+        # Agents reach for filesystem/kubectl verbs; name the command they meant.
+        wrong = re.search(r"invalid choice: '([^']+)'", message)
+        if wrong and wrong.group(1) in _COMMAND_HABITS:
+            meant = _COMMAND_HABITS[wrong.group(1)]
+            message = f"{message}; `{wrong.group(1)}` is `ai-wiki {meant}` here"
+            commands = [f"ai-wiki {meant.split()[0]} --help", "ai-wiki --help"]
         emit_error(
             message,
             kind="usage",
             usage=self.format_usage(),
-            commands=(f"{self.command_path} --help",),
+            commands=tuple(commands),
         )
         raise SystemExit(2)
 
@@ -510,12 +524,16 @@ def main(argv=None) -> int:
                           help=f"preview size (default: {_DEFAULT_CAT_CHARS})")
     p_grep = sub.add_parser(
         "grep", help="regex search across concepts", command_path="ai-wiki grep",
-        epilog=_examples("ai-wiki grep \"subscription.*rate\"", "ai-wiki grep \"metrics/x.md\" --fixed"),
+        epilog=_examples("ai-wiki grep \"subscription.*rate\"", "ai-wiki grep \"metrics/x.md\" --fixed",
+                         "ai-wiki grep -i gotenberg   # always case-insensitive; -i is accepted"),
         **common,
     )
     p_grep.add_argument("pattern")
     p_grep.add_argument("dir", nargs="?")
-    p_grep.add_argument("--fixed", action="store_true", help="literal search (escape regex metacharacters)")
+    p_grep.add_argument("-F", "--fixed", action="store_true", help="literal search (escape regex metacharacters)")
+    # grep habit: matching is always case-insensitive, so -i is accepted and changes nothing.
+    p_grep.add_argument("-i", "--ignore-case", action="store_true",
+                        help="accepted for grep habit; matching is always case-insensitive")
     p_grep.add_argument("--limit", type=_limit, default=_DEFAULT_GREP_LIMIT,
                         help=f"maximum hits to print; 0 means all (default: {_DEFAULT_GREP_LIMIT})")
     p_grep.add_argument("--json", action="store_true", help="emit hits and truncation counts as JSON")
