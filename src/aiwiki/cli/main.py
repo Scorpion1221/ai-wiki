@@ -53,11 +53,13 @@ _VERSION_FLAGS = {"-v", "-V", "--version"}
 _DEFAULT_CAT_CHARS = 8000
 _DEFAULT_GREP_LIMIT = 100
 _TOP_K_MAX = 1000  # the server's top_k limit (service app.py: le=1000)
-# A read (GET) is retried through a restarting server: these statuses, a timeout, or a refused,
-# reset or dropped connection, backing off from _RETRY_BASE_S (doubling, jittered) up to _RETRY_CAP_S.
+# A read (GET) is retried through a restarting server: these statuses, a timeout, a TLS read error,
+# or a refused, reset or dropped connection, backing off from _RETRY_BASE_S (doubling, jittered) up
+# to _RETRY_CAP_S; a retry may run for what is left of the window, a last one at least _RETRY_FLOOR_S.
 _RETRY_STATUSES = {502, 503, 504}
 _RETRY_BASE_S = 0.5
 _RETRY_CAP_S = 4.0
+_RETRY_FLOOR_S = 3.0  # the slowest search answers in about 2 s
 # Verbs agents type from habit (cat/kubectl/git) and the command that does it here.
 _COMMAND_HABITS = {
     "show": "cat", "read": "cat", "get": "cat", "view": "cat", "open": "cat", "print": "cat",
@@ -229,8 +231,8 @@ def _save(cfg: dict) -> None:
 
 
 def _token(cfg: dict) -> str | None:
-    """$AIWIKI_TOKEN wins over the saved token."""
-    return os.environ.get("AIWIKI_TOKEN") or cfg.get("token")
+    """$AIWIKI_TOKEN wins over the saved token; surrounding whitespace (a CRLF line end) is not part of it."""
+    return str(os.environ.get("AIWIKI_TOKEN") or cfg.get("token") or "").strip() or None
 
 
 def _conn() -> tuple[str, str]:
@@ -239,6 +241,8 @@ def _conn() -> tuple[str, str]:
     if not cfg.get("endpoint") or not token:
         _fail("not configured: endpoint and token (saved or $AIWIKI_TOKEN) are required",
               help_command=CONNECT_HINT)
+    if not token.isprintable():  # a header cannot carry it, and the error must not echo it
+        _fail("the token (saved or $AIWIKI_TOKEN) contains an unprintable character", help_command=CONNECT_HINT)
     try:
         scheme = urllib.parse.urlsplit(cfg["endpoint"]).scheme
     except ValueError:
@@ -326,11 +330,19 @@ def _seconds(name: str, default: float, *, positive: bool = False) -> float:
 
 
 def _transient(exc: object) -> bool:
-    """A failure a restarting server causes: a read may try again. A TLS setup fault is not one."""
-    if isinstance(exc, http.client.InvalidURL):
+    """A failure a restarting server or a lossy line causes: a read may try again.
+
+    urllib wraps a failure while connecting (the TLS handshake included) in ``URLError`` and leaves
+    one while reading the answer bare. Any TLS error reading the answer is a garbled or cut answer;
+    of the handshake's only a cut stream is one, a certificate or protocol fault is setup and fails.
+    """
+    if isinstance(exc, ssl.SSLError) and not isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(cause, http.client.InvalidURL):
         return False
-    return isinstance(exc, (TimeoutError, ConnectionError, http.client.HTTPException, ssl.SSLEOFError,
-                            ssl.SSLZeroReturnError, ssl.SSLSyscallError))
+    return isinstance(cause, (TimeoutError, ConnectionError, http.client.HTTPException, ssl.SSLEOFError,
+                              ssl.SSLZeroReturnError, ssl.SSLSyscallError))
 
 
 def _why(exc: object) -> str:
@@ -375,28 +387,26 @@ def _rejection(status: int, raw: bytes) -> str:
 def _send(req: urllib.request.Request, raise_on: Container[int] = ()) -> dict:
     """One API call: its JSON answer, else the CLI's error and exit 1, never a traceback.
 
-    A read (GET) rides out a restarting server: a 502/503/504, a timeout, or a refused, reset or
-    dropped connection is tried again with jittered exponential backoff until $AIWIKI_RETRY_S
-    seconds after its first failure (default 20; 0 never retries). A write is never sent twice:
-    the server may have applied it. $AIWIKI_TIMEOUT bounds each attempt (default 30 s). An error
-    answer whose status is in ``raise_on`` raises ``_Refused`` for the caller instead.
+    A read (GET) rides out a restarting server: a 502/503/504, a timeout, a TLS read error, or a
+    refused, reset or dropped connection is tried again with jittered exponential backoff until
+    $AIWIKI_RETRY_S seconds after its first attempt began (default 20; 0 never retries). A write is
+    never sent twice: the server may have applied it. $AIWIKI_TIMEOUT bounds each attempt (default
+    30 s) and a retry gets only what is left of the window, a last one at least _RETRY_FLOOR_S, so a
+    read gives up within max($AIWIKI_TIMEOUT, $AIWIKI_RETRY_S + _RETRY_FLOOR_S) seconds (30 at the
+    defaults, as before retries) and a timed-out one is resent only when the timeout is the shorter.
+    An error answer whose status is in ``raise_on`` raises ``_Refused`` for the caller instead.
     """
     timeout = _seconds("AIWIKI_TIMEOUT", 30, positive=True)
     read = req.get_method() == "GET"
-    budget = _seconds("AIWIKI_RETRY_S", 20) if read else 0
-    attempt, deadline = 0, None
-
-    def retry(why: str) -> bool:
-        nonlocal deadline
-        if deadline is None:
-            deadline = time.monotonic() + budget
-        return read and _backoff(attempt, deadline, why)
+    deadline = time.monotonic() + (_seconds("AIWIKI_RETRY_S", 20) if read else 0)
+    attempt = 0
 
     while True:
         attempt += 1
         tried = f" (after {attempt} attempts)" if attempt > 1 else ""
+        wait = timeout if attempt == 1 else min(timeout, max(deadline - time.monotonic(), _RETRY_FLOOR_S))
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=wait) as r:
                 body = r.read()
             break
         except urllib.error.HTTPError as e:
@@ -404,7 +414,7 @@ def _send(req: urllib.request.Request, raise_on: Container[int] = ()) -> dict:
                 raw = e.read()
             except (OSError, http.client.HTTPException):
                 raw = b""
-            if e.code in _RETRY_STATUSES and retry(f"status {e.code}"):
+            if read and e.code in _RETRY_STATUSES and _backoff(attempt, deadline, f"status {e.code}"):
                 continue
             message = _rejection(e.code, raw) + tried
             if not read and e.code in (502, 504):  # a gateway may have passed it on before it gave up
@@ -412,17 +422,20 @@ def _send(req: urllib.request.Request, raise_on: Container[int] = ()) -> dict:
             if e.code in raise_on:
                 raise _Refused(e.code, message) from None
             _fail(message, help_command="ai-wiki config show" if e.code == 401 else None)
-        except (OSError, http.client.HTTPException, ValueError) as exc:  # ValueError: a URL urllib cannot use
+        except (OSError, http.client.HTTPException) as exc:
             cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-            if _transient(cause) and retry(_why(cause)):
+            if read and _transient(exc) and _backoff(attempt, deadline, _why(cause)):
                 continue
             if isinstance(cause, TimeoutError):
-                message = f"the ai-wiki server did not answer within {timeout:g}s (timed out; $AIWIKI_TIMEOUT)"
+                knob = "$AIWIKI_TIMEOUT" if wait == timeout else "$AIWIKI_RETRY_S"  # the window cut it short
+                message = f"the ai-wiki server did not answer within {round(wait, 1):g}s (timed out; {knob})"
             else:
                 message = f"cannot reach the configured ai-wiki server: {_why(cause)}"
-            if not read and _transient(cause) and not isinstance(cause, ConnectionRefusedError):
+            if not read and _transient(exc) and not isinstance(cause, ConnectionRefusedError):
                 message += "; the write may have been applied, so check before sending it again"
             _fail(message + tried, help_command="ai-wiki config show")
+        except ValueError:  # a host or header urllib cannot encode; its text may quote the token, so not shown
+            _fail("cannot build a request from the configured endpoint and token", help_command="ai-wiki config show")
     if not body:
         return {}
     try:

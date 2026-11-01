@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import shutil
 import socket
 import ssl
 import struct
@@ -40,6 +41,7 @@ class Server:
     def __init__(self):
         self.script: dict[str, list] = {}
         self.requests: list[tuple[str, str, dict]] = []
+        self.auth: list[str | None] = []
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -51,6 +53,7 @@ class Server:
                 if method == "POST":
                     self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 server.requests.append((method, parts.path, dict(parse_qsl(parts.query))))
+                server.auth.append(self.headers.get("Authorization"))
                 queue = server.script.get(parts.path) or [{}]
                 action = queue.pop(0) if len(queue) > 1 else queue[0]
                 if isinstance(action, tuple) and action[0] == "sleep":
@@ -99,6 +102,7 @@ def server(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "CONFIG", config)
     monkeypatch.setattr(cli, "_RETRY_BASE_S", 0.01)
     monkeypatch.setattr(cli, "_RETRY_CAP_S", 0.04)
+    monkeypatch.setattr(cli, "_RETRY_FLOOR_S", 0.05)
     monkeypatch.delenv("AIWIKI_RETRY_S", raising=False)
     monkeypatch.delenv("AIWIKI_TIMEOUT", raising=False)
     yield fake
@@ -176,6 +180,112 @@ def test_the_retry_budget_runs_out_into_the_standard_error(server, capsys, monke
     assert out.startswith("error:\n") and '"ai-wiki config show"' not in out
 
 
+def test_a_retry_runs_only_for_what_is_left_of_the_window(server, capsys, monkeypatch) -> None:
+    """$AIWIKI_RETRY_S counts from the first attempt and cuts a retry's timeout to what is left of
+    it, so a hung server costs max($AIWIKI_TIMEOUT, $AIWIKI_RETRY_S), not a whole timeout per retry."""
+    server.script["/search"] = [("sleep", 1.5, SEARCH)]
+    monkeypatch.setenv("AIWIKI_TIMEOUT", "0.4")
+    monkeypatch.setenv("AIWIKI_RETRY_S", "0.6")
+    started = time.monotonic()
+
+    code, out, err = run(capsys, "search", "x")
+
+    assert code == 1 and time.monotonic() - started < 1.0  # each retry waiting 0.4 s took 1.2 s
+    assert "retrying" in err and "(timed out; $AIWIKI_RETRY_S)" in out  # the last attempt was cut short
+
+    # a timeout longer than the window is not resent: the window is spent when it fires
+    monkeypatch.setenv("AIWIKI_TIMEOUT", "0.3")
+    monkeypatch.setenv("AIWIKI_RETRY_S", "0.2")
+    sent = len(server.routes("/search"))
+    code, out, err = run(capsys, "search", "x")
+    assert code == 1 and len(server.routes("/search")) == sent + 1 and "retrying" not in err
+    assert "did not answer within 0.3s (timed out; $AIWIKI_TIMEOUT)" in out
+
+
+class TlsServer:
+    """HTTPS on loopback whose first ``garbled`` answers break off in a TLS record no key decrypts,
+    before the status line (``where="head"``) or inside the body; later ones answer 200."""
+
+    def __init__(self, tmp_path: Path, garbled: int, where: str):
+        openssl = shutil.which("openssl")
+        if not openssl:
+            pytest.skip("needs the openssl command to make a certificate")
+        self.cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+        subprocess.run([openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                        "-nodes", "-keyout", str(key), "-out", str(self.cert), "-days", "1", "-subj", "/CN=127.0.0.1",
+                        "-addext", "subjectAltName=IP:127.0.0.1"], check=True, capture_output=True, timeout=30)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(self.cert, key)
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.url = f"https://127.0.0.1:{self.listener.getsockname()[1]}"
+        self.accepted = 0
+
+        def serve():
+            while True:
+                try:
+                    raw, _address = self.listener.accept()
+                except OSError:
+                    return
+                self.accepted += 1
+                try:
+                    with context.wrap_socket(raw, server_side=True) as conn:
+                        conn.recv(65536)
+                        if self.accepted > garbled:
+                            body = json.dumps({"bundle": "kb"}).encode()
+                            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                         b"Content-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(body), body))
+                            continue
+                        if where == "body":
+                            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{")
+                        with socket.socket(fileno=os.dup(conn.fileno())) as line:  # under TLS, on the wire
+                            line.sendall(b"\x17\x03\x03\x00\x40" + os.urandom(64))
+                        time.sleep(0.05)
+                except OSError:
+                    pass  # the client refused the handshake
+
+        threading.Thread(target=serve, daemon=True).start()
+
+
+@pytest.mark.parametrize("where", ["head", "body"])
+def test_a_read_retries_a_tls_read_error_but_not_a_certificate_it_distrusts(
+        server, capsys, monkeypatch, tmp_path, where) -> None:
+    tls = TlsServer(tmp_path, garbled=2, where=where)
+    cli.CONFIG.write_text(json.dumps({"endpoint": tls.url, "token": "fixture-token"}))
+    trusting = ssl.create_default_context(cafile=str(tls.cert))
+    opener = cli.urllib.request.build_opener(cli.urllib.request.HTTPSHandler(context=trusting))
+    monkeypatch.setattr(cli.urllib.request, "_opener", opener)  # what urlopen sends through
+    try:
+        code, out, err = run(capsys, "health", "--json")
+
+        assert code == 0 and json.loads(out) and tls.accepted == 3
+        assert err.count("retrying in") == 2 and "Traceback" not in err
+
+        monkeypatch.setattr(cli.urllib.request, "_opener", cli.urllib.request.build_opener())  # system trust
+        code, out, err = run(capsys, "health", "--json")
+        assert code == 1 and tls.accepted == 4 and "retrying" not in err  # setup, not the line: at once
+        assert "CERTIFICATE_VERIFY_FAILED" in json.loads(out)["error"]
+    finally:
+        tls.listener.close()
+
+
+def test_a_token_is_trimmed_and_never_echoed(server, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("AIWIKI_TOKEN", "aiw_secret_TOKEN\r\n")  # read from a CRLF file
+    assert run(capsys, "health")[0] == 0 and server.auth == ["Bearer aiw_secret_TOKEN"]
+
+    monkeypatch.setenv("AIWIKI_TOKEN", "aiw_secret\x1bTOKEN")
+    code, out, _err = run(capsys, "health", "--json")
+    assert code == 1 and "secret" not in out and len(server.auth) == 1
+    assert json.loads(out)["error"] == "the token (saved or $AIWIKI_TOKEN) contains an unprintable character"
+
+    def urlopen(request, timeout=None):  # whatever else urllib cannot encode may quote a header
+        raise ValueError(f"Invalid header value {request.get_header('Authorization').encode()!r}")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("AIWIKI_TOKEN", "aiw_secret_TOKEN")
+    code, out, _err = run(capsys, "health", "--json")
+    assert code == 1 and "secret" not in out and json.loads(out)["help"] == "ai-wiki config show"
+
+
 @pytest.mark.parametrize("failure", [502, "reset", ("sleep", 0.4, {"id": "j1"})])
 def test_a_write_is_never_sent_twice(server, capsys, monkeypatch, tmp_path, failure) -> None:
     monkeypatch.setenv("AIWIKI_TIMEOUT", "0.2")
@@ -193,19 +303,25 @@ def test_a_write_is_never_sent_twice(server, capsys, monkeypatch, tmp_path, fail
 # --- A4: every failure is the standard error, JSON under --json ----------------------------------
 
 
-@pytest.mark.parametrize("exc", [
-    TimeoutError("timed out"),
-    ConnectionResetError(54, "Connection reset by peer"),
-    http.client.RemoteDisconnected("Remote end closed connection without response"),
-    http.client.IncompleteRead(b"{"),
-    ssl.SSLError(1, "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] decryption failed or bad record mac"),
-    ssl.SSLCertVerificationError(1, "certificate verify failed"),
-    urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
-    urllib.error.URLError(TimeoutError("timed out")),
-    urllib.error.URLError("unknown url type: htp"),
+@pytest.mark.parametrize("exc,retried", [
+    (TimeoutError("timed out"), True),
+    (ConnectionResetError(54, "Connection reset by peer"), True),
+    (http.client.RemoteDisconnected("Remote end closed connection without response"), True),
+    (http.client.IncompleteRead(b"{"), True),
+    # urllib raises what fails while the answer is read bare: any TLS error there is the line's
+    (ssl.SSLError(1, "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] decryption failed or bad record mac"), True),
+    (ssl.SSLError(1, "[SSL: RECORD_LAYER_FAILURE] record layer failure"), True),
+    (ssl.SSLCertVerificationError(1, "certificate verify failed"), False),
+    # ...and wraps what fails while connecting: of the handshake's only a cut stream is retried
+    (urllib.error.URLError(ssl.SSLEOFError(8, "EOF occurred in violation of protocol")), True),
+    (urllib.error.URLError(ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number")), False),
+    (urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")), False),
+    (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")), True),
+    (urllib.error.URLError(TimeoutError("timed out")), True),
+    (urllib.error.URLError("unknown url type: htp"), False),
 ])
-def test_no_network_failure_escapes_as_a_traceback(server, capsys, monkeypatch, exc) -> None:
-    """Each ends in the standard error, retried or not (a refused, reset or dropped connection is)."""
+def test_no_network_failure_escapes_as_a_traceback(server, capsys, monkeypatch, exc, retried) -> None:
+    """Each ends in the standard error, after retries for the failures of a restart or a lossy line."""
     calls = []
 
     def urlopen(request, timeout=None):
@@ -218,6 +334,7 @@ def test_no_network_failure_escapes_as_a_traceback(server, capsys, monkeypatch, 
     code, out, _err = run(capsys, "search", "x")
     assert code == 1 and out.startswith("error:\n") and 'kind: "error"' in out
     assert calls[0] == 30  # the default per-request timeout
+    assert (len(calls) > 1) is retried
 
     code, out, _err = run(capsys, "search", "x", "--json")
     error = json.loads(out)
