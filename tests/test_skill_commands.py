@@ -79,7 +79,8 @@ def test_the_skill_covers_the_whole_loop(root) -> None:
     # A budget, not a style rule: the whole skill is loaded into every maintainer run. 2026-10-10
     # took it from 220 to 230 for the issue-comment attribution rule and the `--deadline` parameter;
     # 2026-10-24 (0.3.4) to 250: the self-update preflight left 229/230, no room for the next small fix.
-    assert len(text.splitlines()) <= 250
+    # 2026-11-01 (0.3.9) to 260: the batch rule of §3.1 (one changeset curates several items).
+    assert len(text.splitlines()) <= 260
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert {"doctor", "maint begin", "maint next", "maint skip", "maint split", "maint add-evidence",
             "concept new", "validate", "propose", "workspace pull", "maint park", "maint end"} <= verbs

@@ -264,15 +264,17 @@ def _item_evidence(root: Path, bundle: str, item_id: str) -> tuple[list[changese
     return files, item.get("current_run")
 
 
-def build(root: Path, state: dict, *, item: str | None = None, upload: Path | None = None,
+def build(root: Path, state: dict, *, item: str | list[str] | None = None, upload: Path | None = None,
           source_id: str | None = None, deprecate=(), allow_shrink=(), allow_retype=(), close: bool = True,
           run: str | None = None) -> tuple[dict, list[changeset.EvidenceFile]]:
     """The changeset of the workspace's local changes and the frozen evidence it names.
 
     Without ``item`` or ``upload`` a placeholder packet stands in: good for judging the
     concepts locally, never sent. An item's changeset runs under the run that claimed it
-    unless ``run`` names another.
+    unless ``run`` names another. Several items (a batch the run holds) make one changeset
+    that cites, and closes, each of them.
     """
+    items = [item] if isinstance(item, str) else list(dict.fromkeys(item or []))
     changed, _local = changes(root, state)
     files = []
     for rel, change in changed.items():
@@ -295,17 +297,20 @@ def build(root: Path, state: dict, *, item: str | None = None, upload: Path | No
         if len(cited) > 1:
             raise WorkspaceError(f"the changed concepts cite evidence:packet as {', '.join(cited)}; "
                                  "cite one id, or pass --source-id")
-        source_id = cited[0] if cited else (item or "local-check")
+        source_id = cited[0] if cited else (items[0] if len(items) == 1 else "local-check")
     request: dict = {"schema": changeset.SCHEMA, "kind": "curate", "intent": "evidence",
                      "base_revision": state["base_revision"]}
     evidence: list[changeset.EvidenceFile] = []
-    if item:
-        evidence, claimed = _item_evidence(root, state["bundle"], item)
-        # An attention notice or a triage record is no evidence (the gate refuses it): cite the
-        # files beside it. One alone stays in, so the gate's answer tells the maintainer to add evidence.
-        evidence = [file for file in evidence if file.origin.get("kind") not in changeset.NON_EVIDENCE] or evidence
+    if items:
+        claimed = None
+        for item_id in items:
+            frozen, holder = _item_evidence(root, state["bundle"], item_id)
+            # An attention notice or a triage record is no evidence (the gate refuses it): cite the
+            # files beside it. One alone stays in, so the gate's answer tells the maintainer to add evidence.
+            evidence += [file for file in frozen if file.origin.get("kind") not in changeset.NON_EVIDENCE] or frozen
+            claimed = claimed or holder
         run = run or claimed
-        request.update(work_items=[item], close_items=close,
+        request.update(work_items=items, close_items=close,
                        evidence={"id": source_id, "item_files": [file.name for file in evidence]})
     else:
         try:

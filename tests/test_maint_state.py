@@ -581,3 +581,17 @@ def test_maint_http_errors_are_structured(bundle, monkeypatch):
     mirror = _client(bundle, monkeypatch, curate="off")
     assert mirror.get("/maint/status", headers=AUTH).status_code == 403
     assert mirror.post(f"/admin/items/{a}/retry", headers=AUTH).status_code == 403
+
+
+def test_a_run_may_hold_a_batch_and_every_held_item_returns_when_it_ends(bundle, clock):
+    _enqueue(bundle, _item("repo:x#a", priority=80), _item("repo:x#b", priority=70), _item("repo:x#c", priority=60))
+    _begin(bundle, "WAIO-1")
+    first = _next(bundle, "WAIO-1")
+    assert _next(bundle, "WAIO-1")["id"] == first["id"]  # without more: the open item again
+    second = M.next_item(bundle, principal=P, run="WAIO-1", more=True)["item"]
+    assert (first["topic_key"], second["topic_key"]) == ("repo:x#a", "repo:x#b")
+    held = [item["id"] for item in M._items(bundle) if item["status"] == "in_progress"]
+    assert sorted(held) == sorted([first["id"], second["id"]])
+    released = _end(bundle, "WAIO-1")
+    assert released["released"] and sorted(released["interrupted"]) == sorted(held)
+    assert {M.get_item(bundle, item_id)["status"] for item_id in held} == {"ready"}

@@ -682,3 +682,47 @@ def test_an_external_auditor_verifies_what_the_maintainer_proposed(loop, capsys)
     # The maintainer can never have reached that tier: its token has no audit scope.
     assert gate.post({"schema": "ai-wiki.changeset/v1", "kind": "audit", "base_revision": gate.head(),
                       "reviews": [{"path": CAP, "base": "ch1:" + "0" * 64, "verdict": "verified"}]}).status_code == 403
+
+
+def test_a_batch_of_items_is_curated_by_one_changeset(loop, capsys) -> None:
+    st = loop["st"]
+    first = enqueue(loop, "repo:batch#a", "Retries need a cap of 3.\n")
+    second = enqueue(loop, "repo:batch#b", "The cap applies per funnel step.\n")
+    code, _ = wiki_json(capsys, "maint", "begin", "--run", RUN, "--only", "inbox", "--state-dir", st,
+                        "--config", loop["config"])
+    assert code == 0
+    code, a = wiki_json(capsys, "maint", "next", "--state-dir", st)
+    assert code == 0
+    ws = a["commands"][0].split()[3]
+    code, out = wiki(capsys, "concept", "new", PROBE, "--dir", ws, "--type", "Metric", "--title", "Probe retry cap",
+                     "--description", "How many retries a funnel step gets", "--tags", "metric,retries",
+                     "--source-id", "batch-retries")
+    assert code == 0, out
+    with (Path(ws) / PROBE).open("a", encoding="utf-8") as concept:
+        concept.write("Retries need a cap of 3, per funnel step.[^batch-retries]\n\n[^batch-retries]: two items\n")
+    assert wiki_json(capsys, "maint", "next", "--state-dir", st)[0] == 12  # still one item at a time by default
+    code, b = wiki_json(capsys, "maint", "next", "--batch", "--state-dir", st)
+    assert code == 0 and {a["item"], b["item"]} == {first, second}, b
+    assert (Path(ws) / PROBE).is_file()  # the open item's edit stays in the workspace
+    code, verdict = wiki_json(capsys, "validate", "--dir", ws, "--item", a["item"], "--item", b["item"])
+    assert code == 0, verdict
+    code, receipt = wiki_json(capsys, "propose", "--dir", ws, "--item", a["item"], "--item", b["item"],
+                              "--state-dir", st)
+    assert code == 0 and receipt["status"] == "done", receipt
+    assert sorted(receipt["closed_items"]) == sorted([first, second])
+    assert {item(loop, first)["status"], item(loop, second)["status"]} == {"curated"}
+    message = git(loop["gate"].remote, "log", "-1", "--format=%B", "main")
+    assert first in message and second in message
+    code, report = wiki_json(capsys, "maint", "end", "--run", RUN, "--state-dir", st)
+    assert code == 0 and report["queue"]["curated"] == 2 and report["gate"]["first_pass"] == 2, report
+
+
+def test_a_batch_never_closes_an_item_it_brings_no_evidence_of(loop, capsys) -> None:
+    gate = loop["gate"]
+    first = enqueue(loop, "repo:batch#c", "Retries need a cap of 3.\n")
+    second = enqueue(loop, "repo:batch#d", "The cap applies per funnel step.\n")
+    gate.client.post("/maint/lease/maintainer", params={"bundle": "kb-a"}, headers=gate.headers(run=RUN))
+    request = gate.request(work_items=[first, second])
+    request["evidence"] = {"id": "batch-cd", "item_files": [f"{first}/notes.md"]}
+    refused = gate.post(request, run=RUN)
+    assert refused.status_code == 400 and second in refused.json()["errors"][0]["message"], refused.text

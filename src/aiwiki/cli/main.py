@@ -710,7 +710,9 @@ def main(argv=None) -> int:
         parser.add_argument("--dir", default=".", help="the workspace directory (default: .)")
     for parser in (p_diff, p_validate, p_propose):
         evidence = parser.add_mutually_exclusive_group(required=parser is p_propose)
-        evidence.add_argument("--item", help="cite the frozen evidence of this work item (it_<id>)")
+        evidence.add_argument("--item", action="append",
+                              help="cite the frozen evidence of this work item (it_<id>); repeat it to curate "
+                                   "a batch the run holds in one changeset")
         evidence.add_argument("--upload", help="cite this file as the evidence packet (needs --source-id)")
         parser.add_argument("--source-id", help="the evidence id the concepts cite (default: the one they cite)")
         parser.add_argument("--deprecate", action="append", type=_triple, metavar="PATH:SUPERSEDED_BY:REASON")
