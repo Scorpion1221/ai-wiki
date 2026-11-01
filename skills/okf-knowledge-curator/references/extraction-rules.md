@@ -40,8 +40,9 @@ For each concept:
 3. Give cited sources stable ids and join claims with Markdown footnotes.
 4. Add links only to existing related concepts.
 5. Add the Signals of SKILL.md: an alias in the title's other language plus the identifiers
-   users type, and `stale_after` by its date rule (required on Metric, Experiment, Monetization
-   and dated readings); do not store staleness as status. Deprecate what the evidence retires.
+   users type, and `stale_after` by its date rule (required on Metric, Experiment, Monetization,
+   Monetization Strategy and dated readings, when the evidence gives a date); do not store
+   staleness as status. Deprecate what the evidence retires.
 6. Keep new/uncertain material transiently `draft` and omit `verified`; the independent
    audit finalizes retained records without faking verification.
 

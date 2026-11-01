@@ -194,8 +194,7 @@ with a true reason; `path_forbidden`, `service_owned_path`, `delete_forbidden` d
 change; `too_large` shorten the concept or split the item; `notice_not_evidence` add evidence
 (§3.2) and cite it; `stale_after_needs_new_evidence` keep `stale_after` as it was, or add a Git file
 or an issue. `secret_detected` never echoes the value: remove it from your text; if the rule matched
-the evidence itself, park `model_output` naming the rule. Warnings never refuse; add what
-`missing_cross_language_alias` or `missing_stale_after` names (§3.3), and ignore the others.
+the evidence itself, park `model_output` naming the rule. `service_owned_key_ignored`: a warning.
 
 ```sh
 ai-wiki -b "$bundle" maint park <item> --class model_output --detail "<codes, what failed>"

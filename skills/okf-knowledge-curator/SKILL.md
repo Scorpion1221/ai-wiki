@@ -182,21 +182,20 @@ directional or not-a-conclusion limit stay beside the claim they bound.
 ## Signals on every new or changed concept
 
 Readers find, date and retire concepts by three signals. Every concept a pass writes (new, or
-edited for its evidence) meets all three; never touch a concept only to add them. The gate
-warns about a missing alias or `stale_after` (`missing_cross_language_alias`,
-`missing_stale_after`) and never refuses it.
+edited for its evidence) meets all three; never touch a concept only to add them.
 
 - **Aliases.** At least one alias in the other language of the title: English words for a title
   with Chinese characters (an abbreviation alone is not enough), Chinese for an English title.
   Add the identifiers and abbreviations users type (event, table, flag or experiment key, issue
   id). Never repeat the title or a tag, and never state a claim (no status, number or date). A new
   concept whose alias another concept already uses is refused (`duplicate_title`): be specific.
-- **`stale_after`.** Required on `Metric`, `Experiment` and `Monetization` concepts and on any
-  concept whose title or body gives a dated reading (a number or state for a window or an as-of
-  date); optional elsewhere, by the same rule. The evidence date is the newest date the cited
-  evidence gives for the concept's main claim (the definition, reading, state or price its title
-  names): a comment's time, a frozen commit's time, a document's own date; else the curation day.
-  Take the earliest row that applies:
+- **`stale_after`.** Required on `Metric`, `Experiment`, `Monetization` and
+  `Monetization Strategy` concepts and on any concept whose title or body gives a dated reading
+  (a number or state for a window or an as-of date); optional elsewhere, by the same rule. The
+  evidence date is the newest date the cited evidence gives for the concept's main claim (the
+  definition, reading, state or price its title names): a comment's time, a frozen commit's time,
+  a document's own date. Evidence that gives no date gets no `stale_after`: the default never
+  reads fresh, so readers fail closed. Take the earliest row that applies:
 
   | Claim | `stale_after` |
   |---|---|
@@ -213,8 +212,9 @@ warns about a missing alias or `stale_after` (`missing_cross_language_alias`,
   Remote maintainer mode that is `ai-wiki propose --deprecate <path>:<superseded_by>:<reason>`
   on the unedited file (the service writes the note); the successor is the replacement or, for a
   retirement, the concept that records it. The `description` states the body's latest state and
-  its date ("2026-10-29 全量上线", not the 10-12 "开发中"): a pass that changes the concept fixes
-  a description the body has moved past.
+  its date at the boundary its evidence proves ("2026-10-29 已合并", not the 10-12 "开发中"; a
+  merge is not a release); a state only a comment reports stays out of it. A pass that changes
+  the concept fixes a description the body has moved past.
 
 ## Ingest: new source → concepts
 

@@ -102,6 +102,10 @@ CASES = [
         "tags: [metric]", "tags: []"))),
     ("type not a string", "invalid_value", lambda ws: put(ws, "metrics/probe.md", concept("Probe").replace(
         "type: Metric", "type: 5"))),
+    ("type a list", "invalid_value", lambda ws: put(ws, "metrics/probe.md", concept("Probe").replace(
+        "type: Metric", "type: [Metric]"))),
+    ("type a mapping", "invalid_value", lambda ws: put(ws, "metrics/probe.md", concept("Probe").replace(
+        "type: Metric", "type: {a: 1}"))),
     ("legacy key", "legacy_key", lambda ws: edit(ws, METRIC, lambda t: frontmatter(cite(t), "timestamp: 2026-09-01"))),
     ("legacy citations", "legacy_key", lambda ws: edit(ws, METRIC, lambda t: cite(t) + "\n# Citations\n\n- x\n")),
     ("frontmatter not a mapping", "yaml_parse", lambda ws: put(ws, "metrics/probe.md", "---\n- a\n---\n# X\n")),

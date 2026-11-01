@@ -51,8 +51,8 @@ and non-empty structured `sources`.
   the generator's own process event, 12 h after it), `verification_current` is false and the
   current revision is unconfirmed.
 - `stale_after`: absolute `YYYY-MM-DD`; stale is not a status. Absent: stale 90 days after
-  `generated.at`, never fresh by default. Required on Metric, Experiment and Monetization
-  concepts and dated readings, by the curator's date rule.
+  `generated.at`, never fresh by default. Required on Metric, Experiment, Monetization and
+  Monetization Strategy concepts and dated readings whose evidence gives a date (curator's rule).
 - `aliases`: other names not in the title or tags; at least one in the title's other language.
 - Extensions such as `confidence`, `contested`, `contradictions`, and `source_sha256` are allowed.
 

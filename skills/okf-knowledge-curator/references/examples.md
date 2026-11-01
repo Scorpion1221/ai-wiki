@@ -44,7 +44,6 @@ aliases: [每下载收入, RPD]
 status: stable
 generated: {by: process:ai-wiki-curator, at: 2026-08-13T08:00:00Z}
 verified: {by: process:finance-contract-audit, at: 2026-08-13T08:05:00Z}
-stale_after: 2026-11-11
 sources:
   - id: finance-contract
     resource: analytics/web-commercial-data-contract.md
@@ -63,4 +62,4 @@ The numerator and denominator must use the same attribution window.[^finance-con
 ```
 
 The verifier establishes machine-confirmed trust; a normal edit must not refresh it. The source
-gives no date, so `stale_after` is the curation day (2026-08-13) + 90 days.
+gives no date, so it declares no `stale_after`: it never reads fresh, and readers fail closed.
