@@ -641,11 +641,13 @@ def _serve_order(item: dict, now: datetime) -> tuple:
     return (item["priority"] < MEMBER_PRIORITY, -_effective_priority(item, now), item["created_at"], item["id"])
 
 
-def next_item(bundle: Path, *, principal: str, run: str | None) -> dict:
+def next_item(bundle: Path, *, principal: str, run: str | None, more: bool = False) -> dict:
     """Claim the highest-priority ready item for the lease-holding run.
 
     A run gets back the item it already has in progress, so a lost response never
-    orphans an item or spends another attempt.
+    orphans an item or spends another attempt. ``more`` claims another ready item beside
+    the run's open ones, for a batch that one changeset curates together (``maint next
+    --batch``); every item a run holds is swept back to ready when it ends.
     """
     with _LOCK:
         now = _now()
@@ -653,7 +655,7 @@ def next_item(bundle: Path, *, principal: str, run: str | None) -> dict:
         items = _items(bundle)
         ready = [i for i in items if i["status"] == "ready"]
         current = next((i for i in items if i["status"] == "in_progress" and i.get("current_run") == run), None)
-        if current is not None:
+        if current is not None and not more:
             return {"item": current, "resumed": True, "ready": len(ready)}
         if not ready:
             return {"item": None, "resumed": False, "ready": 0}

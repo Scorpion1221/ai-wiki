@@ -516,15 +516,18 @@ def _commands(state: dict, state_dir: Path, item_id: str) -> list[str]:
             f"ai-wiki maint skip {item_id} --reason <reason>{tail}"]
 
 
-def next_item(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
-    """Claim the next item within the run's budget and fetch its evidence into the workspace."""
+def next_item(state_dir: Path, bundle: str | None, *, batch: bool = False) -> tuple[int, dict]:
+    """Claim the next item within the run's budget and fetch its evidence into the workspace.
+
+    ``batch`` claims one more beside the items the run already holds, with their edits still in
+    the workspace: one changeset (``propose --item A --item B …``) then curates them together."""
     from aiwiki.cli import workspace
 
     state = load_run(state_dir, bundle=bundle)
     root = Path(state["workspace"])
     changed = workspace.changes(root, workspace.load(root))[0]
     pending = workspace.conflicts(root)
-    if changed or pending:
+    if (changed or pending) and not batch:
         held = _held(state["bundle"], state["run"])
         return DIRTY, {"error": f"the workspace holds changes of item {held}: propose them, or skip or park it"
                        if held else f"the workspace holds changes but run {state['run']} has no item in progress; "
@@ -540,7 +543,8 @@ def next_item(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
             return BUDGET, {"stopped": stop, "taken": len(state["taken"]), "max_items": state["max_items"],
                             "deadline": state["deadline"], "next": "ai-wiki maint end --run " + state["run"],
                             **({"closed": closed} if closed else {})}
-        answer = _call("POST", "/maint/items/next", bundle=state["bundle"], run=state["run"])[1]
+        answer = _call("POST", "/maint/items/next", bundle=state["bundle"], run=state["run"],
+                       params={"more": "true"} if batch else None)[1]
         item = answer.get("item")
         if not item:
             state["stopped"] = "queue_empty"
@@ -644,7 +648,9 @@ def resolve(state_dir: Path, bundle: str | None, item_id: str, body: dict) -> tu
         if not _resolved(item, state["run"], body):
             raise
     resolution = item.get("resolution") or {}
-    return OK, {"item": item["id"], "status": item["status"], "reverted": _reset(state),
+    # An item closed out of a batch leaves the edits of the items the run still holds.
+    reverted = [] if _held(state["bundle"], state["run"]) else _reset(state)
+    return OK, {"item": item["id"], "status": item["status"], "reverted": reverted,
                 **{key: resolution[key] for key in ("reason", "children") if resolution.get(key)},
                 "next": "ai-wiki maint next --json"}
 
@@ -1096,7 +1102,9 @@ def add_parser(sub, common: dict) -> None:
         parser.add_argument("--only", type=_only, default=COLLECTORS,
                             help="collectors (default: repos,issues); inbox alone just drains the member queue")
     next_ = verb("next", "claim the next work item (exit 10 queue empty, 11 budget spent, 12 workspace dirty)",
-                 "ai-wiki maint next --json")
+                 "ai-wiki maint next --json", "ai-wiki maint next --batch --json  # one more for the open batch")
+    next_.add_argument("--batch", action="store_true",
+                       help="claim one more item beside the run's open ones (their edits stay); propose them together")
     evidence = verb("add-evidence", "freeze a Git file, a Multica issue or a bundle source into the item",
                     "ai-wiki maint add-evidence it_3f2a9c1b7d10 https://code.example/web.git@1a2b3c4:docs/x.md#L10-40",
                     "ai-wiki maint add-evidence it_3f2a9c1b7d10 issue:WAIO-587#01a0c068",
@@ -1186,7 +1194,7 @@ def command(a: argparse.Namespace, selected: str | None) -> int:
                 _save_run(state_dir, state)
             code, result = _collect_code(results), {"bundle": bundle, "run": run, "collect": results}
         elif a.action == "next":
-            code, result = next_item(state_dir, selected)
+            code, result = next_item(state_dir, selected, batch=a.batch)
         elif a.action == "add-evidence":
             code, result = add_evidence(state_dir, selected, a.item, a.ref, a.config.expanduser())
         elif a.action == "skip":

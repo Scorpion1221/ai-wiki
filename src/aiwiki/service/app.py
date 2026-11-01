@@ -1179,11 +1179,12 @@ def maint_items_list(status: str | None = None, origin: str | None = None,
 
 
 @app.post("/maint/items/next")
-def maint_items_next(bundle: str | None = None, x_aiwiki_run: str | None = Header(default=None),
+def maint_items_next(bundle: str | None = None, more: bool = False, x_aiwiki_run: str | None = Header(default=None),
                      authorization: str | None = Header(default=None)):
-    """Claim the highest-priority ready item for the lease-holding run (``item`` is null when empty)."""
+    """Claim the highest-priority ready item for the lease-holding run (``item`` is null when empty);
+    ``more`` claims one more beside the run's open items, for a batch changeset."""
     with _maint(bundle, authorization, "curate", write=True) as (path, principal):
-        return M.next_item(path, principal=principal, run=x_aiwiki_run)
+        return M.next_item(path, principal=principal, run=x_aiwiki_run, more=more)
 
 
 @app.get("/maint/items/{item_id}")

@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.8 -->
+<!-- ai-wiki:version 0.3.9 -->
 
 # AI Wiki Curating Maintainer
 
@@ -74,6 +74,13 @@ Read `$WS/SCHEMA.md` and `$WS/purpose.md` once per run. Then repeat until §3.1 
 - Exit `10` (queue empty) or `11` (`--max-items` or `--deadline` spent): go to §5.
 - Exit `12`: the workspace holds edits. With an `item`, finish it (§3.4) or park it; without
   one, rerun the §2 `begin` command, which resets the workspace.
+- **Batch.** The writer's cost per changeset is fixed, so curate 3 to 8 items in one: after editing
+  for an item you will curate, `maint next --batch --json` claims one more and keeps the edits.
+  Then `validate`/`propose` with one `--item` per batch item; one evidence id for the batch, cited
+  beside each claim it supports. Every batch item must bring evidence of its own (an attention or
+  triage item needs `add-evidence` first). Skip or park a batch item whenever triage says so; the
+  others keep their edits. Keep a batch under 20 changed files; on a refusal you cannot fix,
+  `maint park` the item it names and propose the rest.
 
 ### 3.2 Triage
 

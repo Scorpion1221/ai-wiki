@@ -398,6 +398,9 @@ def _evidence_errors(evidence: object, work_items: list) -> list[dict]:
             errors.append(_error("input", "evidence.item_files must list distinct <item id>/<file> names"))
         elif any(match.group(1) not in work_items for match in matches):
             errors.append(_error("input", "every evidence.item_files item must be listed in work_items"))
+        elif missing := sorted(set(work_items) - {match.group(1) for match in matches}):
+            # The changeset closes every work item: one that cites none of its files was not curated.
+            errors.append(_error("input", f"evidence.item_files cites no file of {', '.join(missing)}"))
     else:
         if not isinstance(upload, Mapping) or set(upload) != {"filename", "content_b64"} or not all(
             isinstance(upload[key], str) for key in upload
@@ -574,6 +577,14 @@ def build_packet(
         # record is no source. It is left out, so a CLI that lists every file of the item (0.3.1
         # and older) still proposes once evidence sits beside it; a packet of them alone is refused.
         named = [name for name in evidence["item_files"] if provided[name].origin.get("kind") not in NON_EVIDENCE]
+        # A batch closes every work item it names: each must bring evidence of its own, or the
+        # changeset would close an item nothing in it curated (an attention notice alone).
+        bare = sorted({name.split("/", 1)[0] for name in evidence["item_files"]}
+                      - {name.split("/", 1)[0] for name in named})
+        if named and bare:
+            return None, [_error("notice_not_evidence", f"{', '.join(bare)}: this batch cites no evidence of "
+                                                        "these items (only a notice or a triage record); add "
+                                                        "evidence to each, or propose them on their own")]
         if not named:
             return None, [_error("notice_not_evidence", f"{', '.join(evidence['item_files'])}: an attention "
                                                         "notice or a triage record says what is wrong or missing, "
