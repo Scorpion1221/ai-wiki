@@ -18,6 +18,9 @@ from typing import Any
 
 import yaml
 
+# libyaml's safe loader when PyYAML was built with it; None falls back to the Python parser.
+_FAST_LOADER = getattr(yaml, "CSafeLoader", None)
+
 FRONTMATTER_DELIMITER = "---"
 # Design §5.4 A4: a process's event confirms its own generation only from a later session, this
 # long after it (the gate refuses such a review sooner, and in the run that wrote it).
@@ -68,7 +71,7 @@ def parse_document(text: str, *, require_frontmatter: bool = True) -> OKFDocumen
         raise OKFDocumentError("unterminated YAML frontmatter")
 
     try:
-        frontmatter = yaml.safe_load("\n".join(lines[1:end])) or {}
+        frontmatter = load_yaml("\n".join(lines[1:end])) or {}
     except (yaml.YAMLError, ValueError) as exc:
         raise OKFDocumentError(f"invalid YAML frontmatter: {exc}") from exc
     if not isinstance(frontmatter, dict):
@@ -78,6 +81,20 @@ def parse_document(text: str, *, require_frontmatter: bool = True) -> OKFDocumen
     if body.startswith("\n"):
         body = body[1:]
     return OKFDocument(frontmatter=frontmatter, body=body)
+
+
+def load_yaml(text: str) -> object:
+    """``yaml.safe_load``, through libyaml when PyYAML has it. Every gate re-reads every
+    concept's frontmatter, so the parser is most of a changeset's cost. libyaml and the Python
+    parser agree on valid YAML, but word their errors differently: on any error the Python
+    parser runs again, so callers and the gate see the same message as before."""
+    if _FAST_LOADER is None:
+        return yaml.safe_load(text)
+    try:
+        return yaml.load(text, Loader=_FAST_LOADER)  # noqa: S506 - CSafeLoader is the safe loader in C
+    except (yaml.YAMLError, ValueError):
+        return yaml.safe_load(text)
+
 
 
 def load_document(path: Path, *, require_frontmatter: bool = True) -> OKFDocument:

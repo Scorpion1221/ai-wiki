@@ -122,7 +122,9 @@ def test_a_full_run_meets_the_bar_and_the_misses_are_flagged(bundle: Bundle) -> 
     assert result["grade"] == "warn"  # a replay grades only the day's work, never the queue as it is now
 
 
-def test_a_run_that_stops_early_is_bad_unless_the_queue_is_empty(bundle: Bundle) -> None:
+def test_a_run_that_stops_early_is_bad_unless_the_queue_is_empty(bundle: Bundle, monkeypatch) -> None:
+    # A live report (no --now) grades the real last 24 h, so the receipts are dated from the real clock.
+    monkeypatch.setitem(globals(), "NOW", datetime.now(UTC).replace(microsecond=0))
     for i in range(14):  # 10-30: 14 items in 39 minutes, 294 still ready
         bundle.close("curated", 7.9 - i * 0.05)
         bundle.changeset(f"c{i:011d}", 7.9 - i * 0.05)

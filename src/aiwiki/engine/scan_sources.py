@@ -30,6 +30,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from .document import load_yaml
+
 SOURCES = "sources"
 HASHES = "sources/.hashes.yaml"
 SKIP_TOP = {"sources", ".okf"}
@@ -50,7 +52,7 @@ def _frontmatter(text: str) -> dict:
     for i in range(1, len(lines)):
         if lines[i].strip() == DELIM:
             try:
-                fm = yaml.safe_load("\n".join(lines[1:i])) or {}
+                fm = load_yaml("\n".join(lines[1:i])) or {}
             except yaml.YAMLError as exc:
                 raise ValueError(f"invalid YAML frontmatter: {exc}") from exc
             if not isinstance(fm, dict):

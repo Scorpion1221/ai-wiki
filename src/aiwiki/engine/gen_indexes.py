@@ -53,6 +53,8 @@ from typing import Any
 
 import yaml
 
+from .document import load_yaml
+
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SOURCES_DIR = "sources"
 META_FILE = "index-meta.yaml"
@@ -66,7 +68,7 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
     for i in range(1, len(lines)):
         if lines[i].strip() == _DELIM:
             try:
-                fm = yaml.safe_load("\n".join(lines[1:i])) or {}
+                fm = load_yaml("\n".join(lines[1:i])) or {}
             except yaml.YAMLError:
                 return {}
             return fm if isinstance(fm, dict) else {}

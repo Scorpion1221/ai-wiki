@@ -24,7 +24,7 @@ from pathlib import Path
 
 import yaml
 
-from .document import DEFAULT_STALE_DAYS, freshness_basis, has_symlink_component, stale_date
+from .document import DEFAULT_STALE_DAYS, freshness_basis, has_symlink_component, load_yaml, stale_date
 
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SKIP_TOP = {"sources", ".okf"}
@@ -43,7 +43,7 @@ def _parse(text):
     for i in range(1, len(lines)):
         if lines[i].strip() == DELIM:
             try:
-                fm = yaml.safe_load("\n".join(lines[1:i])) or {}
+                fm = load_yaml("\n".join(lines[1:i])) or {}
             except yaml.YAMLError:
                 fm = {}
             return (fm if isinstance(fm, dict) else {}), "\n".join(lines[i + 1:])
