@@ -207,9 +207,13 @@ def test_entries_and_search_expose_metadata_and_rank_relevance_first(tmp_path: P
     } <= item.keys() for item in entries)
 
 
-def test_search_prioritizes_phrase_and_full_coverage_over_common_token_frequency(
+def test_search_ranks_an_exact_phrase_first_and_explains_coverage_without_ranking_by_it(
     tmp_path: Path,
 ) -> None:
+    """The ranking contract: a concept holding the exact phrase of a multi-term query ranks
+    first; every other hit is ordered by its score, where a repeated common token saturates
+    and cannot outweigh the query's other terms. ``match`` still reports phrase, coverage,
+    fields and terms truthfully, but coverage only explains a hit, it is not a ranking tier."""
     _concept(tmp_path, "complete")
     _concept(tmp_path, "noisy")
     complete = tmp_path / "topics" / "complete.md"
@@ -239,6 +243,33 @@ def test_search_prioritizes_phrase_and_full_coverage_over_common_token_frequency
     }
     assert results[1]["match"]["coverage"] == 0.5
     assert results[1]["match"]["phrase"] is False
+
+
+def test_search_filler_bigrams_of_a_question_do_not_outrank_its_distinctive_term(tmp_path: Path) -> None:
+    """A natural CJK question yields bigrams that straddle words (``结多``, ``少天`` of
+    ``冻结多少天``). A long concept matching only those fillers covers more of the query than a
+    short one matching the distinctive ``冻结``, yet must rank below it: a bigram that holds few
+    of its characters' uses in the bundle is weighted down. Coverage is still reported as is."""
+    _concept(tmp_path, "freeze-rule")
+    _concept(tmp_path, "long-notes")
+    for n in range(8):  # ordinary words that use the filler bigrams' characters elsewhere
+        _concept(tmp_path, f"background-{n}")
+        background = tmp_path / "topics" / f"background-{n}.md"
+        background.write_text(background.read_text(encoding="utf-8").replace(
+            "needle", "结果 很多 减少 今天"), encoding="utf-8")
+    rule = tmp_path / "topics" / "freeze-rule.md"
+    rule.write_text(rule.read_text(encoding="utf-8").replace("needle", "订阅冻结的规则"), encoding="utf-8")
+    notes = tmp_path / "topics" / "long-notes.md"
+    notes.write_text(notes.read_text(encoding="utf-8").replace(
+        "needle", "总结多少天，" * 3 + "说明 记录 内容 " * 20), encoding="utf-8")
+
+    results = B.search(tmp_path, "冻结多少天", top_k=None)
+
+    assert [result["path"] for result in results] == ["topics/freeze-rule.md", "topics/long-notes.md"]
+    assert [(result["match"]["phrase"], result["match"]["coverage"]) for result in results] == [
+        (False, 0.25), (False, 0.75)]
+    assert results[0]["match"]["terms"] == ["冻结"]
+    assert results[1]["match"]["terms"] == ["结多", "多少", "少天"]
 
 
 def test_search_uses_latin_word_boundaries_and_exposes_match_reason(tmp_path: Path) -> None:

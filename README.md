@@ -122,7 +122,9 @@ Engine CLIs are exposed as `okf-validate`, `okf-scan-sources`, `okf-lint`, etc.
 Search is deterministic and explainable: it normalizes separators, applies Latin word
 boundaries plus CJK bigrams, searches path/title/aliases/tags/description/body across every
 concept, and returns `match.phrase`, `match.coverage`, `match.fields`, and `match.terms`.
-Exact phrases and complete query coverage outrank repeated partial tokens.
+An exact phrase ranks first, then the score: each term counts by its rarity, and a CJK bigram
+also by how word-like it is in the bundle, so filler bigrams of a natural question do not lift a
+long unrelated concept above one matching the distinctive terms. Coverage explains, not ranks.
 TOON list output keeps concept evidence fields off directories and structural files. JSON
 search/grep/log output includes `shown`, `total`, and `truncated` so callers cannot mistake a
 bounded response for a complete result set.
