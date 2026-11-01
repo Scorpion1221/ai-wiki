@@ -210,7 +210,7 @@ def test_missed_reopens_the_item_with_a_triage_record_that_is_never_evidence(gat
     assert (row["verdict"], row["status"], row["missed"]) == ("missed", "done", 1), answer
     item = M.get_item(gate.writer, item_id)
     assert item["status"] == "ready" and item["attempts"]["started"] == 0 and item["resolution"] is None
-    assert item["priority"] == planner.PRIORITY["attention"] == 45 > before["priority"]
+    assert item["priority"] == planner.PRIORITY["triage"] == 45 > before["priority"]
     assert item["reopened"][-1] | {"at": None, "resolution": None} == {
         "by": AUDITOR, "at": None, "from": "skipped", "resolution": None, "reason": "triage_missed",
         "review": row["id"]}

@@ -26,10 +26,14 @@ PRIORITY = {
     "task_doc": 70,  # a task root's README/status/PRD/report
     "issue_signal": 60,  # an issue with a member's decision, or one that reached review or done
     "doc": 50,  # repository documentation or SQL outside the priority prefixes
-    "attention": 45,  # a concept the auditor judged unverified in its current version (service.attention)
+    "triage": 45,  # a skip or duplicate whose triage review found missed knowledge (service.triage)
     "delta": 40,  # any other repository or issue increment
     "tooling": 35,  # a repository topic that changed only tooling or dependency manifests
     "hygiene": 30,
+    # A concept the auditor judged unverified in its current version (service.attention). Owner,
+    # 2026-11-01: new knowledge first; fixing what the bundle already says waits behind every new
+    # increment, and ageing (5 a day) still serves it within about three days.
+    "attention": 25,
     "refresh": 20,  # refresh, and a concept whose freshness elapsed (service.attention)
 }
 
