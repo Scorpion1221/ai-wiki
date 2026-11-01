@@ -36,6 +36,7 @@ from pathlib import Path
 
 from ..runtime import audit, changeset, curate, revert
 from ..runtime.failure import classify, failure
+from . import bundle as B
 from . import inbox
 from . import ingest as I
 from . import maint_state as M
@@ -125,6 +126,7 @@ def serialized_mutation(*, blocking: bool = True):
             _mutation_active = True
         yield
     finally:
+        B.drop_snapshots()  # before any reader is let back in: the next read rescans the tree
         with _read_condition:
             _mutation_active = False
             _mutation_pending = False

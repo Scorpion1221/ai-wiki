@@ -6,10 +6,15 @@ is sandboxed to the bundle root (safe-path gate).
 from __future__ import annotations
 
 import math
+import os
 import re
+import stat
 import subprocess
+import threading
+import time
 import unicodedata
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -85,17 +90,121 @@ def _profile_document(root: Path, path: Path) -> tuple[dict, str, str] | None:
     return frontmatter, body, text
 
 
+@dataclass(frozen=True)
+class _Snapshot:
+    """One bundle's valid concepts as of ``fingerprint``, shared read-only by every request.
+
+    It keeps only what the files say: metadata that depends on today's date (freshness) is
+    derived per request. Callers must not mutate the frontmatter they are handed.
+    """
+    fingerprint: tuple
+    okf_version: str
+    records: tuple[tuple[Path, str, dict, str, str], ...]
+
+
+_snapshots: dict[Path, _Snapshot] = {}  # one per bundle path
+_snapshot_locks: dict[Path, threading.Lock] = {}
+_snapshot_guard = threading.Lock()
+_generation = 0  # bumped by drop_snapshots: a scan begun before that is never kept
+# A file changed this close to a scan may change again within the same timestamp tick, with an
+# identical stat (Git's "racy" files). Kernel file timestamps tick every 1-10 ms.
+_RACY_NS = 100_000_000
+
+
+def _fingerprint(root: Path) -> tuple:
+    """Stat signature of everything a scan depends on, taken without reading a file.
+
+    The walk goes where ``root.rglob`` goes (never through a symlink) and records each ``*.md``
+    file, each symlink and ``index-meta.yaml`` by inode, size, mtime and ctime, so an edit (even
+    one that restores the mtime), an addition, a removal, a rename and a file or directory
+    swapped for a link all change it. It skips only the trees ``_candidate_rel`` refuses by
+    path alone (``.git`` anywhere, top-level ``sources`` and ``.okf``): nothing there is ever a
+    concept, and a mirror's Git metadata grows with every pull.
+    """
+    base = os.fspath(root)
+    try:
+        top = os.lstat(base)
+    except OSError:
+        return None, ()
+    entries = []
+    pending = [""]
+    while pending:
+        rel_dir = pending.pop()
+        try:
+            with os.scandir(os.path.join(base, rel_dir)) as listing:
+                children = list(listing)
+        except OSError:
+            continue
+        for child in children:
+            rel = f"{rel_dir}/{child.name}" if rel_dir else child.name
+            try:
+                link = child.is_symlink()
+                if not link and child.is_dir(follow_symlinks=False):
+                    if child.name.lower() not in PRIVATE_COMPONENTS and (rel_dir or child.name not in SKIP_TOP):
+                        pending.append(rel)
+                    continue
+                if not (link or child.name.endswith(".md") or rel == "index-meta.yaml"):
+                    continue
+                st = child.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            entries.append((rel, link, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+    entries.sort()
+    return (stat.S_ISLNK(top.st_mode), top.st_ino), tuple(entries)
+
+
+def _scan(root: Path, fingerprint: tuple) -> _Snapshot:
+    """Parse every valid v0.2 concept, in path order, exactly as each read used to."""
+    okf_version = bundle_okf_version(root)
+    records = []
+    if okf_version == OKF_VERSION:
+        for path in sorted(root.rglob("*.md")):
+            rel = _candidate_rel(root, path)
+            if rel is None:
+                continue
+            document = _profile_document(root, path)
+            if document is not None:
+                records.append((path, rel, *document))
+    return _Snapshot(fingerprint, okf_version, tuple(records))
+
+
+def _snapshot(root: Path) -> _Snapshot:
+    """The bundle's snapshot: kept while its fingerprint holds, else scanned once under the
+    bundle's lock while concurrent readers wait for that scan instead of starting their own."""
+    cached = _snapshots.get(root)
+    if cached is not None and cached.fingerprint == _fingerprint(root):
+        return cached
+    with _snapshot_guard:
+        lock = _snapshot_locks.setdefault(root, threading.Lock())
+    with lock:
+        generation = _generation
+        started = time.time_ns()
+        fingerprint = _fingerprint(root)  # before any read, so a change during the scan rescans
+        cached = _snapshots.get(root)
+        if cached is not None and cached.fingerprint == fingerprint:
+            return cached
+        snapshot = _scan(root, fingerprint)
+        settled = all(entry[-1] < started - _RACY_NS for entry in fingerprint[1])
+        with _snapshot_guard:
+            if settled and generation == _generation:
+                _snapshots[root] = snapshot
+            else:  # serve it to this request only: the next one scans again
+                _snapshots.pop(root, None)
+        return snapshot
+
+
+def drop_snapshots() -> None:
+    """Forget every snapshot. The worker calls it as each mutation ends, so the next read never
+    relies on file stats alone to see what the writer changed."""
+    global _generation
+    with _snapshot_guard:
+        _generation += 1
+        _snapshots.clear()
+
+
 def _concept_records(root: Path):
     """Yield each valid v0.2 concept once with parsed and original content."""
-    if not _bundle_is_v02(root):
-        return
-    for path in sorted(root.rglob("*.md")):
-        rel = _candidate_rel(root, path)
-        if rel is None:
-            continue
-        document = _profile_document(root, path)
-        if document is not None:
-            yield path, rel, *document
+    yield from _snapshot(root).records
 
 
 def is_bundle(p: Path) -> bool:
@@ -269,7 +378,8 @@ def health(root: Path) -> dict:
     freshness_counts: Counter = Counter()
     bases: Counter = Counter()  # declared stale_after, the 90-day default, or neither
     total = 0
-    for _path, _rel, fm, _body, _text in _concept_records(root):
+    snapshot = _snapshot(root)
+    for _path, _rel, fm, _body, _text in snapshot.records:
         meta = concept_metadata(fm)
         total += 1
         types[str(fm.get("type") or "")] += 1
@@ -278,7 +388,7 @@ def health(root: Path) -> dict:
         freshness_counts[meta["freshness"]] += 1
         bases[meta["freshness_basis"]] += 1
     return {
-        "okf_version": bundle_okf_version(root),
+        "okf_version": snapshot.okf_version,
         "git_revision": git_revision(root),
         "concepts": total,
         "by_type": dict(types),
