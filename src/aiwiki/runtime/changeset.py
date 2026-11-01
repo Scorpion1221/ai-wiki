@@ -55,6 +55,13 @@ NOTICE_KIND = "attention"
 TRIAGE_KIND = "triage"
 NON_EVIDENCE = frozenset({NOTICE_KIND, TRIAGE_KIND})
 SOURCE_KIND = "bundle-source"
+# Signals every new or changed concept should carry (okf-knowledge-curator, Signals). The gate
+# warns about a missing one and never refuses it: most of the bundle predates the rule.
+STALE_AFTER_TYPES = frozenset({"Metric", "Experiment", "Monetization"})
+_HAN = re.compile(r"[一-鿿]")
+# An English word; an abbreviation (MRR) or an identifier (paySuccessRecord, web_experiment_assignment) is none.
+_ENGLISH = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z][a-z]{2,}(?![A-Za-z0-9_])")
+_DATED_TITLE = re.compile(r"(?<!\d)20\d\d-(?:0[1-9]|1[0-2])(?!\d)")
 
 
 def top_level_source(rel: str) -> bool:
@@ -662,6 +669,33 @@ def _names(frontmatter: Mapping) -> set[str]:
     }
 
 
+def _signal_warnings(rel: str, frontmatter: Mapping, *, bundle_only: bool) -> list[dict]:
+    """The signals ``frontmatter`` lacks, as warnings. A title with a Chinese character wants an
+    alias with none and an English word; any other title, an alias with one. ``stale_after`` is
+    wanted on STALE_AFTER_TYPES and a dated title, except on a packet of bundle sources only,
+    where adding it is refused (``stale_after_needs_new_evidence``)."""
+    title = frontmatter.get("title") if isinstance(frontmatter.get("title"), str) else ""
+    aliases = [alias for alias in frontmatter["aliases"] if isinstance(alias, str)] \
+        if isinstance(frontmatter.get("aliases"), list) else []
+    chinese = bool(_HAN.search(title))
+    if chinese:
+        crossed = any(not _HAN.search(alias) and _ENGLISH.search(alias) for alias in aliases)
+    else:
+        crossed = any(_HAN.search(alias) for alias in aliases)
+    warnings = []
+    if not crossed:
+        warnings.append({"code": "missing_cross_language_alias", "path": rel,
+                         "message": f"no {'English' if chinese else 'Chinese'} alias for this title"})
+    kind = frontmatter.get("type")
+    if not bundle_only and declared_stale_date(frontmatter) is None and (
+        kind in STALE_AFTER_TYPES or _DATED_TITLE.search(title)
+    ):
+        what = f"a {kind} concept" if kind in STALE_AFTER_TYPES else "a dated title"
+        warnings.append({"code": "missing_stale_after", "path": rel,
+                         "message": f"{what} declares no stale_after; date it by the curator's rule"})
+    return warnings
+
+
 def _frontmatter(text: str) -> dict | None:
     try:
         return parse_document(text).frontmatter
@@ -980,6 +1014,7 @@ def _evaluate_in(
                 {"code": "service_owned_key_ignored", "path": rel, "key": key}
                 for key in sorted(mine) if mine[key] != theirs.get(key) and mine[key] != ours.get(key)
             )
+            result["warnings"].extend(_signal_warnings(rel, after, bundle_only=bundle_only))
         if before is not None and not deprecate:
             locked = [key for key in ("type", "title") if after.get(key) != head.get(key)]
             if locked and rel not in allowed["retype"]:

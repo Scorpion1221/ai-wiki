@@ -53,6 +53,7 @@ type: Feature
 title: Human-readable title
 description: One sentence
 tags: [searchable-tag]
+aliases: [人类可读标题, EVENT_NAME]  # the title's other language + identifiers (Signals)
 status: draft                     # draft | stable | deprecated
 generated:                        # service-stamped; never write or edit it
   by: process:ai-wiki-curator
@@ -63,7 +64,7 @@ sources:
     title: Human-readable source label
     author: process:source-system
     last_modified: 2026-08-13
-stale_after: 2026-09-12          # optional YYYY-MM-DD
+stale_after: 2026-09-12          # YYYY-MM-DD; required where Signals says
 ```
 
 This full shape applies to knowledge concepts. The structural `SCHEMA.md` and `purpose.md`
@@ -164,21 +165,56 @@ after it). Never present a previous verification as confirmation of a new claim.
 - `draft`: transient curation state awaiting the independent audit.
 - `stable`: ready for consumption at its stated evidence boundary.
 - `deprecated`: historical/superseded; retain for links and history.
-- `stale_after`: optional absolute date; `fresh` before it, stale when `today >= stale_after`.
+- `stale_after`: absolute date; `fresh` before it, stale when `today >= stale_after`.
   Without it a concept reads `unspecified`, then stale 90 days after `generated.at`
   (`freshness_basis: default`); never fresh by default.
 
 Staleness is not a status. A changed source or expired concept remains structurally valid
-but must not be treated as a current fact until re-curated and re-audited. Set `stale_after`
-only when evidence says the claim expires sooner than the default, or lasts longer; never extend
-it merely because text was edited. Extending it needs evidence from outside the bundle: the gate
-refuses a packet of bundle sources alone (`stale_after_needs_new_evidence`).
+but must not be treated as a current fact until re-curated and re-audited. Set and extend
+`stale_after` by the date rule under Signals, never because text was edited.
 
 For commercial metrics, experiment winners, and release/live claims, fail closed: the
 source must prove that exact boundary. Requirements prove intent; merged code proves only
 merge; production QA proves availability; mature measurements prove effects. A digest keeps
 the source's caveats: its window, population and exclusions, and any preliminary,
 directional or not-a-conclusion limit stay beside the claim they bound.
+
+## Signals on every new or changed concept
+
+Readers find, date and retire concepts by three signals. Every concept a pass writes (new, or
+edited for its evidence) meets all three; never touch a concept only to add them. The gate
+warns about a missing alias or `stale_after` (`missing_cross_language_alias`,
+`missing_stale_after`) and never refuses it.
+
+- **Aliases.** At least one alias in the other language of the title: English words for a title
+  with Chinese characters (an abbreviation alone is not enough), Chinese for an English title.
+  Add the identifiers and abbreviations users type (event, table, flag or experiment key, issue
+  id). Never repeat the title or a tag, and never state a claim (no status, number or date). A new
+  concept whose alias another concept already uses is refused (`duplicate_title`): be specific.
+- **`stale_after`.** Required on `Metric`, `Experiment` and `Monetization` concepts and on any
+  concept whose title or body gives a dated reading (a number or state for a window or an as-of
+  date); optional elsewhere, by the same rule. The evidence date is the newest date the cited
+  evidence gives for the concept's main claim (the definition, reading, state or price its title
+  names): a comment's time, a frozen commit's time, a document's own date; else the curation day.
+  Take the earliest row that applies:
+
+  | Claim | `stale_after` |
+  |---|---|
+  | a dated reading or snapshot | its window's end (or as-of date) + 30 days |
+  | a running experiment | the evidence date + 30 days, or its stated planned end + 7 days if sooner |
+  | a definition, design, plan, price or release state | the evidence date + 90 days |
+
+  A date already past is right: the concept reads stale until evidence re-dates it. On
+  re-curation compute it again from the evidence the concept cites. It moves later only on
+  evidence from outside the bundle that shows the main claim still holds; a packet of bundle
+  sources alone can neither add nor extend it (`stale_after_needs_new_evidence`): keep it as it was.
+- **Supersession.** When the evidence or the body records that the concept was retired or
+  replaced, or that its premise was superseded, deprecate it rather than leave it stable. In
+  Remote maintainer mode that is `ai-wiki propose --deprecate <path>:<superseded_by>:<reason>`
+  on the unedited file (the service writes the note); the successor is the replacement or, for a
+  retirement, the concept that records it. The `description` states the body's latest state and
+  its date ("2026-10-29 全量上线", not the 10-12 "开发中"): a pass that changes the concept fixes
+  a description the body has moved past.
 
 ## Ingest: new source → concepts
 
@@ -206,7 +242,7 @@ directional or not-a-conclusion limit stay beside the claim they bound.
 3. Update prose and cite the current snapshot; never touch `generated` or `verified`.
 4. Preserve identity, existing provenance/history, and supported claims; cite the current snapshot.
 5. If evidence is insufficient, keep/demote to transient `draft` for the audit to qualify;
-   if superseded, use `deprecated`.
+   if retired or superseded, deprecate it (Signals).
 6. Report changed concept paths. The service applies update invariants and deterministic closeout.
 
 ## Remote maintainer mode

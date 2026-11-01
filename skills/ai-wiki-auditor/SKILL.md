@@ -120,6 +120,12 @@ Hold each to the evidence boundary:
   together with the claim it bounds; reword it only with an equally strong limit (不足以, 无法,
   没有证据 for 不证明; never 只, 仅, not, only); never flip it to its positive. A hedged footnote
   (its definition and markers) and a hedged heading are hedges too (`D_CAVEAT_REMOVED`).
+- okf-knowledge-curator's Signals are claims too. An alias naming something else or stating a
+  status, number or date: delete it (corrected). Unverified, the note naming the evidence part: a
+  `stale_after` later than that skill's date rule gives from the cited evidence (a reading would
+  read fresh too long); a `description` that is not the body's latest state; a stable concept the
+  body or its evidence records as retired or superseded (the maintainer deprecates it). A missing
+  alias or `stale_after` is no verdict: the gate warns the curator, and readers fail closed.
 
 ### 3.4 Record a verdict
 

@@ -133,8 +133,8 @@ states it (a member's for a decision), never as a bare fact and never in a title
 Leave out what a comment only points to (a query, attachment or link). Never use this automation's
 own issues or reports as sources. A digest keeps the source's window, population, exclusions and
 preliminary or not-a-conclusion limits. Refresh a fact past its stale date (declared, or 90 days
-after generation) only with new evidence; never bulk-renew. Set `stale_after` only when evidence
-says the claim expires sooner, or lasts longer; a copy of a bundle source never extends it
+after generation) only with new evidence; never bulk-renew. Set `stale_after` by the curator's
+Signals date rule; a copy of a bundle source never extends it
 (`stale_after_needs_new_evidence`). On a genuine conflict keep both claims, mark both concepts
 `contested` with `contradictions`, and add or update an OpenQuestion. Correcting a claim: grep
 `$WS` for it and fix every copy in this changeset if it fits; else name the rest in the report (§5).
@@ -155,6 +155,8 @@ Follow okf-knowledge-curator in its remote maintainer mode. One item, one eviden
   definition. A changed concept that does not cite the packet is refused (`uncited_change`).
 - Quote YAML scalars containing `:`, `#`, `[`, `]`, `{` or `}`. Match the source language and
   keep identifiers, event names, prices, SQL, URLs and dates verbatim.
+- Every concept you write carries the curator's Signals (aliases, `stale_after`, a dated
+  description); one the evidence retires or supersedes is deprecated (§3.4), never left stable.
 
 ### 3.4 Validate, propose, fix
 
@@ -192,7 +194,8 @@ with a true reason; `path_forbidden`, `service_owned_path`, `delete_forbidden` d
 change; `too_large` shorten the concept or split the item; `notice_not_evidence` add evidence
 (§3.2) and cite it; `stale_after_needs_new_evidence` keep `stale_after` as it was, or add a Git file
 or an issue. `secret_detected` never echoes the value: remove it from your text; if the rule matched
-the evidence itself, park `model_output` naming the rule. `service_owned_key_ignored`: a warning.
+the evidence itself, park `model_output` naming the rule. Warnings never refuse; add what
+`missing_cross_language_alias` or `missing_stale_after` names (§3.3), and ignore the others.
 
 ```sh
 ai-wiki -b "$bundle" maint park <item> --class model_output --detail "<codes, what failed>"

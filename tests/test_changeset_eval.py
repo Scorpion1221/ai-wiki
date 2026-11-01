@@ -100,6 +100,10 @@ def _codes(result: dict) -> list[str]:
     return [error["code"] for error in result["errors"]]
 
 
+def _warnings(result: dict, code: str) -> list[dict]:
+    return [warning for warning in result["warnings"] if warning["code"] == code]
+
+
 def _tree(root: Path) -> dict[str, bytes]:
     return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
@@ -405,7 +409,7 @@ def test_02325bea5bc3_column_zero_source_item_is_located_and_the_fixed_edit_is_s
     ).replace("verified:\n", "verified:\n  - {by: 'human:owner', at: 2026-09-24T00:00:00Z}\n")
     result = _evaluate(bundle, _request(_put(bundle, AI_STUDY, fixed)))
     assert result["status"] == "would_apply", result["errors"]
-    assert result["warnings"] == [
+    assert _warnings(result, "service_owned_key_ignored") == [
         {"code": "service_owned_key_ignored", "path": AI_STUDY, "key": key}
         for key in ("generated", "status", "verified")
     ]
@@ -507,12 +511,57 @@ def test_forged_service_keys_on_a_new_concept_are_overwritten_not_rejected(bundl
     ))
     result = _new(bundle, forged)
     assert result["status"] == "would_apply", result["errors"]
-    assert [warning["key"] for warning in result["warnings"]] == ["generated", "status", "verified"]
+    assert [warning["key"] for warning in _warnings(result, "service_owned_key_ignored")] == [
+        "generated", "status", "verified"]
     frontmatter = parse_document(result["files"]["risks/new.md"]).frontmatter
     assert (frontmatter["status"], frontmatter["generated"]["by"], "verified" in frontmatter) == (
         "draft", ACTOR, False,
     )
     assert concept_metadata(frontmatter)["trust"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    ("title", "extra", "kind", "codes"),
+    [
+        ("H5 recovery acceptance", "", "Risk", ["missing_cross_language_alias"]),
+        ("H5 recovery acceptance", "aliases: [H5 恢复验收]\n", "Risk", []),
+        ("订阅转化率", "aliases: [MRR, W2M, paySuccessRecord, web_experiment_assignment]\n", "Risk",
+         ["missing_cross_language_alias"]),
+        ("订阅转化率", "aliases: [subscription conversion rate]\n", "Risk", []),
+        ("订阅转化率", "aliases: [subscription conversion rate]\n", "Metric", ["missing_stale_after"]),
+        ("订阅转化率", "aliases: [subscription conversion rate]\nstale_after: 2026-12-23\n", "Metric", []),
+        ("Detector 漏斗读数（2026-10-05 至 10-11）", "aliases: [detector funnel readout]\n", "Risk",
+         ["missing_stale_after"]),
+        ("Checkout plans", "aliases: [结账套餐]\n", "Monetization", ["missing_stale_after"]),
+    ],
+)
+def test_a_missing_signal_warns_and_never_rejects(bundle: Path, title: str, extra: str, kind: str,
+                                                  codes: list[str]) -> None:
+    result = _new(bundle, _new_concept(title, extra=extra).replace("type: Risk", f"type: {kind}"))
+    assert result["status"] == "would_apply", result["errors"]
+    assert [(warning["code"], warning["path"]) for warning in result["warnings"]] == [
+        (code, "risks/new.md") for code in codes]
+
+
+def test_signal_warnings_skip_deprecations_and_bundle_only_stale_after(bundle: Path) -> None:
+    # A changed concept is judged like a new one: the fixture's Metric declares no stale_after.
+    result = _evaluate(bundle, _request(_put(bundle, METRIC, _cite(_read(bundle, METRIC)))))
+    assert result["status"] == "would_apply", result["errors"]
+    assert [warning["code"] for warning in result["warnings"]] == ["missing_cross_language_alias",
+                                                                   "missing_stale_after"]
+    # A packet of bundle sources only may not add stale_after (stale_after_needs_new_evidence): no nudge to.
+    copy = [EvidenceFile("it_1/S1-src.md", b"frozen copy\n", {"kind": changeset.SOURCE_KIND, "path": "sources/x"})]
+    request = _request(_put(bundle, METRIC, _cite(_read(bundle, METRIC))), work_items=["it_1"],
+                       evidence={"id": EVIDENCE_ID, "item_files": ["it_1/S1-src.md"]})
+    result = _evaluate(bundle, request, evidence_files=copy)
+    assert result["status"] == "would_apply", result["errors"]
+    assert [warning["code"] for warning in result["warnings"]] == ["missing_cross_language_alias"]
+    # The service writes a deprecation; the curator owes it no signal.
+    deprecate = {"path": METRIC, "op": "deprecate", "base": changeset.content_hash(_read(bundle, METRIC)),
+                 "superseded_by": AI_STUDY, "reason": "merged into it"}
+    result = _evaluate(bundle, _request(deprecate))
+    assert result["status"] == "would_apply", result["errors"]
+    assert result["warnings"] == []
 
 
 def test_uncited_change_and_secrets_never_echo_the_value(bundle: Path) -> None:
@@ -610,7 +659,8 @@ def test_broken_service_blocks_are_discarded_before_the_packet_is_cited(bundle: 
     frontmatter = parse_document(result["files"][METRIC]).frontmatter
     assert frontmatter["sources"][-1] == {"id": EVIDENCE_ID, "resource": "/" + result["source"]}
     assert frontmatter["verified"] == parse_document(head).frontmatter["verified"]
-    assert result["warnings"] == [{"code": "service_owned_key_ignored", "path": METRIC, "key": "verified"}]
+    assert _warnings(result, "service_owned_key_ignored") == [
+        {"code": "service_owned_key_ignored", "path": METRIC, "key": "verified"}]
 
     new = _new(bundle, _new_concept(extra="generated:\n  by: me\n at: 2026-09-24T00:00:00Z\n"))
     assert new["status"] == "would_apply", new["errors"]
@@ -708,8 +758,8 @@ def test_only_new_validation_errors_block(bundle: Path) -> None:
     result = _evaluate(bundle, _request(_put(bundle, AI_STUDY, _cite(_read(bundle, AI_STUDY)))))
     assert result["status"] == "would_apply", result["errors"]
     assert result["validation"] == {"status": "passed", "new_errors": 0, "baseline_errors": 1}
-    assert result["warnings"] == [{"code": "baseline_error_untouched", "path": METRIC,
-                                   "message": "sources[0].last_modified must be YYYY-MM-DD"}]
+    assert _warnings(result, "baseline_error_untouched") == [{"code": "baseline_error_untouched", "path": METRIC,
+                                                             "message": "sources[0].last_modified must be YYYY-MM-DD"}]
     # Touching the broken file makes its error the changeset's own.
     touched = _evaluate(bundle, _request(_put(bundle, METRIC, _cite(broken))))
     assert _codes(touched) == ["invalid_value"]

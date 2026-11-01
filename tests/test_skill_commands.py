@@ -90,8 +90,9 @@ def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     text = AUDITOR.read_text(encoding="utf-8")
     assert text.startswith("---\nname: ai-wiki-auditor\n")
     # A budget, loaded into every audit run. 2026-10-24 (0.3.4) took it from 200 to 220: the
-    # self-update preflight left 199/200, no room for the next small fix.
-    assert len(text.splitlines()) <= 220
+    # self-update preflight left 199/200, no room for the next small fix. 2026-11-01 to 230: the
+    # Signals check of §3.3 (aliases, stale_after, supersession) left 225/220.
+    assert len(text.splitlines()) <= 230
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert verbs == {"update", "skill", "--version", "doctor", "review begin", "review next", "review evidence",
                      "review verdict", "review submit", "review triage next", "review triage verdict",
