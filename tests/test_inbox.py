@@ -43,7 +43,7 @@ def gate(tmp_path, monkeypatch):
     monkeypatch.setattr(worker.curate, "run", lambda _bundle, source, _job_path: gate.curated.append(source))
     monkeypatch.setattr(worker.curate, "AGENT_BIN", sys.executable)  # Codex still exists on this writer
 
-    def send(request):  # the CLI's JSON calls (ingest, jobs, whoami); gate.connect() routes the rest
+    def send(request, *_):  # the CLI's JSON calls (ingest, jobs, whoami); gate.connect() routes the rest
         url = urllib.parse.urlsplit(request.full_url)
         response = gate.client.request(request.get_method(), url.path, params=urllib.parse.parse_qsl(url.query),
                                        content=request.data, headers=dict(request.header_items()))
