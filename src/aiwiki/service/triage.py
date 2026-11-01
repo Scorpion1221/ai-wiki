@@ -332,7 +332,7 @@ def _apply(bundle: Path, receipt: dict) -> dict:
         try:
             item = M.triage_reopen(bundle, receipt["item"], by=receipt["actor"], review=receipt["id"],
                                    decision=(judged.get("at"), judged.get("run")), file=(meta, data),
-                                   lead=_lead(receipt), priority=planner.PRIORITY["attention"])
+                                   lead=_lead(receipt), priority=planner.PRIORITY["triage"])
         except M.MaintError as exc:
             return _void(bundle, receipt, f"{exc.code}: {exc}")
         receipt["reopened"] = {"status": item["status"], "priority": item["priority"]}

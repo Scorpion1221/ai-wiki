@@ -96,7 +96,7 @@ def test_an_unverified_review_of_the_current_version_queues_one_attention_item(g
     assert {"interrupted", "unparked", "build_retry", "lease"} <= begun.keys()  # the fields it always had
     [item] = items(gate)
     base = changeset.content_hash(gate.read(AIO_AB))
-    assert item["topic_key"] == f"attention:{AIO_AB}" and item["priority"] == planner.PRIORITY["attention"] == 45
+    assert item["topic_key"] == f"attention:{AIO_AB}" and item["priority"] == planner.PRIORITY["attention"] == 25
     assert item["origin"] == {
         "kind": "attention", "path": AIO_AB, "reason": "audit_unverified", "base": base, "review": job["id"],
         "reviewed_at": job["finished"], "verdict": "unverified", "downgrade": None,
@@ -676,8 +676,10 @@ def test_a_bundle_source_keeps_its_extension_in_the_committed_packet(rel, ext) -
         f"{hashlib.sha256(b'bytes' + bytes([10])).hexdigest()}{ext}")
 
 
-def test_the_planner_ranks_attention_between_delta_and_doc() -> None:
-    assert planner.PRIORITY["delta"] < planner.PRIORITY["attention"] < planner.PRIORITY["doc"]
+def test_the_planner_serves_new_knowledge_before_attention() -> None:
+    # Owner 2026-11-01: every new increment first; an unverified concept still beats a stale one.
+    assert planner.PRIORITY["refresh"] < planner.PRIORITY["attention"] < planner.PRIORITY["hygiene"]
+    assert planner.PRIORITY["delta"] < planner.PRIORITY["triage"] < planner.PRIORITY["doc"]
     assert maint._SOURCE_REF.fullmatch("source:sources/a b.md") is None
 
 
