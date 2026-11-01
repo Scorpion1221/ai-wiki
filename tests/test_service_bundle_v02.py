@@ -245,6 +245,33 @@ def test_search_ranks_an_exact_phrase_first_and_explains_coverage_without_rankin
     assert results[1]["match"]["phrase"] is False
 
 
+def test_search_ranks_an_exact_phrase_above_a_higher_scoring_hit_without_it(tmp_path: Path) -> None:
+    """The phrase is a ranking tier, not only a score bonus: a concept holding the exact
+    multi-term phrase once in a long body ranks above one that scores higher by repeating
+    every term in its title and body without ever forming the phrase."""
+    for n in range(20):  # unrelated concepts make both terms rare, so the lexical score counts
+        _concept(tmp_path, f"background-{n}")
+    _concept(tmp_path, "phrase")
+    _concept(tmp_path, "scattered")
+    phrase = tmp_path / "topics" / "phrase.md"
+    phrase.write_text(phrase.read_text(encoding="utf-8").replace(
+        "needle", "Named remove-AI action. " + "Other notes follow. " * 20), encoding="utf-8")
+    scattered = tmp_path / "topics" / "scattered.md"
+    scattered.write_text(
+        scattered.read_text(encoding="utf-8")
+        .replace("title: scattered", "title: AI cleanup and remove")
+        .replace("needle", "Remove the AI copy. " * 5),
+        encoding="utf-8",
+    )
+
+    results = B.search(tmp_path, "remove ai", top_k=None)
+
+    assert [result["path"] for result in results] == ["topics/phrase.md", "topics/scattered.md"]
+    assert [(result["match"]["phrase"], result["match"]["coverage"]) for result in results] == [
+        (True, 1.0), (False, 1.0)]
+    assert results[0]["score"] < results[1]["score"]
+
+
 def test_search_filler_bigrams_of_a_question_do_not_outrank_its_distinctive_term(tmp_path: Path) -> None:
     """A natural CJK question yields bigrams that straddle words (``结多``, ``少天`` of
     ``冻结多少天``). A long concept matching only those fillers covers more of the query than a

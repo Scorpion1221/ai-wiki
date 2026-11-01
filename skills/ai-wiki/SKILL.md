@@ -73,8 +73,8 @@ most and CJK bigrams that straddle words count little, so filler bigrams of a qu
 a long unrelated concept (`phrase`, `coverage`, `fields` and `terms` explain each match; coverage
 does not rank); trust/freshness only break close ties, so apply the evidence gate after retrieval.
 
-Run one well-formed search. Read the top candidates when `phrase: true` or `coverage: 1.0` makes
-the match clear; when coverage is partial or scattered, rewrite it once (the user's other wording,
+Run one well-formed search and read the top candidates; when the top hits' `terms` show the
+query's distinctive words went unmatched, rewrite it once (the user's other wording,
 a paraphrase, the other language). Zero hits is not "nothing": retry with synonyms or the table,
 event or field name (`grep --fixed`) before saying the wiki has nothing. Do not fan out further.
 JSON `search`/`grep`/`log` output carries `shown`, `total` and `truncated`: check them before

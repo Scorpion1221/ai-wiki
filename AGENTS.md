@@ -67,9 +67,9 @@ returns explainable `phrase`, `coverage`, `fields`, and `terms`; an exact phrase
 then the score, in which rare terms count most and CJK bigrams that straddle words count little,
 so a document matching a question's filler bigrams does not outrank one matching its distinctive
 terms. Coverage explains a hit but does not rank it. Trust/freshness remain tie-breakers. Run one
-search first and rewrite it at most once when coverage is partial; on zero hits retry with
-synonyms or the table, event or field name before concluding the wiki has nothing. Apply this
-current-fact gate after retrieval even when a weak hit ranks highly:
+search first and rewrite it at most once when the top hits' `terms` miss its distinctive words;
+on zero hits retry with synonyms or the table, event or field name before concluding the wiki
+has nothing. Apply this current-fact gate after retrieval even when a weak hit ranks highly:
 
 ```text
 stable + fresh + human-reviewed
