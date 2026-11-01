@@ -26,8 +26,9 @@ def _fresh_cache():
 
 @pytest.fixture
 def settled(monkeypatch):
-    """Every write so far is older than the racy window, so a scan is kept."""
-    monkeypatch.setattr(B, "time", SimpleNamespace(time_ns=lambda: time.time_ns() + 10**9))
+    """Every write so far is older than the racy window, so a scan is reusable."""
+    clock = SimpleNamespace(time_ns=lambda: time.time_ns() + 10**9, monotonic_ns=time.monotonic_ns)
+    monkeypatch.setattr(B, "time", clock)
 
 
 def _paths(root: Path) -> list[str]:
@@ -55,7 +56,7 @@ def test_an_edit_is_seen_even_when_size_and_mtime_are_restored(tmp_path: Path, s
     path = tmp_path / "topics" / "one.md"
     _rewrite(path, "needle", "needle aaaa")
     before = path.stat()
-    assert B.grep(tmp_path, "aaaa") and B._snapshots[tmp_path]
+    assert B.grep(tmp_path, "aaaa") and B._snapshots[tmp_path].settled
 
     time.sleep(0.05)  # past any filesystem's timestamp tick
     _rewrite(path, "aaaa", "bbbb")
@@ -67,16 +68,17 @@ def test_an_edit_is_seen_even_when_size_and_mtime_are_restored(tmp_path: Path, s
     assert [hit["text"] for hit in B.grep(tmp_path, "bbbb")] == ["needle bbbb"]
 
 
-def test_a_scan_right_after_a_write_is_not_kept(tmp_path: Path, monkeypatch) -> None:
+def test_a_scan_right_after_a_write_is_not_reused(tmp_path: Path, monkeypatch) -> None:
     """A second write in the same timestamp tick can leave every stat as it was, so a scan this
-    close to the newest change serves its own request only."""
+    close to the newest change never stands in for a later request's own scan."""
     _concept(tmp_path, "one")
     path = tmp_path / "topics" / "one.md"
     newest = path.stat().st_ctime_ns
-    monkeypatch.setattr(B, "time", SimpleNamespace(time_ns=lambda: newest + 1_000_000))
+    clock = SimpleNamespace(time_ns=lambda: newest + 1_000_000, monotonic_ns=time.monotonic_ns)
+    monkeypatch.setattr(B, "time", clock)
 
     assert _paths(tmp_path) == ["topics/one.md"]
-    assert tmp_path not in B._snapshots
+    assert not B._snapshots[tmp_path].settled
     _rewrite(path, "needle", "bbbbbb")
     assert B.grep(tmp_path, "needle") == [] and B.grep(tmp_path, "bbbbbb")
 
@@ -152,6 +154,20 @@ def test_a_writer_mutation_drops_the_snapshot(tmp_path: Path, settled, monkeypat
     assert [hit["text"] for hit in B.grep(tmp_path, "bbbbbb")] == ["bbbbbb"]
 
 
+def test_a_scan_overlapping_a_writer_mutation_is_not_kept(tmp_path: Path, settled, monkeypatch) -> None:
+    _concept(tmp_path, "one")
+    real_scan = B._scan
+
+    def scan_while_a_writer_finishes(*args):
+        snapshot = real_scan(*args)
+        B.drop_snapshots()  # what serialized_mutation does as it ends
+        return snapshot
+
+    monkeypatch.setattr(B, "_scan", scan_while_a_writer_finishes)
+    assert _paths(tmp_path) == ["topics/one.md"]
+    assert tmp_path not in B._snapshots
+
+
 def test_concurrent_readers_during_a_rebuild_all_get_the_whole_bundle(tmp_path: Path, settled, monkeypatch) -> None:
     for n in range(40):
         _concept(tmp_path, f"c{n:02d}")
@@ -162,9 +178,9 @@ def test_concurrent_readers_during_a_rebuild_all_get_the_whole_bundle(tmp_path: 
     scans = []
     real_scan, real_profile = B._scan, B._profile_document
 
-    def counted_scan(root, fingerprint):
+    def counted_scan(root, *args):
         scans.append(root)
-        return real_scan(root, fingerprint)
+        return real_scan(root, *args)
 
     def slow_profile(root, path):
         time.sleep(0.002)  # hold the rebuild open while the other readers arrive

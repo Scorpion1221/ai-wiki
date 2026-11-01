@@ -100,9 +100,11 @@ class _Snapshot:
     fingerprint: tuple
     okf_version: str
     records: tuple[tuple[Path, str, dict, str, str], ...]
+    began: int  # time.monotonic_ns() before the fingerprint was taken
+    settled: bool  # no file changed within _RACY_NS of the scan: reusable while the stats hold
 
 
-_snapshots: dict[Path, _Snapshot] = {}  # one per bundle path
+_snapshots: dict[Path, _Snapshot] = {}  # one per bundle path: its latest scan
 _snapshot_locks: dict[Path, threading.Lock] = {}
 _snapshot_guard = threading.Lock()
 _generation = 0  # bumped by drop_snapshots: a scan begun before that is never kept
@@ -153,7 +155,7 @@ def _fingerprint(root: Path) -> tuple:
     return (stat.S_ISLNK(top.st_mode), top.st_ino), tuple(entries)
 
 
-def _scan(root: Path, fingerprint: tuple) -> _Snapshot:
+def _scan(root: Path, fingerprint: tuple, began: int, settled: bool) -> _Snapshot:
     """Parse every valid v0.2 concept, in path order, exactly as each read used to."""
     okf_version = bundle_okf_version(root)
     records = []
@@ -165,31 +167,33 @@ def _scan(root: Path, fingerprint: tuple) -> _Snapshot:
             document = _profile_document(root, path)
             if document is not None:
                 records.append((path, rel, *document))
-    return _Snapshot(fingerprint, okf_version, tuple(records))
+    return _Snapshot(fingerprint, okf_version, tuple(records), began, settled)
 
 
 def _snapshot(root: Path) -> _Snapshot:
-    """The bundle's snapshot: kept while its fingerprint holds, else scanned once under the
-    bundle's lock while concurrent readers wait for that scan instead of starting their own."""
+    """The bundle's snapshot: reused while its fingerprint holds, else scanned under the bundle's
+    lock. A reader queued behind a scan that began after it arrived shares that scan, so a burst
+    of requests after a change waits for one scan, or two when it lands in the racy window."""
+    arrived = time.monotonic_ns()
     cached = _snapshots.get(root)
-    if cached is not None and cached.fingerprint == _fingerprint(root):
+    if cached is not None and cached.settled and cached.fingerprint == _fingerprint(root):
         return cached
     with _snapshot_guard:
         lock = _snapshot_locks.setdefault(root, threading.Lock())
     with lock:
-        generation = _generation
-        started = time.time_ns()
-        fingerprint = _fingerprint(root)  # before any read, so a change during the scan rescans
         cached = _snapshots.get(root)
-        if cached is not None and cached.fingerprint == fingerprint:
+        if cached is not None and cached.began > arrived:  # read wholly after this request arrived
             return cached
-        snapshot = _scan(root, fingerprint)
-        settled = all(entry[-1] < started - _RACY_NS for entry in fingerprint[1])
+        generation = _generation
+        began, now = time.monotonic_ns(), time.time_ns()
+        fingerprint = _fingerprint(root)  # before any read, so a change during the scan rescans
+        if cached is not None and cached.settled and cached.fingerprint == fingerprint:
+            return cached
+        settled = all(entry[-1] < now - _RACY_NS for entry in fingerprint[1])
+        snapshot = _scan(root, fingerprint, began, settled)
         with _snapshot_guard:
-            if settled and generation == _generation:
+            if generation == _generation:  # a scan that overlapped a writer's drop is this request's only
                 _snapshots[root] = snapshot
-            else:  # serve it to this request only: the next one scans again
-                _snapshots.pop(root, None)
         return snapshot
 
 
