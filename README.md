@@ -289,6 +289,8 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_LLM` | `codex` (default) or `off`: off, the writer never starts an agent process, ignores `config.agent` and `AIWIKI_AGENT_*`, and answers the legacy Codex routes with 409; it refuses to start without `AIWIKI_AUDIT=external`, since nothing else would verify |
 | `AIWIKI_INTAKE`, `AIWIKI_AUDIT`, `AIWIKI_CHANGESETS_COMMIT`, `AIWIKI_RESTRUCTURE`, `AIWIKI_CODEX_AUDIT_MANUAL` | rollout switches, reported by `GET /whoami` under `modes` (see "Final state" above and `src/aiwiki/service/app.py`) |
 | `AIWIKI_CONFIG` | local client / worker JSON config (default `~/.ai-wiki/config.json`) |
+| `AIWIKI_TIMEOUT` | client: seconds each CLI request may take (default 30) |
+| `AIWIKI_RETRY_S` | client: seconds a read (GET) keeps retrying a 502/503/504, timeout or dropped connection after its first failure, with jittered backoff (default 20; 0 never retries); a write is never retried |
 | `AIWIKI_AGENT_BIN` | override `agent.bin`; Codex executable or compatible wrapper (default `codex`) |
 | `AIWIKI_AGENT_MODEL` | override `agent.model` for curator and auditor (default `gpt-5.6-sol`) |
 | `AIWIKI_AGENT_REASONING_EFFORT` | override `agent.reasoning_effort` (default `high`) |

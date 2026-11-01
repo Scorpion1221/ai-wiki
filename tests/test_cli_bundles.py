@@ -439,7 +439,7 @@ def test_aiwiki_token_env_wins_and_stays_out_of_the_config(monkeypatch, tmp_path
     cli.main(["config", "set", "--token", "saved"])
     assert cli._conn() == ("https://h/", "aiw_c_from-env")  # env wins over the saved token
     seen = {}
-    monkeypatch.setattr(cli, "_send", lambda request: seen.update(auth=request.get_header("Authorization")) or {})
+    monkeypatch.setattr(cli, "_send", lambda request, *_: seen.update(auth=request.get_header("Authorization")) or {})
     cli._api("/whoami")
     assert seen["auth"] == "Bearer aiw_c_from-env"
 
