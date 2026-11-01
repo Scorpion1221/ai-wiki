@@ -79,6 +79,8 @@ a paraphrase, the other language). Zero hits is not "nothing": retry with synony
 event or field name (`grep --fixed`) before saying the wiki has nothing. Do not fan out further.
 JSON `search`/`grep`/`log` output carries `shown`, `total` and `truncated`: check them before
 treating bounded output as complete. Never rerun an identical command to confirm an empty answer.
+Reads already retry a restarting server for about 20 s (`$AIWIKI_RETRY_S`): an error after that is
+final for this run; report it in one line, never loop on it.
 
 ### 3. Read the concept, then trace one hop
 
@@ -90,7 +92,8 @@ ai-wiki links <dir>/<concept>.md        # outbound + inbound relationships
 ```
 
 Never pipe `cat` through `head`, `grep` or `tail`: that hides the closing
-`<!-- ai-wiki: truncated … -->` notice; on that notice, rerun with `--full`. For identity, payment,
+`<!-- ai-wiki: truncated … -->` notice; on that notice, rerun with `--full`. A preview folds the
+frontmatter's `sources:` list to one counted line; `--full` and `--json` keep it whole. For identity, payment,
 experiment and attribution questions, and whenever experiment ↔ metric ↔ decision/risk could
 change the answer, run `links` and read one relevant hop. Stop when the next hop adds nothing.
 
