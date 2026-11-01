@@ -493,12 +493,14 @@ def _snippet(body: str, phrase: str, terms: tuple[str, ...], width: int = 160) -
 
 
 def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
-    """Explainable multi-field BM25-style retrieval with phrase/coverage priority.
+    """Explainable multi-field BM25-style retrieval with exact-phrase priority.
 
     Directory depth is irrelevant: every valid concept is searched.  The scoring is
-    domain-agnostic and keeps exact phrases and full query coverage ahead of documents
-    that merely repeat a common partial token.  Trust/freshness remains a tie-breaker,
-    never a recall filter.
+    domain-agnostic: an exact phrase ranks first, then the score, in which each term
+    counts by its rarity and a CJK bigram also by how word-like it is in the bundle, so
+    a long document matching the filler bigrams of a natural question does not outrank
+    one matching its distinctive terms.  Coverage explains a hit but no longer ranks it.
+    Trust/freshness remains a tie-breaker, never a recall filter.
     """
     phrase = _normalize_search_text(query)
     terms = _tokens(query)
@@ -538,6 +540,18 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
         )
         for term in terms
     }
+    # A CJK bigram is only a guess at a word.  A real word (``冻结``) holds most uses of its
+    # rarer character; a bigram straddling two words (``费多`` of ``免费多少``) holds few, so
+    # its weight is the square root of that share and filler bigrams count for little.
+    bigrams = [term for term in terms if re.fullmatch(rf"[{_CJK}]{{2}}", term)]
+    character_frequency = {
+        char: sum(1 for *_prefix, fields in records if any(char in text for text in fields.values()))
+        for char in {char for term in bigrams for char in term}
+    }
+    term_weight = dict.fromkeys(terms, 1.0) | {
+        term: math.sqrt(document_frequency[term] / max(1, min(character_frequency[char] for char in term)))
+        for term in bigrams
+    }
 
     scored = []
     total_documents = len(records)
@@ -569,7 +583,7 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
                 length_norm = 0.25 + 0.75 * (_field_length(text) / averages[field])
                 weighted_tf += weights[field] * count / max(length_norm, 0.1)
             if weighted_tf:
-                lexical_score += idf * (weighted_tf * 2.2) / (weighted_tf + 1.2)
+                lexical_score += term_weight[term] * idf * (weighted_tf * 2.2) / (weighted_tf + 1.2)
 
         phrase_score = sum(weights[field] * 2.0 for field in phrase_fields)
         score = round(lexical_score + phrase_score, 4)
@@ -581,7 +595,7 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
             "fields": list(matched_fields),
             "terms": list(matched_terms),
         }
-        scored.append((bool(phrase_fields), coverage, score, knowledge_rank, meta["generated_at"], {
+        scored.append((bool(phrase_fields), score, knowledge_rank, meta["generated_at"], {
             "path": rel, "title": fm.get("title"), "type": fm.get("type"),
             "tags": fm.get("tags") or [], "score": score,
             "match": match,
@@ -589,8 +603,8 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
             "snippet": _snippet(body, phrase, terms),
             **meta,
         }))
-    # Phrase and coverage secure recall; score ranks equally complete matches.
-    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4]), reverse=True)
+    # An exact phrase secures recall; the score ranks everything else.
+    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
     results = [d for *_, d in scored]
     return results if top_k is None else results[:top_k]
 

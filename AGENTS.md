@@ -63,11 +63,13 @@ Trust follows OKF §5.3 across all verification history; `verification_current` 
 whether an event confirms the current generated revision (an event by the concept's own
 `process:` generator counts only 12 h after the generation). For current-fact decisions, treat
 `verification_current: false` like unverified regardless of the historical trust tier. Search
-returns explainable `phrase`, `coverage`, `fields`, and `terms`; exact phrases and full query
-coverage rank ahead of repeated partial tokens. Trust/freshness remain tie-breakers. Run one
-search first and rewrite it at most once when coverage is partial; on zero hits retry with
-synonyms or the table, event or field name before concluding the wiki has nothing. Apply this
-current-fact gate after retrieval even when a weak hit ranks highly:
+returns explainable `phrase`, `coverage`, `fields`, and `terms`; an exact phrase ranks first,
+then the score, in which rare terms count most and CJK bigrams that straddle words count little,
+so a document matching a question's filler bigrams does not outrank one matching its distinctive
+terms. Coverage explains a hit but does not rank it. Trust/freshness remain tie-breakers. Run one
+search first and rewrite it at most once when the top hits' `terms` miss its distinctive words;
+on zero hits retry with synonyms or the table, event or field name before concluding the wiki
+has nothing. Apply this current-fact gate after retrieval even when a weak hit ranks highly:
 
 ```text
 stable + fresh + human-reviewed

@@ -68,12 +68,13 @@ ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
 TOON list output separates semantic `concepts` from structural `entries`; only concepts carry
 `status`, `trust`, `freshness`, `generated_at`, `verified_at`, `verification_current`, `stale_on`
 and `basis` (`freshness_basis` in JSON). `ls --json` returns the complete raw entry array. Search
-covers every concept at any depth and ranks exact phrase and full query coverage ahead of repeated
-partial tokens (`phrase`, `coverage`, `fields` and `terms` explain each match); trust/freshness only
-break close ties, so apply the evidence gate after retrieval.
+covers every concept at any depth and ranks an exact phrase first, then by score: rare terms count
+most and CJK bigrams that straddle words count little, so filler bigrams of a question do not lift
+a long unrelated concept (`phrase`, `coverage`, `fields` and `terms` explain each match; coverage
+does not rank); trust/freshness only break close ties, so apply the evidence gate after retrieval.
 
-Run one well-formed search. Read the top candidates when `phrase: true` or `coverage: 1.0` makes
-the match clear; when coverage is partial or scattered, rewrite it once (the user's other wording,
+Run one well-formed search and read the top candidates; when the top hits' `terms` show the
+query's distinctive words went unmatched, rewrite it once (the user's other wording,
 a paraphrase, the other language). Zero hits is not "nothing": retry with synonyms or the table,
 event or field name (`grep --fixed`) before saying the wiki has nothing. Do not fan out further.
 JSON `search`/`grep`/`log` output carries `shown`, `total` and `truncated`: check them before
