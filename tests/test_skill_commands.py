@@ -90,14 +90,29 @@ def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     text = AUDITOR.read_text(encoding="utf-8")
     assert text.startswith("---\nname: ai-wiki-auditor\n")
     # A budget, loaded into every audit run. 2026-10-24 (0.3.4) took it from 200 to 220: the
-    # self-update preflight left 199/200, no room for the next small fix.
-    assert len(text.splitlines()) <= 220
+    # self-update preflight left 199/200, no room for the next small fix. 2026-11-01 to 230: the
+    # Signals check of §3.3 (aliases, stale_after, supersession) left 226/220.
+    assert len(text.splitlines()) <= 230
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert verbs == {"update", "skill", "--version", "doctor", "review begin", "review next", "review evidence",
                      "review verdict", "review submit", "review triage next", "review triage verdict",
                      "review triage submit", "review end"}
     prompt = (PROMPT.parent / "auditor-autopilot-prompt.md").read_text(encoding="utf-8")
     assert "ai-wiki-auditor" in prompt and not {resolve(root, command)[0] for command in commands(prompt)} - verbs
+
+
+def test_the_curator_signals_date_every_time_bound_type_and_never_undated_evidence() -> None:
+    curator = ROOT / "skills" / "okf-knowledge-curator"
+    text = curator.joinpath("SKILL.md").read_text(encoding="utf-8")
+    signals = " ".join(text.split("## Signals", 1)[1].split("\n## ", 1)[0].split())
+    taxonomy = curator.joinpath("assets", "templates", "SCHEMA.md").read_text(encoding="utf-8")
+    monetization = re.search(r"^\| (Monetization[^|]*?) \|", taxonomy, re.M)[1].split(", ")
+    for kind in ("Metric", "Experiment", *monetization):
+        assert f"`{kind}`" in signals, f"Signals: stale_after is required on {kind} too"
+    # A declared date reads fresh, the default never does: undated evidence must not buy freshness.
+    assert "curation day" not in signals and "no date gets no `stale_after`" in signals
+    # A description is read without its footnotes: no state past what its evidence proves.
+    assert "a state only a comment reports stays out of it" in signals
 
 
 def test_the_shadow_prompt_config_is_what_the_collectors_read() -> None:

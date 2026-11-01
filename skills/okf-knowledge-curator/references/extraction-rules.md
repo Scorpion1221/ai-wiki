@@ -39,8 +39,10 @@ For each concept:
 2. Add strict frontmatter: status, generated, and structured sources.
 3. Give cited sources stable ids and join claims with Markdown footnotes.
 4. Add links only to existing related concepts.
-5. Use `stale_after` only when the evidence dates a fact (it expires sooner than 90 days after
-   generation, the default, or provably lasts longer); do not store staleness as status.
+5. Add the Signals of SKILL.md: an alias in the title's other language plus the identifiers
+   users type, and `stale_after` by its date rule (required on Metric, Experiment, Monetization,
+   Monetization Strategy and dated readings, when the evidence gives a date); do not store
+   staleness as status. Deprecate what the evidence retires.
 6. Keep new/uncertain material transiently `draft` and omit `verified`; the independent
    audit finalizes retained records without faking verification.
 
