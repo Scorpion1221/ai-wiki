@@ -29,13 +29,15 @@ SEARCH = {"results": [{"path": "metrics/x.md", "title": "X", "score": 1.0}], "to
 MUTATING = {"detail": "bundle mutation in progress; retry"}
 TOP_K_422 = {"detail": [{"type": "less_than_equal", "loc": ["query", "top_k"],
                          "msg": "Input should be less than or equal to 1000", "input": "2000", "ctx": {"le": 1000}}]}
+# What Cloudflare, in front of the production server, answers while the origin restarts: an HTML page.
+CLOUDFLARE_HTML = b"<!DOCTYPE html><html><head><title>example.com | 522: Connection timed out</title></head></html>"
 
 
 class Server:
     """Scripted answers per route; each request takes the next one and the last one repeats.
 
-    An answer is a dict (200 JSON), a status, ``(status, body)``, ``("sleep", seconds, answer)``,
-    ``"reset"`` (RST, no answer) or ``"drop"`` (closed without an answer).
+    An answer is a dict (200 JSON), a status, ``(status, body)`` (bytes are sent as an HTML page),
+    ``("sleep", seconds, answer)``, ``"reset"`` (RST, no answer) or ``"drop"`` (closed without an answer).
     """
 
     def __init__(self):
@@ -67,9 +69,10 @@ class Server:
                     return
                 status, body = (action, {"detail": "unavailable"}) if isinstance(action, int) else (
                     action if isinstance(action, tuple) else (200, action))
-                data = json.dumps(body).encode()
+                page = isinstance(body, bytes)
+                data = body if page else json.dumps(body).encode()
                 self.send_response(status)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", "text/html" if page else "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -123,7 +126,8 @@ def run(capsys, *args) -> tuple[int, str, str]:
 # --- A4: retry reads, never writes -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("failure", [502, (503, MUTATING), 504, "reset", "drop"])
+@pytest.mark.parametrize("failure", [502, (503, MUTATING), 504, "reset", "drop",
+                                     *((status, CLOUDFLARE_HTML) for status in (520, 521, 522, 523, 524, 530))])
 def test_a_read_rides_out_a_restarting_server(server, capsys, failure) -> None:
     server.script["/search"] = [failure, failure, SEARCH]
 
@@ -155,6 +159,18 @@ def test_aiwiki_timeout_bounds_each_attempt(server, capsys, monkeypatch) -> None
 
     monkeypatch.setenv("AIWIKI_TIMEOUT", "2")
     assert run(capsys, "health")[0] == 0
+
+
+def test_a_cloudflare_page_ends_in_the_standard_error(server, capsys, monkeypatch) -> None:
+    """An HTML error page is not JSON: the error names the status alone, in TOON or under --json."""
+    server.script["/search"] = [(530, CLOUDFLARE_HTML)]
+    monkeypatch.setenv("AIWIKI_RETRY_S", "0")
+
+    code, out, err = run(capsys, "search", "x")
+    assert code == 1 and "server rejected the request (status 530)\"" in out and "html" not in out
+    assert "Traceback" not in err
+    code, out, _err = run(capsys, "search", "x", "--json")
+    assert code == 1 and json.loads(out)["error"] == "server rejected the request (status 530)"
 
 
 def test_retry_s_zero_sends_a_read_once(server, capsys, monkeypatch) -> None:
@@ -286,7 +302,8 @@ def test_a_token_is_trimmed_and_never_echoed(server, capsys, monkeypatch) -> Non
     assert code == 1 and "secret" not in out and json.loads(out)["help"] == "ai-wiki config show"
 
 
-@pytest.mark.parametrize("failure", [502, "reset", ("sleep", 0.4, {"id": "j1"})])
+@pytest.mark.parametrize("failure", [502, "reset", ("sleep", 0.4, {"id": "j1"}), (520, CLOUDFLARE_HTML),
+                                     (524, CLOUDFLARE_HTML)])
 def test_a_write_is_never_sent_twice(server, capsys, monkeypatch, tmp_path, failure) -> None:
     monkeypatch.setenv("AIWIKI_TIMEOUT", "0.2")
     server.script["/ingest"] = [failure, {"id": "j1", "status": "queued"}]
@@ -298,6 +315,19 @@ def test_a_write_is_never_sent_twice(server, capsys, monkeypatch, tmp_path, fail
     assert code == 1 and server.routes("/ingest") == ["POST"]
     assert out.startswith("error:\n") and "retrying" not in err
     assert "the write may have been applied" in out  # the server may have taken it: say so, never resend
+
+
+@pytest.mark.parametrize("status", [521, 522, 523, 530])
+def test_a_write_cloudflare_never_delivered_is_not_resent(server, capsys, tmp_path, status) -> None:
+    """Cloudflare could not reach the origin: the write was not applied, and is still sent once."""
+    server.script["/ingest"] = [(status, CLOUDFLARE_HTML), {"id": "j1", "status": "queued"}]
+    source = tmp_path / "note.md"
+    source.write_text("note")
+
+    code, out, err = run(capsys, "ingest", source)
+
+    assert code == 1 and server.routes("/ingest") == ["POST"] and "retrying" not in err
+    assert f"server rejected the request (status {status})" in out and "may have been applied" not in out
 
 
 # --- A4: every failure is the standard error, JSON under --json ----------------------------------
@@ -354,11 +384,52 @@ def test_json_errors_are_one_object_like_the_other_json_errors(server, capsys, m
     assert code == 2 and json.loads(out)["kind"] == "usage"
 
 
+@pytest.mark.parametrize("flag", ["--j", "--js", "--jso"])
+def test_an_abbreviated_json_flag_makes_errors_json_too(server, capsys, monkeypatch, flag) -> None:
+    """argparse takes --js for --json: the answer is JSON, and so is the error."""
+    server.script["/search"] = [SEARCH, 502]
+    monkeypatch.setenv("AIWIKI_RETRY_S", "0")
+
+    code, out, _err = run(capsys, "search", "x", flag)
+    assert code == 0 and json.loads(out)["shown"] == 1
+    code, out, _err = run(capsys, "search", "x", flag)
+    assert code == 1 and json.loads(out)["error"] == "server rejected the request (status 502): unavailable"
+    code, out, _err = run(capsys, "search", "x", flag, "--stat")
+    assert code == 2 and json.loads(out)["kind"] == "usage"
+
+
 def test_a_malformed_timeout_is_a_usage_error(server, capsys, monkeypatch) -> None:
-    for value in ("soon", "-1", "0", "nan"):
+    for value in ("soon", "-1", "0", "nan", "1e30", "86401"):  # 1e30 overflows a socket timeout
         monkeypatch.setenv("AIWIKI_TIMEOUT", value)
-        code, out, _err = run(capsys, "health")
-        assert code == 2 and "$AIWIKI_TIMEOUT must be a number of seconds > 0" in out
+        code, out, err = run(capsys, "health")
+        assert code == 2 and "$AIWIKI_TIMEOUT must be a number of seconds > 0 and <= 86400" in out, value
+        assert "Traceback" not in err
+    monkeypatch.delenv("AIWIKI_TIMEOUT")
+    monkeypatch.setenv("AIWIKI_RETRY_S", "1e30")
+    code, out, _err = run(capsys, "health", "--json")
+    assert code == 2 and json.loads(out)["error"].startswith("$AIWIKI_RETRY_S must be a number of seconds >= 0 and")
+    assert server.requests == []
+
+    monkeypatch.setenv("AIWIKI_TIMEOUT", "86400")
+    monkeypatch.setenv("AIWIKI_RETRY_S", "86400")
+    assert run(capsys, "health")[0] == 0
+
+
+def test_doctor_reports_a_non_http_endpoint_in_its_own_result(server, capsys, tmp_path) -> None:
+    """doctor (like admin, maint, review, workspace) reports an endpoint it cannot use as a failed check
+    and exits 4, as before the scheme check; a read command fails at once with the connect hint."""
+    cli.CONFIG.write_text(json.dumps({"endpoint": "ftp://x", "token": "fixture-token"}))
+
+    code, out, _err = run(capsys, "doctor", "--role", "member", "--state-dir", tmp_path / "st", "--json")
+    report = json.loads(out)
+    assert code == 4 and report["ok"] is False
+    checks = {check["check"]: check for check in report["checks"]}
+    assert checks["whoami"]["ok"] is False and "'ftp://x' is not an http(s) URL" in checks["whoami"]["detail"]
+    assert checks["state_dir"]["ok"] is True
+
+    code, out, _err = run(capsys, "health", "--json")
+    assert code == 1 and json.loads(out) == {"error": "the endpoint 'ftp://x' is not an http(s) URL",
+                                             "kind": "error", "help": cli.CONNECT_HINT}
     assert server.requests == []
 
 
@@ -385,6 +456,18 @@ def test_a_422_shows_the_field_message(server, capsys) -> None:
 
     assert code == 1 and len(server.routes("/log")) == 1  # a 422 is not retried
     assert "server rejected the request (status 422): top_k: Input should be less than or equal to 1000" in out
+
+
+def test_a_422_whose_loc_is_null_or_a_string_names_the_request(server, capsys) -> None:
+    server.script["/log"] = [(422, {"detail": [{"loc": None, "msg": "Field required"},
+                                               {"loc": "body", "msg": "Invalid JSON"},
+                                               {"loc": ["query"], "msg": "Bad query"}, "stray"]})]
+
+    code, out, err = run(capsys, "log")
+
+    assert code == 1 and "Traceback" not in err
+    assert ("server rejected the request (status 422): request: Field required; request: Invalid JSON; "
+            "request: Bad query") in out
 
 
 def test_top_k_above_the_server_maximum_is_a_usage_error_and_limit_is_top_k(server, capsys) -> None:
@@ -529,6 +612,20 @@ def test_cat_preview_counts_sources_and_keeps_every_other_key(server, capsys) ->
     assert run(capsys, "cat", "features/ai-detector.md", "--full")[1] == content
     code, out, _err = run(capsys, "cat", "features/ai-detector.md", "--json")
     assert json.loads(out)["content"] == content
+
+
+def test_cat_preview_counts_sources_across_column_0_comments(server, capsys) -> None:
+    """A column-0 comment inside the list is skipped, not the end of it; one right after it stays shown."""
+    frontmatter = ("---\ntitle: T\nsources:\n- id: one\n  title: One\n# a column-0 comment inside\n\n"
+                   "- id: two\n  title: Two\n# a column-0 comment after\nverified:\n- {by: x}\n---\n")
+    content = frontmatter + "Body.\n" + "x" * 300
+    server.script["/cat"] = [{"path": "x.md", "content": content, "metadata": {"status": "stable"}}]
+
+    code, out, _err = run(capsys, "cat", "x.md", "--max-chars", "200")
+
+    assert code == 0 and out.startswith(
+        "---\ntitle: T\nsources: <2 entries; run `ai-wiki cat x.md --full` to see them>\n"
+        "# a column-0 comment after\nverified:\n- {by: x}\n---\nBody.\n")
 
 
 @pytest.mark.parametrize("content,metadata", [

@@ -53,10 +53,13 @@ _VERSION_FLAGS = {"-v", "-V", "--version"}
 _DEFAULT_CAT_CHARS = 8000
 _DEFAULT_GREP_LIMIT = 100
 _TOP_K_MAX = 1000  # the server's top_k limit (service app.py: le=1000)
-# A read (GET) is retried through a restarting server: these statuses, a timeout, a TLS read error,
-# or a refused, reset or dropped connection, backing off from _RETRY_BASE_S (doubling, jittered) up
-# to _RETRY_CAP_S; a retry may run for what is left of the window, a last one at least _RETRY_FLOOR_S.
-_RETRY_STATUSES = {502, 503, 504}
+# A read (GET) is retried through a restarting server: these statuses (Cloudflare, in front of the
+# production server, answers 520-524, or 530 for a tunnel, while its origin restarts), a timeout, a TLS
+# read error, or a refused, reset or dropped connection, backing off from _RETRY_BASE_S (doubling,
+# jittered) up to _RETRY_CAP_S; a retry may run for what is left of the window, a last one at least
+# _RETRY_FLOOR_S.
+_RETRY_STATUSES = {502, 503, 504, 520, 521, 522, 523, 524, 530}
+_SECONDS_MAX = 86400  # $AIWIKI_TIMEOUT / $AIWIKI_RETRY_S: a day; far more overflows a socket timeout
 _RETRY_BASE_S = 0.5
 _RETRY_CAP_S = 4.0
 _RETRY_FLOOR_S = 3.0  # the slowest search answers in about 2 s
@@ -235,7 +238,10 @@ def _token(cfg: dict) -> str | None:
     return str(os.environ.get("AIWIKI_TOKEN") or cfg.get("token") or "").strip() or None
 
 
-def _conn() -> tuple[str, str]:
+def _conn(*, network: bool = False) -> tuple[str, str]:
+    """The configured endpoint and token, else the CLI's error. With ``network`` (``_http``) an endpoint
+    that is no http(s) URL raises OSError instead, so doctor, admin, maint, review and workspace report
+    it in their own result, as they report an unreachable server."""
     cfg = _normalize(_load())
     token = _token(cfg)
     if not cfg.get("endpoint") or not token:
@@ -248,7 +254,10 @@ def _conn() -> tuple[str, str]:
     except ValueError:
         scheme = ""
     if scheme.lower() not in ("http", "https"):
-        _fail(f"the endpoint {cfg['endpoint']!r} is not an http(s) URL", help_command=CONNECT_HINT)
+        message = f"the endpoint {cfg['endpoint']!r} is not an http(s) URL"
+        if network:
+            raise OSError(message)
+        _fail(message, help_command=CONNECT_HINT)
     return cfg["endpoint"], token
 
 
@@ -287,10 +296,10 @@ def _http(method: str, route: str, *, bundle: str | None = None, params: dict | 
     """One request, answered as ``(status, headers, body)`` whatever its status.
 
     Only a network failure raises (``OSError``: ``URLError``, a timeout, a truncated or
-    garbled answer), so a caller can retry it; the returned headers are looked up
-    case-insensitively.
+    garbled answer, an endpoint that is no http(s) URL), so a caller can retry it; the
+    returned headers are looked up case-insensitively.
     """
-    endpoint, token = _conn()
+    endpoint, token = _conn(network=True)
     query = {k: v for k, v in {**(params or {}), "bundle": bundle}.items() if v is not None}
     url = f"{endpoint.rstrip('/')}{route}" + (f"?{urllib.parse.urlencode(query)}" if query else "")
     sent = {"Authorization": f"Bearer {token}", "User-Agent": _UA, **(headers or {})}
@@ -316,7 +325,7 @@ class _Refused(Exception):
 
 
 def _seconds(name: str, default: float, *, positive: bool = False) -> float:
-    """A duration in seconds from the environment; a malformed one is a usage error naming it."""
+    """A duration in seconds from the environment, at most _SECONDS_MAX; a malformed one is a usage error naming it."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -324,8 +333,9 @@ def _seconds(name: str, default: float, *, positive: bool = False) -> float:
         value = float(raw)
     except ValueError:
         value = math.nan
-    if not math.isfinite(value) or value < 0 or (positive and value == 0):
-        _fail(f"${name} must be a number of seconds {'> 0' if positive else '>= 0'}, not {raw!r}", code=2)
+    if not math.isfinite(value) or value < 0 or value > _SECONDS_MAX or (positive and value == 0):
+        _fail(f"${name} must be a number of seconds {'> 0' if positive else '>= 0'} and <= {_SECONDS_MAX}, "
+              f"not {raw!r}", code=2)
     return value
 
 
@@ -375,9 +385,13 @@ def _rejection(status: int, raw: bytes) -> str:
         payload = None
     detail = payload.get("detail") if isinstance(payload, dict) else None
     if isinstance(detail, list):  # FastAPI validation: [{"loc": ["query", "top_k"], "msg": "…"}, …]
-        detail = "; ".join(
-            f"{'.'.join(str(part) for part in item.get('loc', [])[1:]) or 'request'}: {item.get('msg')}"
-            for item in detail if isinstance(item, dict))
+        faults = []
+        for item in detail:
+            if isinstance(item, dict):
+                loc = item.get("loc")  # [where, field, …]; any other shape names no field
+                field = ".".join(str(part) for part in loc[1:]) if isinstance(loc, list) else ""
+                faults.append(f"{field or 'request'}: {item.get('msg')}")
+        detail = "; ".join(faults)
     message = f"server rejected the request (status {status})"
     if isinstance(detail, str) and detail.strip():
         message += f": {detail.strip()}"
@@ -387,8 +401,8 @@ def _rejection(status: int, raw: bytes) -> str:
 def _send(req: urllib.request.Request, raise_on: Container[int] = ()) -> dict:
     """One API call: its JSON answer, else the CLI's error and exit 1, never a traceback.
 
-    A read (GET) rides out a restarting server: a 502/503/504, a timeout, a TLS read error, or a
-    refused, reset or dropped connection is tried again with jittered exponential backoff until
+    A read (GET) rides out a restarting server: a 502/503/504 (or Cloudflare's 520-524/530), a timeout,
+    a TLS read error, or a refused, reset or dropped connection is tried again with jittered exponential backoff until
     $AIWIKI_RETRY_S seconds after its first attempt began (default 20; 0 never retries). A write is
     never sent twice: the server may have applied it. $AIWIKI_TIMEOUT bounds each attempt (default
     30 s) and a retry gets only what is left of the window, a last one at least _RETRY_FLOOR_S, so a
@@ -417,7 +431,7 @@ def _send(req: urllib.request.Request, raise_on: Container[int] = ()) -> dict:
             if read and e.code in _RETRY_STATUSES and _backoff(attempt, deadline, f"status {e.code}"):
                 continue
             message = _rejection(e.code, raw) + tried
-            if not read and e.code in (502, 504):  # a gateway may have passed it on before it gave up
+            if not read and e.code in (502, 504, 520, 524):  # a gateway may have passed it on before it gave up
                 message += "; the write may have been applied, so check before sending it again"
             if e.code in raise_on:
                 raise _Refused(e.code, message) from None
@@ -557,10 +571,10 @@ def _fold_sources(content: str, path: str) -> str:
                  None)
     if start is None:
         return content
-    end = start + 1  # the block runs to the next top-level line
-    while end < close and (not lines[end].strip() or lines[end][:1] in " \t-"):
+    end = start + 1  # the block runs to the next top-level line; a comment, even at column 0, is not one
+    while end < close and (not lines[end].strip() or lines[end][:1] in " \t-#"):
         end += 1
-    while not lines[end - 1].strip():
+    while not lines[end - 1].strip() or lines[end - 1].startswith("#"):  # those after it stay with the next key
         end -= 1
     block = [line for line in lines[start + 1:end] if line.strip() and not line.lstrip().startswith("#")]
     first = re.match(r"( *)-(?:[ \t]|$)", block[0]) if block else None
@@ -655,7 +669,8 @@ def _home() -> int:
 def main(argv=None) -> int:
     global _JSON_ERRORS
     args = list(sys.argv[1:] if argv is None else argv)
-    _JSON_ERRORS = "--json" in args
+    # argparse takes any unambiguous prefix of an option, and no other option starts with --j.
+    _JSON_ERRORS = any(len(arg) > 2 and "--json".startswith(arg) for arg in args)
     if len(args) == 1 and args[0] in _VERSION_FLAGS:
         print(VERSION)
         return 0
