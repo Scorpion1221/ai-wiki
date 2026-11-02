@@ -347,6 +347,19 @@ def test_the_postings_memo_is_bounded(tmp_path: Path, settled, monkeypatch) -> N
     assert B.search(tmp_path, "needle summary test") == first
 
 
+def test_a_long_term_is_scored_but_never_memoized(tmp_path: Path, settled) -> None:
+    """No word is that long, and a query may hold any number of them: the memo's bytes stay bounded."""
+    _concept(tmp_path, "one")
+    long = "n" * (B._MEMO_TERM_CHARS + 1)
+    _rewrite(tmp_path / "topics" / "one.md", "needle", f"needle {long}")
+    hits = B.search(tmp_path, f"needle {long}")
+    assert [hit["path"] for hit in hits] == ["topics/one.md"] and hits[0]["match"]["terms"] == ["needle", long]
+    assert B.search(tmp_path, f"needle {long}") == hits
+    for n in range(3):
+        assert B.search(tmp_path, f"{n}{long}") == []
+    assert list(B._derived(B._snapshot(tmp_path), B._SearchIndex).memo) == ["needle"]
+
+
 def _graph(root: Path, rel: str) -> tuple[list[str], list[str]]:
     graph = B.links(root, rel)
     return [item["path"] for item in graph["outbound"]], [item["path"] for item in graph["inbound"]]

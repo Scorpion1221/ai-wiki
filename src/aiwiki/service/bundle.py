@@ -686,6 +686,7 @@ def _snippet(body: str, phrase: str, terms: tuple[str, ...], width: int = 160) -
 
 _SEARCH_WEIGHTS = {"path": 4.0, "title": 4.0, "aliases": 4.0, "tags": 2.0, "description": 2.0, "body": 1.0}
 _POSTINGS_MEMO = 4096  # queried terms kept per snapshot, about 13 bytes per matching concept each
+_MEMO_TERM_CHARS = 64  # a longer term, which no word is, is scored per request: the memo's keys stay small
 
 
 def _search_fields(rel: str, fm: dict, body: str) -> tuple[str, ...]:
@@ -751,6 +752,8 @@ class _SearchIndex:
             contributions.append(term_weight * idf * (weighted_tf * 2.2) / (weighted_tf + 1.2))
             matched.append(mask)
         entry = docs, contributions, bytes(matched)
+        if len(term) > _MEMO_TERM_CHARS:
+            return entry
         with self.lock:
             self.memo[term] = entry
             if len(self.memo) > _POSTINGS_MEMO:
