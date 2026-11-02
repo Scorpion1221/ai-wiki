@@ -195,6 +195,8 @@ def _command_path(args: list[str]) -> str:
             positionals.append(arg)
     if not positionals:
         return "ai-wiki"
+    if positionals[0] in _CAT_ALIASES:
+        positionals[0] = "cat"
     depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint", "review") \
         and len(positionals) > 1 else 1
     return "ai-wiki " + " ".join(positionals[:depth])

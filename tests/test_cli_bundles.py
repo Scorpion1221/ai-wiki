@@ -487,3 +487,10 @@ def test_read_habit_verbs_run_cat(monkeypatch, capsys) -> None:
     assert {route for route, _ in calls} == {"/cat"} and {kw["path"] for _, kw in calls} == {"metrics/x.md"}
     assert cli.main(["show", "metrics/x.md", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == document
+
+    import pytest
+
+    with pytest.raises(SystemExit):  # a usage error points at `cat`, the command that runs
+        cli.main(["view", "--bogus", "metrics/x.md"])
+    out = capsys.readouterr().out
+    assert '"ai-wiki cat --help"' in out and "ai-wiki view --help" not in out
