@@ -260,3 +260,47 @@ def test_the_postings_memo_is_bounded(tmp_path: Path, settled, monkeypatch) -> N
     index = B._derived(B._snapshot(tmp_path), B._SearchIndex)
     assert list(index.memo) == ["summary", "test"]
     assert B.search(tmp_path, "needle summary test") == first
+
+
+def _graph(root: Path, rel: str) -> tuple[list[str], list[str]]:
+    graph = B.links(root, rel)
+    return [item["path"] for item in graph["outbound"]], [item["path"] for item in graph["inbound"]]
+
+
+def test_links_follow_a_link_edit_in_both_directions(tmp_path: Path, settled) -> None:
+    for name in ("one", "two", "three"):
+        _concept(tmp_path, name)
+    one = tmp_path / "topics" / "one.md"
+    _rewrite(one, "needle", "[Two](two.md)")
+    assert _graph(tmp_path, "topics/one.md") == (["topics/two.md"], [])
+    assert _graph(tmp_path, "topics/two.md") == ([], ["topics/one.md"])
+
+    _rewrite(one, "[Two](two.md)", "[Three](../topics/three.md)")
+    assert _graph(tmp_path, "topics/one.md") == (["topics/three.md"], [])
+    assert _graph(tmp_path, "topics/two.md") == ([], [])
+    assert _graph(tmp_path, "topics/three.md") == ([], ["topics/one.md"])
+
+    _rewrite(tmp_path / "topics" / "two.md", "needle", "[Three](/topics/three.md)")
+    assert _graph(tmp_path, "topics/three.md") == ([], ["topics/one.md", "topics/two.md"])
+    one.unlink()
+    assert _graph(tmp_path, "topics/three.md") == ([], ["topics/two.md"])
+
+
+def test_a_link_that_is_not_lexical_is_resolved_per_request(tmp_path: Path, settled) -> None:
+    """``..`` after a name can climb out of a symlink in a tree the fingerprint never walks, so
+    such a link is resolved on every request, exactly as an uncached read resolves it."""
+    for name in ("one", "two"):
+        _concept(tmp_path, name)
+    (tmp_path / "x" / "y" / "z").mkdir(parents=True)
+    _concept(tmp_path / "x", "two")  # x/index.md is structural, never a concept
+    (tmp_path / "sources" / "dir").mkdir(parents=True)
+    _rewrite(tmp_path / "topics" / "one.md", "needle", "[Two](../sources/dir/../../topics/two.md)")
+    assert _graph(tmp_path, "topics/one.md") == (["topics/two.md"], [])
+    snapshot = B._snapshot(tmp_path)
+
+    (tmp_path / "sources" / "dir").rmdir()
+    (tmp_path / "sources" / "dir").symlink_to(tmp_path / "x" / "y" / "z", target_is_directory=True)
+    assert B._snapshot(tmp_path) is snapshot  # nothing under sources/ is watched
+    assert _graph(tmp_path, "topics/one.md") == (["x/topics/two.md"], [])
+    assert _graph(tmp_path, "x/topics/two.md") == ([], ["topics/one.md"])
+    assert _graph(tmp_path, "topics/two.md") == ([], [])

@@ -98,6 +98,7 @@ class _Snapshot:
     It keeps only what the files say: metadata that depends on today's date (freshness) is
     derived per request. Callers must not mutate the frontmatter they are handed.
     """
+    root: Path
     fingerprint: tuple
     okf_version: str
     records: tuple[tuple[Path, str, dict, str, str], ...]
@@ -170,7 +171,7 @@ def _scan(root: Path, fingerprint: tuple, began: int, settled: bool) -> _Snapsho
             document = _profile_document(root, path)
             if document is not None:
                 records.append((path, rel, *document))
-    return _Snapshot(fingerprint, okf_version, tuple(records), began, settled)
+    return _Snapshot(root, fingerprint, okf_version, tuple(records), began, settled)
 
 
 def _snapshot(root: Path) -> _Snapshot:
@@ -797,6 +798,46 @@ def _outbound(root: Path, body: str, rel: str, ids: set[str]) -> list[str]:
     return out
 
 
+def _lexical_link(rel: str, target: str) -> bool:
+    """Whether a link resolves by its text alone: ``..`` only leading and never above the root,
+    so every path it can traverse lies where the fingerprint watches for symlinks."""
+    parts = Path(target.lstrip("/")).parts
+    ups = next((i for i, part in enumerate(parts) if part != ".."), len(parts))
+    depth = 0 if target.startswith("/") else len(Path(rel).parts) - 1
+    return ups <= depth and ".." not in parts[ups:]
+
+
+class _LinkGraph:
+    """One snapshot's concept link graph in both directions. A concept with a link that is not
+    lexical is resolved again per request, as that can follow a symlink the fingerprint skips."""
+
+    def __init__(self, snapshot: _Snapshot) -> None:
+        self.root = snapshot.root
+        self.concepts = {rel: (fm, body) for _path, rel, fm, body, _text in snapshot.records}
+        self.ids = set(self.concepts)
+        self.volatile = {
+            rel for rel, (_fm, body) in self.concepts.items()
+            if not all(_lexical_link(rel, m.group(1)) for m in _LINK_RE.finditer(body))
+        }
+        self.outbound = {
+            rel: _outbound(self.root, body, rel, self.ids)
+            for rel, (_fm, body) in self.concepts.items() if rel not in self.volatile
+        }
+        self.inbound: dict[str, list[str]] = {rel: [] for rel in self.concepts}
+        for source in sorted(self.outbound):
+            for target in self.outbound[source]:
+                self.inbound[target].append(source)
+
+    def outbound_of(self, rel: str) -> list[str]:
+        if rel in self.volatile:
+            return _outbound(self.root, self.concepts[rel][1], rel, self.ids)
+        return self.outbound[rel]
+
+    def inbound_of(self, rel: str) -> list[str]:
+        volatile = [r for r in self.volatile if r != rel and rel in self.outbound_of(r)]
+        return sorted(self.inbound[rel] + volatile) if volatile else self.inbound[rel]
+
+
 def links(root: Path, rel: str) -> dict:
     """Both directions of the concept link graph for `rel`: outbound (what it
     references) and inbound (what references it — the backlinks `# Related concepts`
@@ -805,23 +846,15 @@ def links(root: Path, rel: str) -> dict:
     target = safe_resolve(root, rel)  # ValueError (escape) handled by caller
     if not target.is_file():
         raise FileNotFoundError(rel)
-    by_rel = {
-        rel: (path, fm, body)
-        for path, rel, fm, body, _text in _concept_records(root)
-    }
-    if rel not in by_rel:
+    graph = _derived(_snapshot(root), _LinkGraph)
+    if rel not in graph.concepts:
         raise FileNotFoundError(rel)  # reserved/structural files have no link graph
-    ids = set(by_rel)
 
     def entry(r: str) -> dict:
-        _path, fm, _body = by_rel[r]
+        fm, _body = graph.concepts[r]
         return {"path": r, "title": fm.get("title"), "type": fm.get("type"),
                 "description": fm.get("description")}
 
-    _path, fm, body = by_rel[rel]
-    outbound = _outbound(root, body, rel, ids)
-    inbound = [r for r in sorted(ids)
-               if r != rel and rel in _outbound(root, by_rel[r][2], r, ids)]
-    return {"path": rel, "title": fm.get("title"),
-            "outbound": [entry(r) for r in outbound],
-            "inbound": [entry(r) for r in inbound]}
+    return {"path": rel, "title": graph.concepts[rel][0].get("title"),
+            "outbound": [entry(r) for r in graph.outbound_of(rel)],
+            "inbound": [entry(r) for r in graph.inbound_of(rel)]}
