@@ -208,3 +208,55 @@ def test_concurrent_readers_during_a_rebuild_all_get_the_whole_bundle(tmp_path: 
     assert errors == [] and len(seen) == 8
     assert all(paths == expected for paths in seen)
     assert scans == [tmp_path]  # one rebuild, the other seven waited for it
+
+
+def test_search_counts_every_match_but_snippets_only_the_rows_it_returns(tmp_path: Path, settled, monkeypatch) -> None:
+    for n in range(5):
+        _concept(tmp_path, f"c{n}", mentions=n + 1)
+    everything = B.search(tmp_path, "needle", top_k=None)
+    assert len(everything) == 5
+
+    snippets = []
+    real_snippet = B._snippet
+
+    def counted_snippet(body, *args):
+        snippets.append(body)
+        return real_snippet(body, *args)
+
+    monkeypatch.setattr(B, "_snippet", counted_snippet)
+    rows, total = B.search_page(tmp_path, "needle", 2)
+    assert (rows, total) == (everything[:2], 5)
+    assert len(snippets) == 2
+
+    from test_smoke import AUTH, _client
+
+    response = _client(tmp_path, monkeypatch).get("/search", params={"q": "needle", "top_k": 2}, headers=AUTH).json()
+    assert response == {"results": everything[:2], "total": 5}
+
+
+def test_search_after_an_edit_returns_the_edited_result(tmp_path: Path, settled) -> None:
+    """A term's postings are kept per snapshot, so a query run before an edit never answers after it."""
+    _concept(tmp_path, "one")
+    _concept(tmp_path, "two")
+    before = B.search(tmp_path, "needle", top_k=None)
+    assert [hit["path"] for hit in before] == ["topics/one.md", "topics/two.md"]
+    assert B.search(tmp_path, "haystack") == []
+
+    _rewrite(tmp_path / "topics" / "two.md", "needle", "needle needle needle haystack")
+    after = B.search(tmp_path, "needle", top_k=None)
+    assert [hit["path"] for hit in after] == ["topics/two.md", "topics/one.md"]
+    assert after[0]["score"] > before[1]["score"]
+    assert [hit["path"] for hit in B.search(tmp_path, "haystack")] == ["topics/two.md"]
+
+    (tmp_path / "topics" / "two.md").unlink()
+    assert [hit["path"] for hit in B.search(tmp_path, "needle", top_k=None)] == ["topics/one.md"]
+    assert B.search(tmp_path, "haystack") == []
+
+
+def test_the_postings_memo_is_bounded(tmp_path: Path, settled, monkeypatch) -> None:
+    _concept(tmp_path, "one")
+    monkeypatch.setattr(B, "_POSTINGS_MEMO", 2)
+    first = B.search(tmp_path, "needle summary test")
+    index = B._derived(B._snapshot(tmp_path), B._SearchIndex)
+    assert list(index.memo) == ["summary", "test"]
+    assert B.search(tmp_path, "needle summary test") == first

@@ -13,8 +13,9 @@ import subprocess
 import threading
 import time
 import unicodedata
-from collections import Counter
-from dataclasses import dataclass
+from array import array
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -102,6 +103,8 @@ class _Snapshot:
     records: tuple[tuple[Path, str, dict, str, str], ...]
     began: int  # time.monotonic_ns() before the fingerprint was taken
     settled: bool  # no file changed within _RACY_NS of the scan: reusable while the stats hold
+    derived: dict = field(default_factory=dict, compare=False, repr=False)  # see _derived
+    lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
 
 _snapshots: dict[Path, _Snapshot] = {}  # one per bundle path: its latest scan
@@ -195,6 +198,18 @@ def _snapshot(root: Path) -> _Snapshot:
             if generation == _generation:  # a scan that overlapped a writer's drop is this request's only
                 _snapshots[root] = snapshot
         return snapshot
+
+
+def _derived(snapshot: _Snapshot, build):
+    """``build(snapshot)``, computed once per snapshot while concurrent readers wait for it."""
+    try:
+        return snapshot.derived[build]
+    except KeyError:
+        pass
+    with snapshot.lock:
+        if build not in snapshot.derived:
+            snapshot.derived[build] = build(snapshot)
+        return snapshot.derived[build]
 
 
 def drop_snapshots() -> None:
@@ -606,6 +621,80 @@ def _snippet(body: str, phrase: str, terms: tuple[str, ...], width: int = 160) -
     return best[:width]
 
 
+_SEARCH_WEIGHTS = {"path": 4.0, "title": 4.0, "aliases": 4.0, "tags": 2.0, "description": 2.0, "body": 1.0}
+_POSTINGS_MEMO = 4096  # queried terms kept per snapshot, about 13 bytes per matching concept each
+
+
+def _search_fields(rel: str, fm: dict, body: str) -> tuple[str, ...]:
+    """A concept's normalized searchable text, one entry per field of ``_SEARCH_WEIGHTS``."""
+    return (
+        _normalize_search_text(rel.removesuffix(".md")),
+        _normalize_search_text(fm.get("title") or ""),
+        _normalize_search_text(" ".join(map(str, fm.get("aliases") or []))),
+        _normalize_search_text(" ".join(map(str, fm.get("tags") or []))),
+        _normalize_search_text(fm.get("description") or ""),
+        _normalize_search_text(body),
+    )
+
+
+class _SearchIndex:
+    """What search needs from one snapshot: each concept's normalized fields and their lengths,
+    the per-field average lengths, per-character document frequencies, and a bounded memo of each
+    queried term's postings with its exact score contribution to every concept it matches."""
+
+    def __init__(self, snapshot: _Snapshot) -> None:
+        self.records = snapshot.records
+        self.fields = [_search_fields(rel, fm, body) for _path, rel, fm, body, _text in self.records]
+        self.lengths = [tuple(map(_field_length, fields)) for fields in self.fields]
+        self.averages = tuple(
+            sum(lengths[i] for lengths in self.lengths) / len(self.lengths) for i in range(len(_SEARCH_WEIGHTS))
+        ) if self.lengths else ()
+        self.characters = Counter(char for fields in self.fields for char in set("".join(fields)))
+        self.memo: OrderedDict[str, tuple[array, array, bytes]] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def postings(self, term: str) -> tuple[array, array, bytes]:
+        """The concepts ``term`` matches in record order, its score contribution to each, and the
+        fields it matches there (bit i for field i of ``_SEARCH_WEIGHTS``)."""
+        with self.lock:
+            if term in self.memo:
+                self.memo.move_to_end(term)
+                return self.memo[term]
+        docs, counts = array("I"), []
+        for doc, fields in enumerate(self.fields):
+            if any(term in text for text in fields):  # a substring test first: most concepts lack the term
+                row = [_term_count(text, term) for text in fields]
+                if any(row):
+                    docs.append(doc)
+                    counts.append(row)
+        df = len(docs)
+        idf = math.log(1 + (len(self.fields) - df + 0.5) / (df + 0.5))
+        # A CJK bigram is only a guess at a word.  A real word (``冻结``) holds most uses of its
+        # rarer character; a bigram straddling two words (``费多`` of ``免费多少``) holds few, so
+        # its weight is the square root of that share and filler bigrams count for little.
+        term_weight = 1.0
+        if re.fullmatch(rf"[{_CJK}]{{2}}", term):
+            term_weight = math.sqrt(df / max(1, min(self.characters[char] for char in term)))
+        weights = tuple(_SEARCH_WEIGHTS.values())
+        contributions, matched = array("d"), bytearray()
+        for doc, row in zip(docs, counts, strict=True):
+            weighted_tf, mask = 0.0, 0
+            for i, count in enumerate(row):
+                if not count:
+                    continue
+                mask |= 1 << i
+                length_norm = 0.25 + 0.75 * (self.lengths[doc][i] / self.averages[i])
+                weighted_tf += weights[i] * count / max(length_norm, 0.1)
+            contributions.append(term_weight * idf * (weighted_tf * 2.2) / (weighted_tf + 1.2))
+            matched.append(mask)
+        entry = docs, contributions, bytes(matched)
+        with self.lock:
+            self.memo[term] = entry
+            if len(self.memo) > _POSTINGS_MEMO:
+                self.memo.popitem(last=False)
+        return entry
+
+
 def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
     """Explainable multi-field BM25-style retrieval with exact-phrase priority.
 
@@ -616,111 +705,59 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
     one matching its distinctive terms.  Coverage explains a hit but no longer ranks it.
     Trust/freshness remains a tie-breaker, never a recall filter.
     """
+    return search_page(root, query, top_k)[0]
+
+
+def search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int]:
+    """The first ``top_k`` results of ``search`` and the number of concepts that matched; only the
+    rows returned get a snippet."""
     phrase = _normalize_search_text(query)
     terms = _tokens(query)
     if not terms:
-        return []
+        return [], 0
+    index = _derived(_snapshot(root), _SearchIndex)
+    if not index.records:
+        return [], 0
 
-    records = []
-    weights = {
-        "path": 4.0,
-        "title": 4.0,
-        "aliases": 4.0,
-        "tags": 2.0,
-        "description": 2.0,
-        "body": 1.0,
-    }
-    for _path, rel, fm, body, _text in _concept_records(root):
-        fields = {
-            "path": _normalize_search_text(rel.removesuffix(".md")),
-            "title": _normalize_search_text(fm.get("title") or ""),
-            "aliases": _normalize_search_text(" ".join(map(str, fm.get("aliases") or []))),
-            "tags": _normalize_search_text(" ".join(map(str, fm.get("tags") or []))),
-            "description": _normalize_search_text(fm.get("description") or ""),
-            "body": _normalize_search_text(body),
-        }
-        records.append((rel, fm, body, fields))
-    if not records:
-        return []
-
-    averages = {
-        field: sum(_field_length(fields[field]) for *_prefix, fields in records) / len(records)
-        for field in weights
-    }
-    document_frequency = {
-        term: sum(
-            1 for *_prefix, fields in records
-            if any(_term_count(text, term) for text in fields.values())
-        )
-        for term in terms
-    }
-    # A CJK bigram is only a guess at a word.  A real word (``冻结``) holds most uses of its
-    # rarer character; a bigram straddling two words (``费多`` of ``免费多少``) holds few, so
-    # its weight is the square root of that share and filler bigrams count for little.
-    bigrams = [term for term in terms if re.fullmatch(rf"[{_CJK}]{{2}}", term)]
-    character_frequency = {
-        char: sum(1 for *_prefix, fields in records if any(char in text for text in fields.values()))
-        for char in {char for term in bigrams for char in term}
-    }
-    term_weight = dict.fromkeys(terms, 1.0) | {
-        term: math.sqrt(document_frequency[term] / max(1, min(character_frequency[char] for char in term)))
-        for term in bigrams
-    }
+    # Each concept's lexical score sums its terms' contributions in query order, as it always has.
+    lexical: dict[int, float] = {}
+    matched_terms: dict[int, list[str]] = {}
+    matched_fields: dict[int, int] = {}
+    for term in terms:
+        for doc, contribution, mask in zip(*index.postings(term), strict=True):
+            lexical[doc] = lexical.get(doc, 0.0) + contribution
+            matched_terms.setdefault(doc, []).append(term)
+            matched_fields[doc] = matched_fields.get(doc, 0) | mask
 
     scored = []
-    total_documents = len(records)
-    for rel, fm, body, fields in records:
-        matched_terms = tuple(
-            term for term in terms if any(_term_count(text, term) for text in fields.values())
-        )
-        if not matched_terms:
-            continue
-        matched_fields = tuple(
-            field for field, text in fields.items()
-            if any(_term_count(text, term) for term in terms)
-        )
-        coverage = len(matched_terms) / len(terms)
+    for doc in sorted(lexical):
+        _path, rel, fm, body, _text = index.records[doc]
         phrase_fields = tuple(
-            field for field, text in fields.items()
+            field for field, text in zip(_SEARCH_WEIGHTS, index.fields[doc], strict=True)
             if len(terms) > 1 and phrase and phrase in text
         )
-
-        lexical_score = 0.0
-        for term in terms:
-            df = document_frequency[term]
-            idf = math.log(1 + (total_documents - df + 0.5) / (df + 0.5))
-            weighted_tf = 0.0
-            for field, text in fields.items():
-                count = _term_count(text, term)
-                if not count:
-                    continue
-                length_norm = 0.25 + 0.75 * (_field_length(text) / averages[field])
-                weighted_tf += weights[field] * count / max(length_norm, 0.1)
-            if weighted_tf:
-                lexical_score += term_weight[term] * idf * (weighted_tf * 2.2) / (weighted_tf + 1.2)
-
-        phrase_score = sum(weights[field] * 2.0 for field in phrase_fields)
-        score = round(lexical_score + phrase_score, 4)
+        phrase_score = sum(_SEARCH_WEIGHTS[field] * 2.0 for field in phrase_fields)
+        score = round(lexical[doc] + phrase_score, 4)
         meta = concept_metadata(fm)
         knowledge_rank = _knowledge_rank(meta)
         match = {
             "phrase": bool(phrase_fields),
-            "coverage": round(coverage, 3),
-            "fields": list(matched_fields),
-            "terms": list(matched_terms),
+            "coverage": round(len(matched_terms[doc]) / len(terms), 3),
+            "fields": [field for i, field in enumerate(_SEARCH_WEIGHTS) if matched_fields[doc] >> i & 1],
+            "terms": matched_terms[doc],
         }
-        scored.append((bool(phrase_fields), score, knowledge_rank, meta["generated_at"], {
-            "path": rel, "title": fm.get("title"), "type": fm.get("type"),
-            "tags": fm.get("tags") or [], "score": score,
-            "match": match,
-            "description": fm.get("description"),
-            "snippet": _snippet(body, phrase, terms),
-            **meta,
-        }))
+        scored.append((bool(phrase_fields), score, knowledge_rank, meta["generated_at"], (rel, fm, body, match, meta)))
     # An exact phrase secures recall; the score ranks everything else.
     scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
-    results = [d for *_, d in scored]
-    return results if top_k is None else results[:top_k]
+    rows = [{
+        "path": rel, "title": fm.get("title"), "type": fm.get("type"),
+        "tags": fm.get("tags") or [], "score": score,
+        "match": match,
+        "description": fm.get("description"),
+        "snippet": _snippet(body, phrase, terms),
+        **meta,
+    } for _phrase, score, _rank, _generated, (rel, fm, body, match, meta) in scored[:top_k]]
+    return rows, len(scored)
 
 
 def _knowledge_rank(meta: dict) -> int:
