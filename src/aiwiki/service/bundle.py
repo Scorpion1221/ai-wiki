@@ -667,8 +667,9 @@ def _snippet(body: str, phrase: str, terms: tuple[str, ...], width: int = 160) -
         if not stripped:
             continue
         low = _normalize_search_text(stripped)
-        matched = sum(1 for term in terms if _term_count(low, term))
-        hits = sum(_term_count(low, term) for term in terms)
+        counts = [_term_count(low, term) for term in terms]
+        matched = sum(1 for count in counts if count)
+        hits = sum(counts)
         rank = (1 if len(terms) > 1 and phrase and phrase in low else 0, matched, hits)
         if rank > best_rank:
             best, best_rank = stripped, rank
