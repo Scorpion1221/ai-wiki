@@ -348,3 +348,21 @@ def test_ls_counts_and_kinds_follow_added_and_removed_concepts(tmp_path: Path, s
     assert counts() == {"sources/": 0, "topics/": 2}  # a hidden directory's concepts still count
     assert "topics/.hidden/deep.md" not in {item["path"] for item in B.list_dir(tmp_path, recursive=True)}
     assert "topics/.hidden/deep.md" in {item["path"] for item in B.list_dir(tmp_path, recursive=True, show_all=True)}
+
+
+def test_grep_follows_an_edit(tmp_path: Path, settled) -> None:
+    _concept(tmp_path, "one")
+    _concept(tmp_path, "two")
+    path = tmp_path / "topics" / "two.md"
+    assert [(hit["path"], hit["text"]) for hit in B.grep(tmp_path, "NEEDLE", fixed=True)] == [
+        ("topics/one.md", "needle"), ("topics/two.md", "needle")]
+
+    _rewrite(path, "needle", "needle\nsecond Needle line [x](y.md)")
+    assert [(hit["path"], hit["line"]) for hit in B.grep(tmp_path, "needle", fixed=True)] == [
+        ("topics/one.md", 15), ("topics/two.md", 15), ("topics/two.md", 16)]
+    assert [hit["text"] for hit in B.grep(tmp_path, "](y.md)", fixed=True)] == ["second Needle line [x](y.md)"]
+    assert [hit["line"] for hit in B.grep(tmp_path, r"^second \w+", "topics")] == [16]
+
+    path.unlink()
+    assert [hit["path"] for hit in B.grep(tmp_path, "needle", fixed=True)] == ["topics/one.md"]
+    assert B.grep(tmp_path, "](y.md)", fixed=True) == []

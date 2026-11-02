@@ -619,7 +619,7 @@ def grep(root: Path, pattern: str, subdir: str | None = None, fixed: bool = Fals
     rx = re.compile(re.escape(pattern) if fixed else pattern, re.IGNORECASE)
     hits = []
     for _path, rel, _frontmatter, _body, text in _concept_records(root):
-        if not _in_dir(rel, subdir):
+        if not _in_dir(rel, subdir) or (fixed and not rx.search(text)):  # a literal on a line is in its text
             continue
         for n, line in enumerate(text.splitlines(), 1):
             if rx.search(line):
