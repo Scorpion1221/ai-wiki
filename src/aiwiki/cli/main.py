@@ -63,9 +63,11 @@ _SECONDS_MAX = 86400  # $AIWIKI_TIMEOUT / $AIWIKI_RETRY_S: a day; far more overf
 _RETRY_BASE_S = 0.5
 _RETRY_CAP_S = 4.0
 _RETRY_FLOOR_S = 3.0  # the slowest search answers in about 2 s
-# Verbs agents type from habit (cat/kubectl/git) and the command that does it here.
+# Verbs agents type from habit (cat/kubectl/git) and the command that does it here. The read verbs
+# run `cat` itself: agents pipe it through `2>/dev/null | grep`, which hides any hint.
+_CAT_ALIASES = ("show", "get", "read", "view")
 _COMMAND_HABITS = {
-    "show": "cat", "read": "cat", "get": "cat", "view": "cat", "open": "cat", "print": "cat",
+    "open": "cat", "print": "cat",
     "find": "search", "query": "search", "lookup": "search",
     "list": "ls", "tree": "ls -R",
     "rg": "grep",
@@ -193,6 +195,8 @@ def _command_path(args: list[str]) -> str:
             positionals.append(arg)
     if not positionals:
         return "ai-wiki"
+    if positionals[0] in _CAT_ALIASES:
+        positionals[0] = "cat"
     depth = 2 if positionals[0] in ("bundle", "config", "workspace", "concept", "admin", "maint", "review") \
         and len(positionals) > 1 else 1
     return "ai-wiki " + " ".join(positionals[:depth])
@@ -766,9 +770,11 @@ def main(argv=None) -> int:
     p_ls.add_argument("-a", "--all", action="store_true", help="include dotfiles (like ls -a)")
     p_ls.add_argument("--json", action="store_true", help="emit the complete entry array as JSON")
     p_cat = sub.add_parser(
-        "cat", help="print a concept; large files are previewed by default", command_path="ai-wiki cat",
+        "cat", aliases=_CAT_ALIASES, help="print a concept; large files are previewed by default",
+        command_path="ai-wiki cat",
         epilog=_examples("ai-wiki cat metrics/subscription-rate.md", "ai-wiki cat SCHEMA.md --full"), **common,
     )
+    p_cat.set_defaults(cmd="cat")  # an alias dispatches as `cat`
     p_cat.add_argument("path")
     p_cat.add_argument("--json", action="store_true",
                        help="emit content plus derived OKF metadata as JSON")
