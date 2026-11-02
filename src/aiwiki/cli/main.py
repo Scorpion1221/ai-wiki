@@ -24,14 +24,20 @@ import argparse
 import base64
 import http.client
 import json
+import math
 import os
+import posixpath
+import random
 import re
 import shutil
+import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Container, Sequence
 from pathlib import Path
 
 from aiwiki.cli.toon import emit, emit_error, object_lines, table_lines
@@ -46,14 +52,27 @@ _DESCRIPTION = "Read and maintain a curated OKF knowledge bundle over its servic
 _VERSION_FLAGS = {"-v", "-V", "--version"}
 _DEFAULT_CAT_CHARS = 8000
 _DEFAULT_GREP_LIMIT = 100
+_TOP_K_MAX = 1000  # the server's top_k limit (service app.py: le=1000)
+# A read (GET) is retried through a restarting server: these statuses (Cloudflare, in front of the
+# production server, answers 520-524, or 530 for a tunnel, while its origin restarts), a timeout, a TLS
+# read error, or a refused, reset or dropped connection, backing off from _RETRY_BASE_S (doubling,
+# jittered) up to _RETRY_CAP_S; a retry may run for what is left of the window, a last one at least
+# _RETRY_FLOOR_S.
+_RETRY_STATUSES = {502, 503, 504, 520, 521, 522, 523, 524, 530}
+_SECONDS_MAX = 86400  # $AIWIKI_TIMEOUT / $AIWIKI_RETRY_S: a day; far more overflows a socket timeout
+_RETRY_BASE_S = 0.5
+_RETRY_CAP_S = 4.0
+_RETRY_FLOOR_S = 3.0  # the slowest search answers in about 2 s
 # Verbs agents type from habit (cat/kubectl/git) and the command that does it here.
 _COMMAND_HABITS = {
     "show": "cat", "read": "cat", "get": "cat", "view": "cat", "open": "cat", "print": "cat",
     "find": "search", "query": "search", "lookup": "search",
     "list": "ls", "tree": "ls -R",
     "rg": "grep",
+    "help": "--help", "status": "health", "whoami": "config show",
 }
 _STATE_DIR = Path("~/.ai-wiki/state")  # expanded when used, so help and tests never pin a home
+_JSON_ERRORS = False  # set per command line: under --json an error is one JSON object, not TOON
 
 
 class _AxiParser(argparse.ArgumentParser):
@@ -65,13 +84,19 @@ class _AxiParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> None:
         commands = [f"{self.command_path} --help"]
-        # Agents reach for filesystem/kubectl verbs; name the command they meant.
         wrong = re.search(r"invalid choice: '([^']+)'", message)
-        if wrong and wrong.group(1) in _COMMAND_HABITS:
-            meant = _COMMAND_HABITS[wrong.group(1)]
-            message = f"{message}; `{wrong.group(1)}` is `ai-wiki {meant}` here"
-            commands = [f"ai-wiki {meant.split()[0]} --help", "ai-wiki --help"]
-        emit_error(
+        if wrong and self.prog == "ai-wiki":  # an unknown command has no help of its own
+            word, commands = wrong.group(1), ["ai-wiki --help"]
+            # Agents reach for filesystem/kubectl verbs; name the command they meant.
+            meant = _COMMAND_HABITS.get(word)
+            if meant:
+                message = f"{message}; `{word}` is `ai-wiki {meant}` here"
+                # A command that needs no argument is worth running; else read its help.
+                if meant in ("health", "config show"):
+                    commands.insert(0, f"ai-wiki {meant}")
+                elif meant != "--help":
+                    commands.insert(0, f"ai-wiki {meant.split()[0]} --help")
+        _error(
             message,
             kind="usage",
             usage=self.format_usage(),
@@ -80,9 +105,18 @@ class _AxiParser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
+def _error(message: str, *, kind: str, usage: str | None = None, commands: Sequence[str] = ()) -> None:
+    """The standard error on stdout: TOON, or under --json one object shaped like the other JSON errors."""
+    if _JSON_ERRORS:
+        print(json.dumps({"error": message, "kind": kind, **({"help": commands[0]} if commands else {})},
+                         ensure_ascii=False))
+    else:
+        emit_error(message, kind=kind, usage=usage, commands=commands)
+
+
 def _fail(message: str, *, help_command: str | None = None, code: int = 1) -> None:
-    emit_error(message, kind="usage" if code == 2 else "error",
-               commands=((help_command,) if help_command else ()))
+    _error(message, kind="usage" if code == 2 else "error",
+           commands=((help_command,) if help_command else ()))
     raise SystemExit(code)
 
 
@@ -104,6 +138,13 @@ def _positive(value: str) -> int:
     parsed = _limit(value)
     if parsed == 0:
         raise argparse.ArgumentTypeError("must be > 0")
+    return parsed
+
+
+def _top_k(value: str) -> int:
+    parsed = _positive(value)
+    if parsed > _TOP_K_MAX:
+        raise argparse.ArgumentTypeError(f"must be <= {_TOP_K_MAX}, the server's maximum")
     return parsed
 
 
@@ -193,16 +234,30 @@ def _save(cfg: dict) -> None:
 
 
 def _token(cfg: dict) -> str | None:
-    """$AIWIKI_TOKEN wins over the saved token."""
-    return os.environ.get("AIWIKI_TOKEN") or cfg.get("token")
+    """$AIWIKI_TOKEN wins over the saved token; surrounding whitespace (a CRLF line end) is not part of it."""
+    return str(os.environ.get("AIWIKI_TOKEN") or cfg.get("token") or "").strip() or None
 
 
-def _conn() -> tuple[str, str]:
+def _conn(*, network: bool = False) -> tuple[str, str]:
+    """The configured endpoint and token, else the CLI's error. With ``network`` (``_http``) an endpoint
+    that is no http(s) URL raises OSError instead, so doctor, admin, maint, review and workspace report
+    it in their own result, as they report an unreachable server."""
     cfg = _normalize(_load())
     token = _token(cfg)
     if not cfg.get("endpoint") or not token:
         _fail("not configured: endpoint and token (saved or $AIWIKI_TOKEN) are required",
               help_command=CONNECT_HINT)
+    if not token.isprintable():  # a header cannot carry it, and the error must not echo it
+        _fail("the token (saved or $AIWIKI_TOKEN) contains an unprintable character", help_command=CONNECT_HINT)
+    try:
+        scheme = urllib.parse.urlsplit(cfg["endpoint"]).scheme
+    except ValueError:
+        scheme = ""
+    if scheme.lower() not in ("http", "https"):
+        message = f"the endpoint {cfg['endpoint']!r} is not an http(s) URL"
+        if network:
+            raise OSError(message)
+        _fail(message, help_command=CONNECT_HINT)
     return cfg["endpoint"], token
 
 
@@ -212,14 +267,14 @@ def _active(override: str | None = None) -> str | None:
     return override or _normalize(_load()).get("bundle")
 
 
-def _api(route: str, *, bundle: str | None = None, **params) -> dict:
+def _api(route: str, *, bundle: str | None = None, raise_on: Container[int] = (), **params) -> dict:
     endpoint, token = _conn()
     if bundle is not None:
         params["bundle"] = bundle
     qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     url = f"{endpoint.rstrip('/')}{route}" + (f"?{qs}" if qs else "")
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": _UA})
-    return _send(req)
+    return _send(req, raise_on)
 
 
 def _post(route: str, payload: dict, *, bundle: str | None = None, method: str = "POST") -> dict:
@@ -241,10 +296,10 @@ def _http(method: str, route: str, *, bundle: str | None = None, params: dict | 
     """One request, answered as ``(status, headers, body)`` whatever its status.
 
     Only a network failure raises (``OSError``: ``URLError``, a timeout, a truncated or
-    garbled answer), so a caller can retry it; the returned headers are looked up
-    case-insensitively.
+    garbled answer, an endpoint that is no http(s) URL), so a caller can retry it; the
+    returned headers are looked up case-insensitively.
     """
-    endpoint, token = _conn()
+    endpoint, token = _conn(network=True)
     query = {k: v for k, v in {**(params or {}), "bundle": bundle}.items() if v is not None}
     url = f"{endpoint.rstrip('/')}{route}" + (f"?{urllib.parse.urlencode(query)}" if query else "")
     sent = {"Authorization": f"Bearer {token}", "User-Agent": _UA, **(headers or {})}
@@ -261,30 +316,146 @@ def _http(method: str, route: str, *, bundle: str | None = None, params: dict | 
         raise OSError(f"{type(exc).__name__}: {exc}") from exc
 
 
-def _send(req: urllib.request.Request) -> dict:
+class _Refused(Exception):
+    """An error answer whose status the caller asked to handle itself (``_api``'s ``raise_on``)."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+def _seconds(name: str, default: float, *, positive: bool = False) -> float:
+    """A duration in seconds from the environment, at most _SECONDS_MAX; a malformed one is a usage error naming it."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            body = r.read()
-            if not body:
-                return {}
-            try:
-                return json.loads(body)
-            except json.JSONDecodeError:
-                _fail("server returned an invalid response (expected JSON)")
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode(errors="replace")
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value < 0 or value > _SECONDS_MAX or (positive and value == 0):
+        _fail(f"${name} must be a number of seconds {'> 0' if positive else '>= 0'} and <= {_SECONDS_MAX}, "
+              f"not {raw!r}", code=2)
+    return value
+
+
+def _transient(exc: object) -> bool:
+    """A failure a restarting server or a lossy line causes: a read may try again.
+
+    urllib wraps a failure while connecting (the TLS handshake included) in ``URLError`` and leaves
+    one while reading the answer bare. Any TLS error reading the answer is a garbled or cut answer;
+    of the handshake's only a cut stream is one, a certificate or protocol fault is setup and fails.
+    """
+    if isinstance(exc, ssl.SSLError) and not isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(cause, http.client.InvalidURL):
+        return False
+    return isinstance(cause, (TimeoutError, ConnectionError, http.client.HTTPException, ssl.SSLEOFError,
+                              ssl.SSLZeroReturnError, ssl.SSLSyscallError))
+
+
+def _why(exc: object) -> str:
+    for kind, text in ((TimeoutError, "timed out"),
+                       (http.client.RemoteDisconnected, "the server closed the connection without answering"),
+                       (http.client.IncompleteRead, "the answer was cut short"),
+                       (ConnectionRefusedError, "connection refused"), (ConnectionResetError, "connection reset")):
+        if isinstance(exc, kind):
+            return text
+    return f"{type(exc).__name__}: {exc}" if isinstance(exc, BaseException) and str(exc) else str(exc)
+
+
+def _backoff(attempt: int, deadline: float, why: str) -> bool:
+    """Wait before trying a read again; False once its retry budget is spent."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return False
+    step = min(_RETRY_CAP_S, _RETRY_BASE_S * 2 ** (attempt - 1))
+    delay = min(left, step / 2 + random.uniform(0, step / 2))  # jittered, so clients do not retry in step
+    print(f"ai-wiki: {why}; retrying in {delay:.1f}s", file=sys.stderr)  # stdout stays the answer alone
+    time.sleep(delay)
+    return True
+
+
+def _rejection(status: int, raw: bytes) -> str:
+    """The message for an error answer, with the server's detail; a 422 names each field and its fault."""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, list):  # FastAPI validation: [{"loc": ["query", "top_k"], "msg": "…"}, …]
+        faults = []
+        for item in detail:
+            if isinstance(item, dict):
+                loc = item.get("loc")  # [where, field, …]; any other shape names no field
+                field = ".".join(str(part) for part in loc[1:]) if isinstance(loc, list) else ""
+                faults.append(f"{field or 'request'}: {item.get('msg')}")
+        detail = "; ".join(faults)
+    message = f"server rejected the request (status {status})"
+    if isinstance(detail, str) and detail.strip():
+        message += f": {detail.strip()}"
+    return message
+
+
+def _send(req: urllib.request.Request, raise_on: Container[int] = ()) -> dict:
+    """One API call: its JSON answer, else the CLI's error and exit 1, never a traceback.
+
+    A read (GET) rides out a restarting server: a 502/503/504 (or Cloudflare's 520-524/530), a timeout,
+    a TLS read error, or a refused, reset or dropped connection is tried again with jittered exponential backoff until
+    $AIWIKI_RETRY_S seconds after its first attempt began (default 20; 0 never retries). A write is
+    never sent twice: the server may have applied it. $AIWIKI_TIMEOUT bounds each attempt (default
+    30 s) and a retry gets only what is left of the window, a last one at least _RETRY_FLOOR_S, so a
+    read gives up within max($AIWIKI_TIMEOUT, $AIWIKI_RETRY_S + _RETRY_FLOOR_S) seconds (30 at the
+    defaults, as before retries) and a timed-out one is resent only when the timeout is the shorter.
+    An error answer whose status is in ``raise_on`` raises ``_Refused`` for the caller instead.
+    """
+    timeout = _seconds("AIWIKI_TIMEOUT", 30, positive=True)
+    read = req.get_method() == "GET"
+    deadline = time.monotonic() + (_seconds("AIWIKI_RETRY_S", 20) if read else 0)
+    attempt = 0
+
+    while True:
+        attempt += 1
+        tried = f" (after {attempt} attempts)" if attempt > 1 else ""
+        wait = timeout if attempt == 1 else min(timeout, max(deadline - time.monotonic(), _RETRY_FLOOR_S))
         try:
-            payload = json.loads(raw)
-            detail = payload.get("detail") if isinstance(payload, dict) else None
-        except json.JSONDecodeError:
-            detail = None
-        message = f"server rejected the request (status {e.code})"
-        if isinstance(detail, str) and detail.strip():
-            message += f": {detail.strip()}"
-        hint = "ai-wiki config show" if e.code == 401 else None
-        _fail(message, help_command=hint)
-    except urllib.error.URLError:
-        _fail("cannot reach the configured ai-wiki server", help_command="ai-wiki config show")
+            with urllib.request.urlopen(req, timeout=wait) as r:
+                body = r.read()
+            break
+        except urllib.error.HTTPError as e:
+            try:
+                raw = e.read()
+            except (OSError, http.client.HTTPException):
+                raw = b""
+            if read and e.code in _RETRY_STATUSES and _backoff(attempt, deadline, f"status {e.code}"):
+                continue
+            message = _rejection(e.code, raw) + tried
+            if not read and e.code in (502, 504, 520, 524):  # a gateway may have passed it on before it gave up
+                message += "; the write may have been applied, so check before sending it again"
+            if e.code in raise_on:
+                raise _Refused(e.code, message) from None
+            _fail(message, help_command="ai-wiki config show" if e.code == 401 else None)
+        except (OSError, http.client.HTTPException) as exc:
+            cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if read and _transient(exc) and _backoff(attempt, deadline, _why(cause)):
+                continue
+            if isinstance(cause, TimeoutError):
+                knob = "$AIWIKI_TIMEOUT" if wait == timeout else "$AIWIKI_RETRY_S"  # the window cut it short
+                message = f"the ai-wiki server did not answer within {round(wait, 1):g}s (timed out; {knob})"
+            else:
+                message = f"cannot reach the configured ai-wiki server: {_why(cause)}"
+            if not read and _transient(exc) and not isinstance(cause, ConnectionRefusedError):
+                message += "; the write may have been applied, so check before sending it again"
+            _fail(message + tried, help_command="ai-wiki config show")
+        except ValueError:  # a host or header urllib cannot encode; its text may quote the token, so not shown
+            _fail("cannot build a request from the configured endpoint and token", help_command="ai-wiki config show")
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except ValueError:
+        _fail("server returned an invalid response (expected JSON)")
 
 
 def _executable() -> str:
@@ -334,6 +505,86 @@ def _search_row(result: dict) -> dict:
         "context": " — ".join(value for value in (
             (result.get("description") or "")[:150], result.get("snippet") or "") if value),
     }
+
+
+def _bundle_path(value: str | None) -> str | None:
+    """A bundle-relative path as agents type it: a leading `/` or `./` names the bundle root."""
+    if value is None:
+        return None
+    value = value.removeprefix("/")
+    while value.startswith("./"):
+        value = value[2:]
+    return "" if value == "." else value
+
+
+def _require_dir(path: str, bundle: str | None) -> None:
+    """After an empty ls/grep of `path`: fail unless it is a directory (one listing of its parent)."""
+    parent, _sep, name = path.strip("/").rpartition("/")
+    items = _api("/ls", bundle=bundle, dir=parent or None, show_all="true").get("items") or []
+    kinds = {item.get("kind") for item in items if str(item.get("path", "")).rstrip("/").rpartition("/")[2] == name}
+    if "dir" not in kinds:
+        _fail(f"{path}: {'not a directory' if kinds else 'no such directory'} in this bundle",
+              help_command=f"ai-wiki ls {parent}" if parent and items else "ai-wiki ls")
+
+
+def _not_found(refused: _Refused, verb: str, path: str, bundle: str | None) -> None:
+    """A 404 from cat/links: the error, naming the concepts the path probably meant.
+
+    Candidates share its file name (``.md`` added when missing) in any directory; finding them
+    costs one recursive listing, only on this path, and a failed listing just suggests a search.
+    """
+    if "no such bundle" in str(refused):
+        _fail(str(refused), help_command="ai-wiki bundle list")
+    name = posixpath.basename(path.rstrip("/"))
+    name += "" if name.endswith(".md") else ".md"
+    try:
+        status, _headers, body = _http("GET", "/ls", bundle=bundle, params={"recursive": "true"},
+                                       timeout=_seconds("AIWIKI_TIMEOUT", 30, positive=True))
+        items = json.loads(body).get("items") if status == 200 else None
+    except (OSError, ValueError, AttributeError):
+        items = None
+    paths = [str(item.get("path")) for item in items or () if isinstance(item, dict)
+             and item.get("kind") in (("concept",) if verb == "links" else ("concept", "doc"))]
+    found = [candidate for candidate in paths
+             if posixpath.basename(candidate).lower() == name.lower() and candidate != path]
+    found = sorted(found, key=lambda candidate: candidate != f"{path}.md")[:5]  # the path plus .md first
+    commands = [f"ai-wiki {verb} {candidate}" for candidate in found]
+    if not found and any(candidate.startswith(path.rstrip("/") + "/") for candidate in paths):
+        commands = [f"ai-wiki ls {path.rstrip('/')}"]  # a directory
+    stem = name.removesuffix(".md").replace("-", " ").replace("_", " ")
+    _error(str(refused) + (f"; did you mean {', '.join(found)}?" if found else ""), kind="error",
+           commands=commands or [f"ai-wiki search {json.dumps(stem, ensure_ascii=False)}"])
+    raise SystemExit(1)
+
+
+def _fold_sources(content: str, path: str) -> str:
+    """A concept preview: its frontmatter's top-level ``sources:`` list becomes a one-line count.
+
+    The list can outweigh the whole preview budget. Lines are removed as written, never
+    re-serialized, so every other key stays verbatim; an unusual shape is left alone.
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        return content
+    close = next((i for i in range(1, len(lines)) if lines[i].rstrip("\r\n") == "---"), None)
+    start = next((i for i in range(1, close or 0) if re.fullmatch(r"sources:[ \t]*", lines[i].rstrip("\r\n"))),
+                 None)
+    if start is None:
+        return content
+    end = start + 1  # the block runs to the next top-level line; a comment, even at column 0, is not one
+    while end < close and (not lines[end].strip() or lines[end][:1] in " \t-#"):
+        end += 1
+    while not lines[end - 1].strip() or lines[end - 1].startswith("#"):  # those after it stay with the next key
+        end -= 1
+    block = [line for line in lines[start + 1:end] if line.strip() and not line.lstrip().startswith("#")]
+    first = re.match(r"( *)-(?:[ \t]|$)", block[0]) if block else None
+    if first is None:  # a flow list or a scalar: not the shape this folds
+        return content
+    item = re.compile(f"{first.group(1)}-(?:[ \t]|$)")
+    count = sum(1 for line in block if item.match(line))
+    folded = (f"sources: <{count} {'entry' if count == 1 else 'entries'}; "
+              f"run `ai-wiki cat {path} --full` to see them>\n")
+    return "".join(lines[:start]) + folded + "".join(lines[end:])
 
 
 def _count_lines(shown: int, total: int | None = None) -> list[str]:
@@ -416,7 +667,10 @@ def _home() -> int:
 
 
 def main(argv=None) -> int:
+    global _JSON_ERRORS
     args = list(sys.argv[1:] if argv is None else argv)
+    # argparse takes any unambiguous prefix of an option, and no other option starts with --j.
+    _JSON_ERRORS = any(len(arg) > 2 and "--json".startswith(arg) for arg in args)
     if len(args) == 1 and args[0] in _VERSION_FLAGS:
         print(VERSION)
         return 0
@@ -525,15 +779,21 @@ def main(argv=None) -> int:
     p_grep = sub.add_parser(
         "grep", help="regex search across concepts", command_path="ai-wiki grep",
         epilog=_examples("ai-wiki grep \"subscription.*rate\"", "ai-wiki grep \"metrics/x.md\" --fixed",
-                         "ai-wiki grep -i gotenberg   # always case-insensitive; -i is accepted"),
+                         "ai-wiki grep gotenberg features",
+                         "ai-wiki grep -rni gotenberg   # always recursive, numbered, case-insensitive"),
         **common,
     )
     p_grep.add_argument("pattern")
-    p_grep.add_argument("dir", nargs="?")
+    p_grep.add_argument("dir", nargs="?", help="only concepts under this directory (default: all)")
     p_grep.add_argument("-F", "--fixed", action="store_true", help="literal search (escape regex metacharacters)")
-    # grep habit: matching is always case-insensitive, so -i is accepted and changes nothing.
+    # grep habits: matching is always case-insensitive, recursive and line-numbered, so -i, -r
+    # and -n are accepted and change nothing.
     p_grep.add_argument("-i", "--ignore-case", action="store_true",
                         help="accepted for grep habit; matching is always case-insensitive")
+    p_grep.add_argument("-r", "--recursive", action="store_true",
+                        help="accepted for grep habit; every concept below the directory is searched")
+    p_grep.add_argument("-n", "--line-number", action="store_true",
+                        help="accepted for grep habit; every hit carries its line number")
     p_grep.add_argument("--limit", type=_limit, default=_DEFAULT_GREP_LIMIT,
                         help=f"maximum hits to print; 0 means all (default: {_DEFAULT_GREP_LIMIT})")
     p_grep.add_argument("--json", action="store_true", help="emit hits and truncation counts as JSON")
@@ -543,7 +803,10 @@ def main(argv=None) -> int:
         **common,
     )
     p_search.add_argument("query")
-    p_search.add_argument("--top-k", type=_positive, default=10, help="maximum results (default: 10)")
+    p_search.add_argument("--top-k", type=_top_k, default=10,
+                          help=f"maximum results, at most {_TOP_K_MAX} (default: 10; --limit N is the same)")
+    # head/SQL habit: --limit N is --top-k N.
+    p_search.add_argument("--limit", dest="top_k", type=_top_k, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_search.add_argument("--json", action="store_true", help="emit results and truncation counts as JSON")
     p_links = sub.add_parser(
         "links", help="link graph of a concept: outbound + inbound (backlinks)", command_path="ai-wiki links",
@@ -844,9 +1107,12 @@ def main(argv=None) -> int:
                             ("name", "count")),
             )
     elif a.cmd == "ls":
-        d = _api("/ls", bundle=bsel, dir=a.dir,
+        directory = _bundle_path(a.dir)
+        d = _api("/ls", bundle=bsel, dir=directory or None,
                  recursive=("true" if a.recursive else None), show_all=("true" if a.all else None))
         items = d.get("items") or []
+        if not items and directory:  # the server lists a missing directory as empty
+            _require_dir(directory, bsel)
         if a.json:
             print(json.dumps(items, ensure_ascii=False, indent=2))
         else:
@@ -885,7 +1151,11 @@ def main(argv=None) -> int:
                 ))
             emit(*groups)
     elif a.cmd == "cat":
-        document = _api("/cat", bundle=bsel, path=a.path)
+        path = _bundle_path(a.path) or a.path
+        try:
+            document = _api("/cat", bundle=bsel, path=path, raise_on=(404,))
+        except _Refused as refused:
+            _not_found(refused, "cat", path, bsel)
         content = document["content"]
         if a.json:
             print(json.dumps(document, ensure_ascii=False, indent=2))
@@ -893,13 +1163,18 @@ def main(argv=None) -> int:
         if a.full or len(content) <= a.max_chars:
             print(content, end="")
         else:
-            preview = content[:a.max_chars]
+            # A concept's sources list would eat the budget; the preview counts it instead.
+            shown = _fold_sources(content, path) if document.get("metadata") is not None else content
+            preview = shown[:a.max_chars]
             print(preview, end="" if preview.endswith("\n") else "\n")
             print(f"\n<!-- ai-wiki: truncated at {a.max_chars} of {len(content)} chars; "
-                  f"run `ai-wiki cat {a.path} --full` -->")
+                  f"run `ai-wiki cat {path} --full` -->")
     elif a.cmd == "grep":
-        hits = _api("/grep", bundle=bsel, q=a.pattern, dir=a.dir,
+        directory = _bundle_path(a.dir)
+        hits = _api("/grep", bundle=bsel, q=a.pattern, dir=directory or None,
                     fixed=("true" if a.fixed else None)).get("hits") or []
+        if not hits and directory:  # the server greps a missing directory as empty
+            _require_dir(directory, bsel)
         shown = hits if a.limit == 0 else hits[:a.limit]
         if a.json:
             print(json.dumps({
@@ -938,13 +1213,19 @@ def main(argv=None) -> int:
                            "coverage", "fields", "terms", "context"),
                       )]
             if isinstance(total, int) and len(results) < total:
+                top = min(total, _TOP_K_MAX)
                 groups.append(table_lines("help", ({
-                    "command": f'ai-wiki search {json.dumps(a.query, ensure_ascii=False)} --top-k {total}',
-                    "purpose": f"show all {total} matches",
+                    "command": f'ai-wiki search {json.dumps(a.query, ensure_ascii=False)} --top-k {top}',
+                    "purpose": f"show all {total} matches" if top == total
+                    else f"show the top {top} of {total} matches",
                 },), ("command", "purpose")))
             emit(*groups)
     elif a.cmd == "links":
-        d = _api("/links", bundle=bsel, path=a.path)
+        path = _bundle_path(a.path) or a.path
+        try:
+            d = _api("/links", bundle=bsel, path=path, raise_on=(404,))
+        except _Refused as refused:
+            _not_found(refused, "links", path, bsel)
         if a.json:
             print(json.dumps(d, ensure_ascii=False, indent=2))
         else:

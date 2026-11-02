@@ -43,6 +43,9 @@ it. These are credibility signals, not a stored credibility score.
 Omit either field when the source does not provide it. Quote free-form YAML scalars that
 contain punctuation and prefer block-style lists for aliases containing prose.
 
+`aliases` (a list of strings) is a search extension: other names not already in the title or
+tags. Every new or changed concept carries one in the title's other language (SKILL.md, Signals).
+
 ## Optional trust and freshness
 
 ```yaml

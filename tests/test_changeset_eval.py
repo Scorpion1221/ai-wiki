@@ -482,6 +482,8 @@ def _new(bundle: Path, content: str, rel: str = "risks/new.md") -> dict:
     [
         (_new_concept().replace("description: New risk\n", ""), "missing_key"),
         (_new_concept().replace("tags: [web, payment]", "tags: web"), "invalid_value"),
+        (_new_concept().replace("type: Risk", "type: [Metric]"), "invalid_value"),
+        (_new_concept().replace("type: Risk", "type: {a: b}"), "invalid_value"),
         (_new_concept(extra="last_verified_at: 2026-09-01T00:00:00Z\n"), "legacy_key"),
         (_new_concept().replace("resource: evidence:packet", "resource: evidence:S1"), "unknown_evidence_ref"),
         (_new_concept().replace(f"id: {EVIDENCE_ID}", "id: other"), "unknown_evidence_ref"),

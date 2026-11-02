@@ -395,8 +395,8 @@ def search(q: str = Query(...), top_k: int = Query(10, gt=0, le=1000), bundle: s
     _enabled("search")
     with _read_window():
         _name, BUNDLE = _resolve(bundle, principal)
-        results = B.search(BUNDLE, q, None)
-        return {"results": results[:top_k], "total": len(results)}
+        results, total = B.search_page(BUNDLE, q, top_k)
+        return {"results": results, "total": total}
 
 
 @app.get("/links")

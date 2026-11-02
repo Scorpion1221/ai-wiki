@@ -50,8 +50,10 @@ and non-empty structured `sources`.
   Trust follows all verification history. When no event is at or after `generated.at` (for
   the generator's own process event, 12 h after it), `verification_current` is false and the
   current revision is unconfirmed.
-- `stale_after`: optional absolute `YYYY-MM-DD`; stale is not a status. Absent: stale 90 days
-  after `generated.at`, never fresh by default.
+- `stale_after`: absolute `YYYY-MM-DD`; stale is not a status. Absent: stale 90 days after
+  `generated.at`, never fresh by default. Required on Metric, Experiment, Monetization and
+  Monetization Strategy concepts and dated readings whose evidence gives a date (curator's rule).
+- `aliases`: other names not in the title or tags; at least one in the title's other language.
 - Extensions such as `confidence`, `contested`, `contradictions`, and `source_sha256` are allowed.
 
 Forbidden v0.1 forms: `timestamp`, `last_verified_at`, string sources,
@@ -68,7 +70,8 @@ conflicts reciprocally with `contested` and `contradictions`.
 - New concepts are transiently `draft` and unverified until the independent audit.
 - A completed audit leaves every retained concept `stable` or `deprecated`. Fully supported
   current revisions receive `verified`; bounded uncertainty remains stable but unverified.
-- Newer evidence may supersede older facts; preserve history with `deprecated` when useful.
+- Newer evidence may supersede older facts; a concept the evidence retires or supersedes is
+  `deprecated`, and every description states the body's latest state with its date.
 - Update `generated` on meaningful edits, but never imply verification.
 - For payments/revenue/renewal/LTV, experiment winners, and live/released claims, require
   direct evidence, non-stale freshness, and a real audit verification before stable use.
