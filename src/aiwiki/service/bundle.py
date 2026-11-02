@@ -5,6 +5,7 @@ is sandboxed to the bundle root (safe-path gate).
 """
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -505,7 +506,7 @@ def _concept_entry(rel: str, fm: dict) -> dict:
     return {
         "kind": "concept", "path": rel,
         "title": fm.get("title"), "type": fm.get("type"),
-        "tags": fm.get("tags") or [], "description": fm.get("description"),
+        "tags": list(fm.get("tags") or []), "description": fm.get("description"),
         **concept_metadata(fm),
     }
 
@@ -524,7 +525,7 @@ def _entry(root: Path, p: Path, listing: _Listing) -> dict:
     """Annotated listing entry for any path — dir / structural doc / concept / file."""
     rel = p.relative_to(root).as_posix()
     if p.is_dir():
-        desc = listing.descriptions.get(rel)
+        desc = copy.deepcopy(listing.descriptions.get(rel))  # any YAML value, and the snapshot's own
         if not desc and p.name == "sources":
             desc = "raw source snapshots (provenance)"
         return {"kind": "dir", "path": rel + "/", "name": p.name,
@@ -817,7 +818,7 @@ def search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[di
     scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
     rows = [{
         "path": rel, "title": fm.get("title"), "type": fm.get("type"),
-        "tags": fm.get("tags") or [], "score": score,
+        "tags": list(fm.get("tags") or []), "score": score,
         "match": match,
         "description": fm.get("description"),
         "snippet": _snippet(body, phrase, terms),

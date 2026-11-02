@@ -484,6 +484,23 @@ def test_ls_recursive_leaves_out_a_file_no_stat_reaches(tmp_path: Path, settled)
         locked.chmod(0o755)
 
 
+def test_a_caller_changing_a_returned_row_never_changes_the_next_read(tmp_path: Path, settled) -> None:
+    _concept(tmp_path, "one")
+    (tmp_path / "index-meta.yaml").write_text("directories:\n  topics: [concepts]\n", encoding="utf-8")
+
+    def concept_row() -> dict:
+        return next(item for item in B.list_dir(tmp_path, "topics") if item["kind"] == "concept")
+
+    def topics_row() -> dict:
+        return next(item for item in B.list_dir(tmp_path) if item["path"] == "topics/")
+
+    B.search(tmp_path, "needle")[0]["tags"].append("caller")
+    concept_row()["tags"].append("caller")
+    topics_row()["description"].append("caller")
+    assert B.search(tmp_path, "needle")[0]["tags"] == concept_row()["tags"] == ["test"]
+    assert topics_row()["description"] == ["concepts"]
+
+
 def test_grep_follows_an_edit(tmp_path: Path, settled) -> None:
     _concept(tmp_path, "one")
     _concept(tmp_path, "two")
