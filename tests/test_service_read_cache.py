@@ -140,6 +140,34 @@ def test_private_paths_never_appear_and_never_invalidate(tmp_path: Path, settled
     assert B.grep(tmp_path, SENTINEL) == [] and B.search(tmp_path, SENTINEL) == []
 
 
+@pytest.mark.parametrize("area", [".hidden", "area/sources"])
+def test_an_edit_under_a_hidden_or_nested_sources_directory_is_seen(tmp_path: Path, settled, area: str) -> None:
+    """Only a top-level ``sources`` is never a concept: a hidden directory and a ``sources`` deeper down hold
+    concepts search and grep serve, so the fingerprint watches them."""
+    (tmp_path / area).mkdir(parents=True)
+    _concept(tmp_path / area, "one")
+    _concept(tmp_path, "two")
+    rel = f"{area}/topics/one.md"
+    assert sorted(hit["path"] for hit in B.search(tmp_path, "needle", top_k=None)) == sorted([rel, "topics/two.md"])
+
+    _rewrite(tmp_path / rel, "needle", "zzqq")
+    assert [hit["path"] for hit in B.search(tmp_path, "zzqq")] == [rel]
+    assert [hit["path"] for hit in B.grep(tmp_path, "zzqq")] == [rel]
+
+
+def test_an_index_meta_edit_is_seen_by_ls(tmp_path: Path, settled) -> None:
+    _concept(tmp_path, "one")
+    meta = tmp_path / "index-meta.yaml"
+    meta.write_text("directories:\n  topics: before\n", encoding="utf-8")
+
+    def description() -> str:
+        return next(item["description"] for item in B.list_dir(tmp_path) if item["path"] == "topics/")
+
+    assert description() == "before"
+    meta.write_text("directories:\n  topics: after the edit\n", encoding="utf-8")
+    assert description() == "after the edit"
+
+
 def test_a_writer_mutation_drops_the_snapshot(tmp_path: Path, settled, monkeypatch) -> None:
     """Even a change no file stat shows is read once the mutation that made it ends."""
     _concept(tmp_path, "one")
@@ -210,6 +238,41 @@ def test_concurrent_readers_during_a_rebuild_all_get_the_whole_bundle(tmp_path: 
     assert scans == [tmp_path]  # one rebuild, the other seven waited for it
 
 
+def test_readers_queued_behind_a_racy_rescan_share_it(tmp_path: Path, monkeypatch) -> None:
+    """Right after a change no scan is reusable on its stats alone, so readers that arrived before a scan
+    began wait for it and take its result instead of each rescanning in turn."""
+    for n in range(10):
+        _concept(tmp_path, f"c{n}")
+    newest = max(path.stat().st_ctime_ns for path in (tmp_path / "topics").iterdir())
+    arrivals = threading.Semaphore(0)
+
+    def monotonic_ns() -> int:
+        arrivals.release()
+        return time.monotonic_ns()
+
+    monkeypatch.setattr(B, "time", SimpleNamespace(time_ns=lambda: newest + 1_000_000, monotonic_ns=monotonic_ns))
+    scans = []
+    real_scan = B._scan
+    lock = B._snapshot_locks.setdefault(tmp_path, threading.Lock())
+
+    def counted_scan(root, *args):
+        scans.append(root)
+        return real_scan(root, *args)
+
+    monkeypatch.setattr(B, "_scan", counted_scan)
+    seen: list[list[str]] = []
+    with lock:  # a scan in progress: every reader below arrives before the next one begins
+        threads = [threading.Thread(target=lambda: seen.append(_paths(tmp_path))) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        assert all(arrivals.acquire(timeout=60) for _ in threads)
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert seen == [[f"topics/c{n}.md" for n in range(10)]] * 6
+    assert scans == [tmp_path]
+
+
 def test_search_counts_every_match_but_snippets_only_the_rows_it_returns(tmp_path: Path, settled, monkeypatch) -> None:
     for n in range(5):
         _concept(tmp_path, f"c{n}", mentions=n + 1)
@@ -230,8 +293,10 @@ def test_search_counts_every_match_but_snippets_only_the_rows_it_returns(tmp_pat
 
     from test_smoke import AUTH, _client
 
+    snippets.clear()
     response = _client(tmp_path, monkeypatch).get("/search", params={"q": "needle", "top_k": 2}, headers=AUTH).json()
     assert response == {"results": everything[:2], "total": 5}
+    assert len(snippets) == 2
 
 
 def test_search_after_an_edit_returns_the_edited_result(tmp_path: Path, settled) -> None:
@@ -284,6 +349,26 @@ def test_links_follow_a_link_edit_in_both_directions(tmp_path: Path, settled) ->
     assert _graph(tmp_path, "topics/three.md") == ([], ["topics/one.md", "topics/two.md"])
     one.unlink()
     assert _graph(tmp_path, "topics/three.md") == ([], ["topics/two.md"])
+
+
+def test_lexical_links_are_resolved_once_per_snapshot(tmp_path: Path, settled, monkeypatch) -> None:
+    for name in ("one", "two", "three"):
+        _concept(tmp_path, name)
+    _rewrite(tmp_path / "topics" / "one.md", "needle", "[Two](two.md) [Three](/topics/three.md)")
+    resolved = []
+    real_outbound = B._outbound
+
+    def counted_outbound(root, body, rel, ids):
+        resolved.append(rel)
+        return real_outbound(root, body, rel, ids)
+
+    monkeypatch.setattr(B, "_outbound", counted_outbound)
+    assert _graph(tmp_path, "topics/two.md") == ([], ["topics/one.md"])
+    assert sorted(resolved) == ["topics/one.md", "topics/three.md", "topics/two.md"]
+    resolved.clear()
+    assert _graph(tmp_path, "topics/one.md") == (["topics/two.md", "topics/three.md"], [])
+    assert _graph(tmp_path, "topics/three.md") == ([], ["topics/one.md"])
+    assert resolved == []
 
 
 def test_a_link_that_is_not_lexical_is_resolved_per_request(tmp_path: Path, settled) -> None:
