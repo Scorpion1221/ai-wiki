@@ -304,3 +304,47 @@ def test_a_link_that_is_not_lexical_is_resolved_per_request(tmp_path: Path, sett
     assert _graph(tmp_path, "topics/one.md") == (["x/topics/two.md"], [])
     assert _graph(tmp_path, "x/topics/two.md") == ([], ["topics/one.md"])
     assert _graph(tmp_path, "topics/two.md") == ([], [])
+
+
+def test_ls_counts_and_kinds_follow_added_and_removed_concepts(tmp_path: Path, settled) -> None:
+    _concept(tmp_path, "one")
+    _concept(tmp_path / "topics", "deep")
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "sources" / "a.md.source").write_text("raw", encoding="utf-8")
+
+    def counts() -> dict:
+        return {item["path"]: item["concepts"] for item in B.list_dir(tmp_path) if item["kind"] == "dir"}
+
+    assert counts() == {"sources/": 0, "topics/": 2}
+    assert {item["path"]: item["concepts"] for item in B.list_dir(tmp_path, "topics") if item["kind"] == "dir"} == {
+        "topics/topics/": 1}
+    assert B.count_concepts(tmp_path) == 2
+
+    _concept(tmp_path, "two")
+    broken = tmp_path / "topics" / "broken.md"
+    broken.write_text("---\ntype: [unterminated\n---\nneedle\n", encoding="utf-8")
+    assert counts() == {"sources/": 0, "topics/": 3}
+    kinds = {item["path"]: item["kind"] for item in B.list_dir(tmp_path, recursive=True)}
+    assert kinds == {
+        "index.md": "doc", "sources/a.md.source": "file", "topics/broken.md": "invalid",
+        "topics/one.md": "concept", "topics/topics/deep.md": "concept", "topics/two.md": "concept",
+        "topics/index.md": "doc",
+    }
+    assert B.list_dir(tmp_path, "topics/broken.md")[0]["description"] == "invalid strict OKF v0.2 concept"
+    assert B.metadata_for_path(tmp_path, broken) is None
+
+    (tmp_path / "topics" / "one.md").unlink()
+    _rewrite(tmp_path / "topics" / "two.md", "status: stable", "status: draft")
+    assert counts() == {"sources/": 0, "topics/": 2}
+    assert B.count_concepts(tmp_path) == 2
+    assert "topics/one.md" not in {item["path"] for item in B.list_dir(tmp_path, recursive=True)}
+    assert B.metadata_for_path(tmp_path, tmp_path / "topics" / "two.md")["status"] == "draft"
+    assert {item["path"]: item["status"] for item in B.list_dir(tmp_path, "topics") if item["kind"] == "concept"} == {
+        "topics/two.md": "draft"}
+
+    broken.write_text(broken.read_text(encoding="utf-8").replace("[unterminated", "Reference"), encoding="utf-8")
+    assert B.list_dir(tmp_path, "topics/broken.md")[0]["kind"] == "invalid"  # still not a valid concept
+    (tmp_path / "topics" / "topics").rename(tmp_path / "topics" / ".hidden")
+    assert counts() == {"sources/": 0, "topics/": 2}  # a hidden directory's concepts still count
+    assert "topics/.hidden/deep.md" not in {item["path"] for item in B.list_dir(tmp_path, recursive=True)}
+    assert "topics/.hidden/deep.md" in {item["path"] for item in B.list_dir(tmp_path, recursive=True, show_all=True)}

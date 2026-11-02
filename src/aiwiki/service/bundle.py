@@ -263,7 +263,7 @@ def discover(root: Path) -> dict[str, Path]:
 
 
 def count_concepts(root: Path) -> int:
-    return sum(1 for _ in concepts(root))
+    return len(_snapshot(root).records)
 
 
 def scaffold(target: Path, name: str) -> None:
@@ -468,6 +468,31 @@ def _dir_descriptions(root: Path) -> dict:
     return dirs if isinstance(dirs, dict) else {}
 
 
+class _Listing:
+    """What ``ls`` and ``cat`` read from one snapshot: each concept's frontmatter by path, each
+    directory's concept count and index-meta.yaml's directory descriptions (the fingerprint
+    covers that file). A path the snapshot does not hold as a concept, such as an invalid file or
+    another spelling of a path on a case-insensitive filesystem, is still checked on the file."""
+
+    def __init__(self, snapshot: _Snapshot) -> None:
+        self.root = snapshot.root
+        self.bundle_v02 = snapshot.okf_version == OKF_VERSION
+        self.descriptions = _dir_descriptions(snapshot.root)
+        self.concepts = {rel: (fm, body, text) for _path, rel, fm, body, text in snapshot.records}
+        self.counts: Counter = Counter()  # concepts at any depth under each directory
+        for rel in self.concepts:
+            parts = rel.split("/")
+            self.counts.update("/".join(parts[:i]) for i in range(1, len(parts)))
+
+    def document(self, p: Path, rel: str) -> tuple[dict, str, str] | None:
+        """``_profile_document(root, p)`` for the path ``root / rel``."""
+        return self.concepts.get(rel) or _profile_document(self.root, p)
+
+    def count(self, p: Path, rel: str) -> int:
+        """``_count_concepts`` for the directory ``root / rel``."""
+        return self.counts.get(rel) or _count_concepts(self.root, p, bundle_v02=self.bundle_v02)
+
+
 def _concept_entry(rel: str, fm: dict) -> dict:
     return {
         "kind": "concept", "path": rel,
@@ -479,34 +504,70 @@ def _concept_entry(rel: str, fm: dict) -> dict:
 
 def metadata_for_path(root: Path, path: Path) -> dict | None:
     """Derived metadata for one valid concept, or ``None`` when it is not consumable."""
-    if not _bundle_is_v02(root):
+    listing = _derived(_snapshot(root), _Listing)
+    if not listing.bundle_v02:
         return None
-    document = _profile_document(root, path)
+    rel = _candidate_rel(root, path)
+    document = listing.document(path, rel) if rel is not None else None
     return concept_metadata(document[0]) if document is not None else None
 
 
-def _entry(root: Path, p: Path, descriptions: dict, *, bundle_v02: bool | None = None) -> dict:
+def _entry(root: Path, p: Path, listing: _Listing) -> dict:
     """Annotated listing entry for any path — dir / structural doc / concept / file."""
     rel = p.relative_to(root).as_posix()
-    if bundle_v02 is None:
-        bundle_v02 = _bundle_is_v02(root)
     if p.is_dir():
-        desc = descriptions.get(rel)
+        desc = listing.descriptions.get(rel)
         if not desc and p.name == "sources":
             desc = "raw source snapshots (provenance)"
         return {"kind": "dir", "path": rel + "/", "name": p.name,
-                "concepts": _count_concepts(root, p, bundle_v02=bundle_v02), "description": desc}
+                "concepts": listing.count(p, rel), "description": desc}
     if p.suffix == ".md" and p.name in RESERVED:
         return {"kind": "doc", "path": rel, "name": p.name,
                 "description": _DOC_LABELS.get(p.name) or "rotated change log"}
     if p.suffix == ".md":
-        document = _profile_document(root, p) if bundle_v02 else None
+        document = listing.document(p, rel) if listing.bundle_v02 else None
         if document is None:
-            reason = "invalid strict OKF v0.2 concept" if bundle_v02 else "bundle is not OKF v0.2"
+            reason = "invalid strict OKF v0.2 concept" if listing.bundle_v02 else "bundle is not OKF v0.2"
             return {"kind": "invalid", "path": rel, "name": p.name, "description": reason}
         fm, _body, _text = document
         return _concept_entry(rel, fm)
     return {"kind": "file", "path": rel, "name": p.name, "bytes": p.stat().st_size}
+
+
+def _visible_files(root: Path, base: Path, show_all: bool) -> list[Path]:
+    """The files ``list_dir`` shows of ``sorted(base.rglob("*"))``: regular files reached without
+    a symlink (rglob never descends one, and a link is never shown), outside private and, unless
+    ``show_all``, hidden paths. Both rules hold for everything under a directory they refuse, so
+    the walk skips such a tree instead of checking each file in it."""
+    def refused(parts: tuple[str, ...]) -> bool:
+        return _private(parts) or (not show_all and any(part.startswith(".") for part in parts))
+
+    if os.path.islink(root):
+        return []
+    base_parts = base.relative_to(root).parts
+    if refused(base_parts):
+        return []
+    found = []
+    pending = [()]
+    while pending:
+        sub = pending.pop()
+        try:
+            with os.scandir(base.joinpath(*sub)) as listing:
+                children = list(listing)
+        except OSError:
+            continue
+        for child in children:
+            parts = (*sub, child.name)
+            try:
+                if child.is_symlink() or refused(base_parts + parts):
+                    continue
+                if child.is_dir(follow_symlinks=False):
+                    pending.append(parts)
+                elif child.is_file(follow_symlinks=False):
+                    found.append(parts)
+            except OSError:
+                continue
+    return [base.joinpath(*parts) for parts in sorted(found)]
 
 
 def list_dir(root: Path, subdir: str | None = None, recursive: bool = False,
@@ -524,39 +585,31 @@ def list_dir(root: Path, subdir: str | None = None, recursive: bool = False,
     if subdir and Path(subdir).is_absolute():
         raise ValueError("absolute paths are not bundle-relative")
     base = root if not subdir else safe_resolve(root, subdir)
-    bundle_v02 = _bundle_is_v02(root)
-    descriptions = _dir_descriptions(root)
+    listing = _derived(_snapshot(root), _Listing)
     if base.is_file():
-        return [_entry(root, base, descriptions, bundle_v02=bundle_v02)]
+        return [_entry(root, base, listing)]
     if not base.is_dir():
         return []
 
-    def hidden(rel_parts) -> bool:
-        return any(part.startswith(".") for part in rel_parts) and not show_all
+    if recursive:
+        return [_entry(root, p, listing) for p in _visible_files(root, base, show_all)]
 
-    def visible_safe(path: Path, parts) -> bool:
-        if _private(path.relative_to(root).parts):
-            return False
-        if hidden(parts):
-            return False
-        if has_symlink_component(root, path):
-            return False
+    def inside(path: Path) -> bool:
         try:
             path.resolve().relative_to(root.resolve())
         except (OSError, ValueError):
             return False
         return True
 
-    if recursive:
-        return [
-            _entry(root, p, descriptions, bundle_v02=bundle_v02)
-            for p in sorted(base.rglob("*"))
-            if p.is_file() and visible_safe(p, p.relative_to(root).parts)
-        ]
+    # A child is one name below ``base``: it traverses a symlink or resolves outside the root
+    # only where ``base`` does, or when it is a symlink itself.
+    base_safe = not has_symlink_component(root, base) and inside(base)
     return [
-        _entry(root, p, descriptions, bundle_v02=bundle_v02)
+        _entry(root, p, listing)
         for p in sorted(base.iterdir())
-        if visible_safe(p, (p.name,))
+        if not _private(p.relative_to(root).parts)
+        and (show_all or not p.name.startswith("."))
+        and base_safe and not p.is_symlink()
     ]
 
 
