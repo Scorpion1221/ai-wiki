@@ -5,11 +5,18 @@ is sandboxed to the bundle root (safe-path gate).
 """
 from __future__ import annotations
 
+import copy
 import math
+import os
 import re
+import stat
 import subprocess
+import threading
+import time
 import unicodedata
-from collections import Counter
+from array import array
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -85,17 +92,148 @@ def _profile_document(root: Path, path: Path) -> tuple[dict, str, str] | None:
     return frontmatter, body, text
 
 
+@dataclass(frozen=True)
+class _Snapshot:
+    """One bundle's valid concepts as of ``fingerprint``, shared read-only by every request.
+
+    It keeps only what the files say: metadata that depends on today's date (freshness) is
+    derived per request. Callers must not mutate the frontmatter they are handed.
+    """
+    root: Path
+    fingerprint: tuple
+    okf_version: str
+    records: tuple[tuple[Path, str, dict, str, str], ...]
+    began: int  # time.monotonic_ns() before the fingerprint was taken
+    settled: bool  # no file changed within _RACY_NS of the scan: reusable while the stats hold
+    derived: dict = field(default_factory=dict, compare=False, repr=False)  # see _derived
+    lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
+
+
+_snapshots: dict[Path, _Snapshot] = {}  # one per bundle path: its latest scan
+_snapshot_locks: dict[Path, threading.Lock] = {}
+_snapshot_guard = threading.Lock()
+_generation = 0  # bumped by drop_snapshots: a scan begun before that is never kept
+# A file changed this close to a scan may change again within the same timestamp tick, with an
+# identical stat (Git's "racy" files). Kernel clocks, and the timestamps of most filesystems, tick
+# every 1-10 ms; HFS+ and ext3 keep whole seconds and FAT two, so a whole-second ctime waits those out.
+_RACY_NS = 100_000_000
+_COARSE_TICK_NS = 2_000_000_000
+
+
+def _settled(ctime_ns: int, now: int) -> bool:
+    """Whether no later change to a file with this ctime can leave it as it is."""
+    tick = _COARSE_TICK_NS if ctime_ns % 1_000_000_000 == 0 else 0
+    return ctime_ns < now - _RACY_NS - tick
+
+
+def _fingerprint(root: Path) -> tuple:
+    """Stat signature of everything a scan depends on, taken without reading a file.
+
+    The walk goes where ``root.rglob`` goes (never through a symlink) and records each ``*.md``
+    file, each symlink and ``index-meta.yaml`` by inode, size, mtime and ctime, so an edit (even
+    one that restores the mtime), an addition, a removal, a rename and a file or directory
+    swapped for a link all change it. It skips only the trees ``_candidate_rel`` refuses by
+    path alone (``.git`` anywhere, top-level ``sources`` and ``.okf``): nothing there is ever a
+    concept, and a mirror's Git metadata grows with every pull.
+    """
+    base = os.fspath(root)
+    try:
+        top = os.lstat(base)
+    except OSError:
+        return None, ()
+    entries = []
+    pending = [""]
+    while pending:
+        rel_dir = pending.pop()
+        try:
+            with os.scandir(os.path.join(base, rel_dir)) as listing:
+                children = list(listing)
+        except OSError:
+            continue
+        for child in children:
+            rel = f"{rel_dir}/{child.name}" if rel_dir else child.name
+            try:
+                link = child.is_symlink()
+                if not link and child.is_dir(follow_symlinks=False):
+                    if child.name.lower() not in PRIVATE_COMPONENTS and (rel_dir or child.name not in SKIP_TOP):
+                        pending.append(rel)
+                    continue
+                if not (link or child.name.endswith(".md") or rel == "index-meta.yaml"):
+                    continue
+                st = child.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            entries.append((rel, link, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+    entries.sort()
+    return (stat.S_ISLNK(top.st_mode), top.st_ino), tuple(entries)
+
+
+def _scan(root: Path, fingerprint: tuple, began: int, settled: bool) -> _Snapshot:
+    """Parse every valid v0.2 concept, in path order, exactly as each read used to."""
+    okf_version = bundle_okf_version(root)
+    records = []
+    if okf_version == OKF_VERSION:
+        for path in sorted(root.rglob("*.md")):
+            rel = _candidate_rel(root, path)
+            if rel is None:
+                continue
+            document = _profile_document(root, path)
+            if document is not None:
+                records.append((path, rel, *document))
+    return _Snapshot(root, fingerprint, okf_version, tuple(records), began, settled)
+
+
+def _snapshot(root: Path) -> _Snapshot:
+    """The bundle's snapshot: reused while its fingerprint holds, else scanned under the bundle's
+    lock. A reader queued behind a scan that began after it arrived shares that scan, so a burst
+    of requests after a change waits for one scan, or two when it lands in the racy window."""
+    arrived = time.monotonic_ns()
+    cached = _snapshots.get(root)
+    if cached is not None and cached.settled and cached.fingerprint == _fingerprint(root):
+        return cached
+    with _snapshot_guard:
+        lock = _snapshot_locks.setdefault(root, threading.Lock())
+    with lock:
+        cached = _snapshots.get(root)
+        if cached is not None and cached.began > arrived:  # read wholly after this request arrived
+            return cached
+        generation = _generation
+        began, now = time.monotonic_ns(), time.time_ns()
+        fingerprint = _fingerprint(root)  # before any read, so a change during the scan rescans
+        if cached is not None and cached.settled and cached.fingerprint == fingerprint:
+            return cached
+        settled = all(_settled(entry[-1], now) for entry in fingerprint[1])
+        snapshot = _scan(root, fingerprint, began, settled)
+        with _snapshot_guard:
+            if generation == _generation:  # a scan that overlapped a writer's drop is this request's only
+                _snapshots[root] = snapshot
+        return snapshot
+
+
+def _derived(snapshot: _Snapshot, build):
+    """``build(snapshot)``, computed once per snapshot while concurrent readers wait for it."""
+    try:
+        return snapshot.derived[build]
+    except KeyError:
+        pass
+    with snapshot.lock:
+        if build not in snapshot.derived:
+            snapshot.derived[build] = build(snapshot)
+        return snapshot.derived[build]
+
+
+def drop_snapshots() -> None:
+    """Forget every snapshot. The worker calls it as each mutation ends, so the next read never
+    relies on file stats alone to see what the writer changed."""
+    global _generation
+    with _snapshot_guard:
+        _generation += 1
+        _snapshots.clear()
+
+
 def _concept_records(root: Path):
     """Yield each valid v0.2 concept once with parsed and original content."""
-    if not _bundle_is_v02(root):
-        return
-    for path in sorted(root.rglob("*.md")):
-        rel = _candidate_rel(root, path)
-        if rel is None:
-            continue
-        document = _profile_document(root, path)
-        if document is not None:
-            yield path, rel, *document
+    yield from _snapshot(root).records
 
 
 def is_bundle(p: Path) -> bool:
@@ -134,7 +272,7 @@ def discover(root: Path) -> dict[str, Path]:
 
 
 def count_concepts(root: Path) -> int:
-    return sum(1 for _ in concepts(root))
+    return len(_snapshot(root).records)
 
 
 def scaffold(target: Path, name: str) -> None:
@@ -269,7 +407,8 @@ def health(root: Path) -> dict:
     freshness_counts: Counter = Counter()
     bases: Counter = Counter()  # declared stale_after, the 90-day default, or neither
     total = 0
-    for _path, _rel, fm, _body, _text in _concept_records(root):
+    snapshot = _snapshot(root)
+    for _path, _rel, fm, _body, _text in snapshot.records:
         meta = concept_metadata(fm)
         total += 1
         types[str(fm.get("type") or "")] += 1
@@ -278,7 +417,7 @@ def health(root: Path) -> dict:
         freshness_counts[meta["freshness"]] += 1
         bases[meta["freshness_basis"]] += 1
     return {
-        "okf_version": bundle_okf_version(root),
+        "okf_version": snapshot.okf_version,
         "git_revision": git_revision(root),
         "concepts": total,
         "by_type": dict(types),
@@ -338,45 +477,106 @@ def _dir_descriptions(root: Path) -> dict:
     return dirs if isinstance(dirs, dict) else {}
 
 
+class _Listing:
+    """What ``ls`` and ``cat`` read from one snapshot: each concept's frontmatter by path, each
+    directory's concept count and index-meta.yaml's directory descriptions (the fingerprint
+    covers that file). A path the snapshot does not hold as a concept, such as an invalid file or
+    another spelling of a path on a case-insensitive filesystem, is still checked on the file."""
+
+    def __init__(self, snapshot: _Snapshot) -> None:
+        self.root = snapshot.root
+        self.bundle_v02 = snapshot.okf_version == OKF_VERSION
+        self.descriptions = _dir_descriptions(snapshot.root)
+        self.concepts = {rel: (fm, body, text) for _path, rel, fm, body, text in snapshot.records}
+        self.counts: Counter = Counter()  # concepts at any depth under each directory
+        for rel in self.concepts:
+            parts = rel.split("/")
+            self.counts.update("/".join(parts[:i]) for i in range(1, len(parts)))
+
+    def document(self, p: Path, rel: str) -> tuple[dict, str, str] | None:
+        """``_profile_document(root, p)`` for the path ``root / rel``."""
+        return self.concepts.get(rel) or _profile_document(self.root, p)
+
+    def count(self, p: Path, rel: str) -> int:
+        """``_count_concepts`` for the directory ``root / rel``."""
+        return self.counts.get(rel) or _count_concepts(self.root, p, bundle_v02=self.bundle_v02)
+
+
 def _concept_entry(rel: str, fm: dict) -> dict:
     return {
         "kind": "concept", "path": rel,
         "title": fm.get("title"), "type": fm.get("type"),
-        "tags": fm.get("tags") or [], "description": fm.get("description"),
+        "tags": list(fm.get("tags") or []), "description": fm.get("description"),
         **concept_metadata(fm),
     }
 
 
 def metadata_for_path(root: Path, path: Path) -> dict | None:
     """Derived metadata for one valid concept, or ``None`` when it is not consumable."""
-    if not _bundle_is_v02(root):
+    listing = _derived(_snapshot(root), _Listing)
+    if not listing.bundle_v02:
         return None
-    document = _profile_document(root, path)
+    rel = _candidate_rel(root, path)
+    document = listing.document(path, rel) if rel is not None else None
     return concept_metadata(document[0]) if document is not None else None
 
 
-def _entry(root: Path, p: Path, descriptions: dict, *, bundle_v02: bool | None = None) -> dict:
+def _entry(root: Path, p: Path, listing: _Listing) -> dict:
     """Annotated listing entry for any path — dir / structural doc / concept / file."""
     rel = p.relative_to(root).as_posix()
-    if bundle_v02 is None:
-        bundle_v02 = _bundle_is_v02(root)
     if p.is_dir():
-        desc = descriptions.get(rel)
+        desc = copy.deepcopy(listing.descriptions.get(rel))  # any YAML value, and the snapshot's own
         if not desc and p.name == "sources":
             desc = "raw source snapshots (provenance)"
         return {"kind": "dir", "path": rel + "/", "name": p.name,
-                "concepts": _count_concepts(root, p, bundle_v02=bundle_v02), "description": desc}
+                "concepts": listing.count(p, rel), "description": desc}
     if p.suffix == ".md" and p.name in RESERVED:
         return {"kind": "doc", "path": rel, "name": p.name,
                 "description": _DOC_LABELS.get(p.name) or "rotated change log"}
     if p.suffix == ".md":
-        document = _profile_document(root, p) if bundle_v02 else None
+        document = listing.document(p, rel) if listing.bundle_v02 else None
         if document is None:
-            reason = "invalid strict OKF v0.2 concept" if bundle_v02 else "bundle is not OKF v0.2"
+            reason = "invalid strict OKF v0.2 concept" if listing.bundle_v02 else "bundle is not OKF v0.2"
             return {"kind": "invalid", "path": rel, "name": p.name, "description": reason}
         fm, _body, _text = document
         return _concept_entry(rel, fm)
     return {"kind": "file", "path": rel, "name": p.name, "bytes": p.stat().st_size}
+
+
+def _visible_files(root: Path, base: Path, show_all: bool) -> list[Path]:
+    """The files ``list_dir`` shows of ``sorted(base.rglob("*"))``: regular files a stat reaches,
+    reached without a symlink (rglob never descends one, and a link is never shown), outside
+    private and, unless ``show_all``, hidden paths. Both rules hold for everything under a
+    directory they refuse, so the walk skips such a tree instead of checking each file in it."""
+    def refused(parts: tuple[str, ...]) -> bool:
+        return _private(parts) or (not show_all and any(part.startswith(".") for part in parts))
+
+    if os.path.islink(root):
+        return []
+    base_parts = base.relative_to(root).parts
+    if refused(base_parts):
+        return []
+    found = []
+    pending = [()]
+    while pending:
+        sub = pending.pop()
+        try:
+            with os.scandir(base.joinpath(*sub)) as listing:
+                children = list(listing)
+        except OSError:
+            continue
+        for child in children:
+            parts = (*sub, child.name)
+            try:
+                if child.is_symlink() or refused(base_parts + parts):
+                    continue
+                if child.is_dir(follow_symlinks=False):
+                    pending.append(parts)
+                elif stat.S_ISREG(child.stat(follow_symlinks=False).st_mode):
+                    found.append(parts)
+            except OSError:
+                continue
+    return [base.joinpath(*parts) for parts in sorted(found)]
 
 
 def list_dir(root: Path, subdir: str | None = None, recursive: bool = False,
@@ -394,39 +594,31 @@ def list_dir(root: Path, subdir: str | None = None, recursive: bool = False,
     if subdir and Path(subdir).is_absolute():
         raise ValueError("absolute paths are not bundle-relative")
     base = root if not subdir else safe_resolve(root, subdir)
-    bundle_v02 = _bundle_is_v02(root)
-    descriptions = _dir_descriptions(root)
+    listing = _derived(_snapshot(root), _Listing)
     if base.is_file():
-        return [_entry(root, base, descriptions, bundle_v02=bundle_v02)]
+        return [_entry(root, base, listing)]
     if not base.is_dir():
         return []
 
-    def hidden(rel_parts) -> bool:
-        return any(part.startswith(".") for part in rel_parts) and not show_all
+    if recursive:
+        return [_entry(root, p, listing) for p in _visible_files(root, base, show_all)]
 
-    def visible_safe(path: Path, parts) -> bool:
-        if _private(path.relative_to(root).parts):
-            return False
-        if hidden(parts):
-            return False
-        if has_symlink_component(root, path):
-            return False
+    def inside(path: Path) -> bool:
         try:
             path.resolve().relative_to(root.resolve())
         except (OSError, ValueError):
             return False
         return True
 
-    if recursive:
-        return [
-            _entry(root, p, descriptions, bundle_v02=bundle_v02)
-            for p in sorted(base.rglob("*"))
-            if p.is_file() and visible_safe(p, p.relative_to(root).parts)
-        ]
+    # A child is one name below ``base``: it traverses a symlink or resolves outside the root
+    # only where ``base`` does, or when it is a symlink itself.
+    base_safe = not has_symlink_component(root, base) and inside(base)
     return [
-        _entry(root, p, descriptions, bundle_v02=bundle_v02)
+        _entry(root, p, listing)
         for p in sorted(base.iterdir())
-        if visible_safe(p, (p.name,))
+        if not _private(p.relative_to(root).parts)
+        and (show_all or not p.name.startswith("."))
+        and base_safe and not p.is_symlink()
     ]
 
 
@@ -436,7 +628,7 @@ def grep(root: Path, pattern: str, subdir: str | None = None, fixed: bool = Fals
     rx = re.compile(re.escape(pattern) if fixed else pattern, re.IGNORECASE)
     hits = []
     for _path, rel, _frontmatter, _body, text in _concept_records(root):
-        if not _in_dir(rel, subdir):
+        if not _in_dir(rel, subdir) or (fixed and not rx.search(text)):  # a literal on a line is in its text
             continue
         for n, line in enumerate(text.splitlines(), 1):
             if rx.search(line):
@@ -484,12 +676,90 @@ def _snippet(body: str, phrase: str, terms: tuple[str, ...], width: int = 160) -
         if not stripped:
             continue
         low = _normalize_search_text(stripped)
-        matched = sum(1 for term in terms if _term_count(low, term))
-        hits = sum(_term_count(low, term) for term in terms)
+        counts = [_term_count(low, term) for term in terms]
+        matched = sum(1 for count in counts if count)
+        hits = sum(counts)
         rank = (1 if len(terms) > 1 and phrase and phrase in low else 0, matched, hits)
         if rank > best_rank:
             best, best_rank = stripped, rank
     return best[:width]
+
+
+_SEARCH_WEIGHTS = {"path": 4.0, "title": 4.0, "aliases": 4.0, "tags": 2.0, "description": 2.0, "body": 1.0}
+_POSTINGS_MEMO = 4096  # queried terms kept per snapshot, about 13 bytes per matching concept each
+_MEMO_TERM_CHARS = 64  # a longer term, which no word is, is scored per request: the memo's keys stay small
+
+
+def _search_fields(rel: str, fm: dict, body: str) -> tuple[str, ...]:
+    """A concept's normalized searchable text, one entry per field of ``_SEARCH_WEIGHTS``."""
+    return (
+        _normalize_search_text(rel.removesuffix(".md")),
+        _normalize_search_text(fm.get("title") or ""),
+        _normalize_search_text(" ".join(map(str, fm.get("aliases") or []))),
+        _normalize_search_text(" ".join(map(str, fm.get("tags") or []))),
+        _normalize_search_text(fm.get("description") or ""),
+        _normalize_search_text(body),
+    )
+
+
+class _SearchIndex:
+    """What search needs from one snapshot: each concept's normalized fields and their lengths,
+    the per-field average lengths, per-character document frequencies, and a bounded memo of each
+    queried term's postings with its exact score contribution to every concept it matches."""
+
+    def __init__(self, snapshot: _Snapshot) -> None:
+        self.records = snapshot.records
+        self.fields = [_search_fields(rel, fm, body) for _path, rel, fm, body, _text in self.records]
+        self.lengths = [tuple(map(_field_length, fields)) for fields in self.fields]
+        self.averages = tuple(
+            sum(lengths[i] for lengths in self.lengths) / len(self.lengths) for i in range(len(_SEARCH_WEIGHTS))
+        ) if self.lengths else ()
+        self.characters = Counter(char for fields in self.fields for char in set("".join(fields)))
+        self.memo: OrderedDict[str, tuple[array, array, bytes]] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def postings(self, term: str) -> tuple[array, array, bytes]:
+        """The concepts ``term`` matches in record order, its score contribution to each, and the
+        fields it matches there (bit i for field i of ``_SEARCH_WEIGHTS``)."""
+        with self.lock:
+            if term in self.memo:
+                self.memo.move_to_end(term)
+                return self.memo[term]
+        docs, counts = array("I"), []
+        for doc, fields in enumerate(self.fields):
+            if any(term in text for text in fields):  # a substring test first: most concepts lack the term
+                row = [_term_count(text, term) for text in fields]
+                if any(row):
+                    docs.append(doc)
+                    counts.append(row)
+        df = len(docs)
+        idf = math.log(1 + (len(self.fields) - df + 0.5) / (df + 0.5))
+        # A CJK bigram is only a guess at a word.  A real word (``冻结``) holds most uses of its
+        # rarer character; a bigram straddling two words (``费多`` of ``免费多少``) holds few, so
+        # its weight is the square root of that share and filler bigrams count for little.
+        term_weight = 1.0
+        if re.fullmatch(rf"[{_CJK}]{{2}}", term):
+            term_weight = math.sqrt(df / max(1, min(self.characters[char] for char in term)))
+        weights = tuple(_SEARCH_WEIGHTS.values())
+        contributions, matched = array("d"), bytearray()
+        for doc, row in zip(docs, counts, strict=True):
+            weighted_tf, mask = 0.0, 0
+            for i, count in enumerate(row):
+                if not count:
+                    continue
+                mask |= 1 << i
+                length_norm = 0.25 + 0.75 * (self.lengths[doc][i] / self.averages[i])
+                weighted_tf += weights[i] * count / max(length_norm, 0.1)
+            contributions.append(term_weight * idf * (weighted_tf * 2.2) / (weighted_tf + 1.2))
+            matched.append(mask)
+        entry = docs, contributions, bytes(matched)
+        if len(term) > _MEMO_TERM_CHARS:
+            return entry
+        with self.lock:
+            self.memo[term] = entry
+            if len(self.memo) > _POSTINGS_MEMO:
+                self.memo.popitem(last=False)
+        return entry
 
 
 def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
@@ -502,111 +772,59 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
     one matching its distinctive terms.  Coverage explains a hit but no longer ranks it.
     Trust/freshness remains a tie-breaker, never a recall filter.
     """
+    return search_page(root, query, top_k)[0]
+
+
+def search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int]:
+    """The first ``top_k`` results of ``search`` and the number of concepts that matched; only the
+    rows returned get a snippet."""
     phrase = _normalize_search_text(query)
     terms = _tokens(query)
     if not terms:
-        return []
+        return [], 0
+    index = _derived(_snapshot(root), _SearchIndex)
+    if not index.records:
+        return [], 0
 
-    records = []
-    weights = {
-        "path": 4.0,
-        "title": 4.0,
-        "aliases": 4.0,
-        "tags": 2.0,
-        "description": 2.0,
-        "body": 1.0,
-    }
-    for _path, rel, fm, body, _text in _concept_records(root):
-        fields = {
-            "path": _normalize_search_text(rel.removesuffix(".md")),
-            "title": _normalize_search_text(fm.get("title") or ""),
-            "aliases": _normalize_search_text(" ".join(map(str, fm.get("aliases") or []))),
-            "tags": _normalize_search_text(" ".join(map(str, fm.get("tags") or []))),
-            "description": _normalize_search_text(fm.get("description") or ""),
-            "body": _normalize_search_text(body),
-        }
-        records.append((rel, fm, body, fields))
-    if not records:
-        return []
-
-    averages = {
-        field: sum(_field_length(fields[field]) for *_prefix, fields in records) / len(records)
-        for field in weights
-    }
-    document_frequency = {
-        term: sum(
-            1 for *_prefix, fields in records
-            if any(_term_count(text, term) for text in fields.values())
-        )
-        for term in terms
-    }
-    # A CJK bigram is only a guess at a word.  A real word (``冻结``) holds most uses of its
-    # rarer character; a bigram straddling two words (``费多`` of ``免费多少``) holds few, so
-    # its weight is the square root of that share and filler bigrams count for little.
-    bigrams = [term for term in terms if re.fullmatch(rf"[{_CJK}]{{2}}", term)]
-    character_frequency = {
-        char: sum(1 for *_prefix, fields in records if any(char in text for text in fields.values()))
-        for char in {char for term in bigrams for char in term}
-    }
-    term_weight = dict.fromkeys(terms, 1.0) | {
-        term: math.sqrt(document_frequency[term] / max(1, min(character_frequency[char] for char in term)))
-        for term in bigrams
-    }
+    # Each concept's lexical score sums its terms' contributions in query order, as it always has.
+    lexical: dict[int, float] = {}
+    matched_terms: dict[int, list[str]] = {}
+    matched_fields: dict[int, int] = {}
+    for term in terms:
+        for doc, contribution, mask in zip(*index.postings(term), strict=True):
+            lexical[doc] = lexical.get(doc, 0.0) + contribution
+            matched_terms.setdefault(doc, []).append(term)
+            matched_fields[doc] = matched_fields.get(doc, 0) | mask
 
     scored = []
-    total_documents = len(records)
-    for rel, fm, body, fields in records:
-        matched_terms = tuple(
-            term for term in terms if any(_term_count(text, term) for text in fields.values())
-        )
-        if not matched_terms:
-            continue
-        matched_fields = tuple(
-            field for field, text in fields.items()
-            if any(_term_count(text, term) for term in terms)
-        )
-        coverage = len(matched_terms) / len(terms)
+    for doc in sorted(lexical):
+        _path, rel, fm, body, _text = index.records[doc]
         phrase_fields = tuple(
-            field for field, text in fields.items()
+            field for field, text in zip(_SEARCH_WEIGHTS, index.fields[doc], strict=True)
             if len(terms) > 1 and phrase and phrase in text
         )
-
-        lexical_score = 0.0
-        for term in terms:
-            df = document_frequency[term]
-            idf = math.log(1 + (total_documents - df + 0.5) / (df + 0.5))
-            weighted_tf = 0.0
-            for field, text in fields.items():
-                count = _term_count(text, term)
-                if not count:
-                    continue
-                length_norm = 0.25 + 0.75 * (_field_length(text) / averages[field])
-                weighted_tf += weights[field] * count / max(length_norm, 0.1)
-            if weighted_tf:
-                lexical_score += term_weight[term] * idf * (weighted_tf * 2.2) / (weighted_tf + 1.2)
-
-        phrase_score = sum(weights[field] * 2.0 for field in phrase_fields)
-        score = round(lexical_score + phrase_score, 4)
+        phrase_score = sum(_SEARCH_WEIGHTS[field] * 2.0 for field in phrase_fields)
+        score = round(lexical[doc] + phrase_score, 4)
         meta = concept_metadata(fm)
         knowledge_rank = _knowledge_rank(meta)
         match = {
             "phrase": bool(phrase_fields),
-            "coverage": round(coverage, 3),
-            "fields": list(matched_fields),
-            "terms": list(matched_terms),
+            "coverage": round(len(matched_terms[doc]) / len(terms), 3),
+            "fields": [field for i, field in enumerate(_SEARCH_WEIGHTS) if matched_fields[doc] >> i & 1],
+            "terms": matched_terms[doc],
         }
-        scored.append((bool(phrase_fields), score, knowledge_rank, meta["generated_at"], {
-            "path": rel, "title": fm.get("title"), "type": fm.get("type"),
-            "tags": fm.get("tags") or [], "score": score,
-            "match": match,
-            "description": fm.get("description"),
-            "snippet": _snippet(body, phrase, terms),
-            **meta,
-        }))
+        scored.append((bool(phrase_fields), score, knowledge_rank, meta["generated_at"], (rel, fm, body, match, meta)))
     # An exact phrase secures recall; the score ranks everything else.
     scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
-    results = [d for *_, d in scored]
-    return results if top_k is None else results[:top_k]
+    rows = [{
+        "path": rel, "title": fm.get("title"), "type": fm.get("type"),
+        "tags": list(fm.get("tags") or []), "score": score,
+        "match": match,
+        "description": fm.get("description"),
+        "snippet": _snippet(body, phrase, terms),
+        **meta,
+    } for _phrase, score, _rank, _generated, (rel, fm, body, match, meta) in scored[:top_k]]
+    return rows, len(scored)
 
 
 def _knowledge_rank(meta: dict) -> int:
@@ -646,6 +864,46 @@ def _outbound(root: Path, body: str, rel: str, ids: set[str]) -> list[str]:
     return out
 
 
+def _lexical_link(rel: str, target: str) -> bool:
+    """Whether a link resolves by its text alone: ``..`` only leading and never above the root,
+    so every path it can traverse lies where the fingerprint watches for symlinks."""
+    parts = Path(target.lstrip("/")).parts
+    ups = next((i for i, part in enumerate(parts) if part != ".."), len(parts))
+    depth = 0 if target.startswith("/") else len(Path(rel).parts) - 1
+    return ups <= depth and ".." not in parts[ups:]
+
+
+class _LinkGraph:
+    """One snapshot's concept link graph in both directions. A concept with a link that is not
+    lexical is resolved again per request, as that can follow a symlink the fingerprint skips."""
+
+    def __init__(self, snapshot: _Snapshot) -> None:
+        self.root = snapshot.root
+        self.concepts = {rel: (fm, body) for _path, rel, fm, body, _text in snapshot.records}
+        self.ids = set(self.concepts)
+        self.volatile = {
+            rel for rel, (_fm, body) in self.concepts.items()
+            if not all(_lexical_link(rel, m.group(1)) for m in _LINK_RE.finditer(body))
+        }
+        self.outbound = {
+            rel: _outbound(self.root, body, rel, self.ids)
+            for rel, (_fm, body) in self.concepts.items() if rel not in self.volatile
+        }
+        self.inbound: dict[str, list[str]] = {rel: [] for rel in self.concepts}
+        for source in sorted(self.outbound):
+            for target in self.outbound[source]:
+                self.inbound[target].append(source)
+
+    def outbound_of(self, rel: str) -> list[str]:
+        if rel in self.volatile:
+            return _outbound(self.root, self.concepts[rel][1], rel, self.ids)
+        return self.outbound[rel]
+
+    def inbound_of(self, rel: str) -> list[str]:
+        volatile = [r for r in self.volatile if r != rel and rel in self.outbound_of(r)]
+        return sorted(self.inbound[rel] + volatile) if volatile else self.inbound[rel]
+
+
 def links(root: Path, rel: str) -> dict:
     """Both directions of the concept link graph for `rel`: outbound (what it
     references) and inbound (what references it — the backlinks `# Related concepts`
@@ -654,23 +912,15 @@ def links(root: Path, rel: str) -> dict:
     target = safe_resolve(root, rel)  # ValueError (escape) handled by caller
     if not target.is_file():
         raise FileNotFoundError(rel)
-    by_rel = {
-        rel: (path, fm, body)
-        for path, rel, fm, body, _text in _concept_records(root)
-    }
-    if rel not in by_rel:
+    graph = _derived(_snapshot(root), _LinkGraph)
+    if rel not in graph.concepts:
         raise FileNotFoundError(rel)  # reserved/structural files have no link graph
-    ids = set(by_rel)
 
     def entry(r: str) -> dict:
-        _path, fm, _body = by_rel[r]
+        fm, _body = graph.concepts[r]
         return {"path": r, "title": fm.get("title"), "type": fm.get("type"),
                 "description": fm.get("description")}
 
-    _path, fm, body = by_rel[rel]
-    outbound = _outbound(root, body, rel, ids)
-    inbound = [r for r in sorted(ids)
-               if r != rel and rel in _outbound(root, by_rel[r][2], r, ids)]
-    return {"path": rel, "title": fm.get("title"),
-            "outbound": [entry(r) for r in outbound],
-            "inbound": [entry(r) for r in inbound]}
+    return {"path": rel, "title": graph.concepts[rel][0].get("title"),
+            "outbound": [entry(r) for r in graph.outbound_of(rel)],
+            "inbound": [entry(r) for r in graph.inbound_of(rel)]}
