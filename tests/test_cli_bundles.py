@@ -467,8 +467,23 @@ def test_habit_verbs_name_the_real_command(capsys) -> None:
     import pytest
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["show", "metrics/x.md"])
+        cli.main(["open", "metrics/x.md"])
     assert exc.value.code == 2
     out = capsys.readouterr().out
-    assert "`show` is `ai-wiki cat` here" in out
-    assert '"ai-wiki cat --help"' in out and "ai-wiki show --help" not in out
+    assert "`open` is `ai-wiki cat` here" in out
+    assert '"ai-wiki cat --help"' in out and "ai-wiki open --help" not in out
+
+
+def test_read_habit_verbs_run_cat(monkeypatch, capsys) -> None:
+    # Agents type `ai-wiki show <path> 2>/dev/null | grep …`: a hint would be filtered away, so these run `cat`.
+    calls = []
+    document = {"path": "metrics/x.md", "content": "# X\n", "metadata": None}
+    monkeypatch.setattr(cli, "_api", lambda route, **kw: calls.append((route, kw)) or document)
+    assert cli.main(["cat", "metrics/x.md"]) == 0
+    expected = capsys.readouterr().out
+    for verb in ("show", "get", "read", "view"):
+        assert cli.main(["-b", "solvely-wiki", verb, "./metrics/x.md", "--full"]) == 0
+        assert capsys.readouterr().out == expected
+    assert {route for route, _ in calls} == {"/cat"} and {kw["path"] for _, kw in calls} == {"metrics/x.md"}
+    assert cli.main(["show", "metrics/x.md", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == document
