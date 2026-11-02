@@ -113,8 +113,16 @@ _snapshot_locks: dict[Path, threading.Lock] = {}
 _snapshot_guard = threading.Lock()
 _generation = 0  # bumped by drop_snapshots: a scan begun before that is never kept
 # A file changed this close to a scan may change again within the same timestamp tick, with an
-# identical stat (Git's "racy" files). Kernel file timestamps tick every 1-10 ms.
+# identical stat (Git's "racy" files). Kernel clocks, and the timestamps of most filesystems, tick
+# every 1-10 ms; HFS+ and ext3 keep whole seconds and FAT two, so a whole-second ctime waits those out.
 _RACY_NS = 100_000_000
+_COARSE_TICK_NS = 2_000_000_000
+
+
+def _settled(ctime_ns: int, now: int) -> bool:
+    """Whether no later change to a file with this ctime can leave it as it is."""
+    tick = _COARSE_TICK_NS if ctime_ns % 1_000_000_000 == 0 else 0
+    return ctime_ns < now - _RACY_NS - tick
 
 
 def _fingerprint(root: Path) -> tuple:
@@ -193,7 +201,7 @@ def _snapshot(root: Path) -> _Snapshot:
         fingerprint = _fingerprint(root)  # before any read, so a change during the scan rescans
         if cached is not None and cached.settled and cached.fingerprint == fingerprint:
             return cached
-        settled = all(entry[-1] < now - _RACY_NS for entry in fingerprint[1])
+        settled = all(_settled(entry[-1], now) for entry in fingerprint[1])
         snapshot = _scan(root, fingerprint, began, settled)
         with _snapshot_guard:
             if generation == _generation:  # a scan that overlapped a writer's drop is this request's only

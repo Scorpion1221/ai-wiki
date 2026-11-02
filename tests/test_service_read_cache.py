@@ -83,6 +83,26 @@ def test_a_scan_right_after_a_write_is_not_reused(tmp_path: Path, monkeypatch) -
     assert B.grep(tmp_path, "needle") == [] and B.grep(tmp_path, "bbbbbb")
 
 
+def test_whole_second_timestamps_widen_the_racy_window(tmp_path: Path, monkeypatch) -> None:
+    """HFS+ and ext3 keep whole seconds (FAT two), so a same-size rewrite within a second of a scan can leave
+    every stat as it was: a scan in that second, past the usual window, is still not reused."""
+    _concept(tmp_path, "one")
+    path = tmp_path / "topics" / "one.md"
+    second = path.stat().st_ctime_ns // 10**9 * 10**9
+    real_fingerprint = B._fingerprint
+
+    def coarse(root):  # the stats such a filesystem shows for writes all within one second
+        top, entries = real_fingerprint(root)
+        return top, tuple((*entry[:4], second, second) for entry in entries)
+
+    monkeypatch.setattr(B, "_fingerprint", coarse)
+    clock = SimpleNamespace(time_ns=lambda: second + 900_000_000, monotonic_ns=time.monotonic_ns)
+    monkeypatch.setattr(B, "time", clock)
+    assert B.grep(tmp_path, "needle") and not B._snapshots[tmp_path].settled
+    _rewrite(path, "needle", "zzqqzz")
+    assert B.grep(tmp_path, "needle") == [] and B.grep(tmp_path, "zzqqzz")
+
+
 def test_added_removed_and_renamed_concepts_are_seen(tmp_path: Path, settled) -> None:
     _concept(tmp_path, "one")
     assert _paths(tmp_path) == ["topics/one.md"]
