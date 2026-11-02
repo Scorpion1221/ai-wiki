@@ -543,10 +543,10 @@ def _entry(root: Path, p: Path, listing: _Listing) -> dict:
 
 
 def _visible_files(root: Path, base: Path, show_all: bool) -> list[Path]:
-    """The files ``list_dir`` shows of ``sorted(base.rglob("*"))``: regular files reached without
-    a symlink (rglob never descends one, and a link is never shown), outside private and, unless
-    ``show_all``, hidden paths. Both rules hold for everything under a directory they refuse, so
-    the walk skips such a tree instead of checking each file in it."""
+    """The files ``list_dir`` shows of ``sorted(base.rglob("*"))``: regular files a stat reaches,
+    reached without a symlink (rglob never descends one, and a link is never shown), outside
+    private and, unless ``show_all``, hidden paths. Both rules hold for everything under a
+    directory they refuse, so the walk skips such a tree instead of checking each file in it."""
     def refused(parts: tuple[str, ...]) -> bool:
         return _private(parts) or (not show_all and any(part.startswith(".") for part in parts))
 
@@ -571,7 +571,7 @@ def _visible_files(root: Path, base: Path, show_all: bool) -> list[Path]:
                     continue
                 if child.is_dir(follow_symlinks=False):
                     pending.append(parts)
-                elif child.is_file(follow_symlinks=False):
+                elif stat.S_ISREG(child.stat(follow_symlinks=False).st_mode):
                     found.append(parts)
             except OSError:
                 continue

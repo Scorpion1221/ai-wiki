@@ -468,6 +468,22 @@ def test_ls_counts_and_kinds_follow_added_and_removed_concepts(tmp_path: Path, s
     assert "topics/.hidden/deep.md" in {item["path"] for item in B.list_dir(tmp_path, recursive=True, show_all=True)}
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a directory its reader cannot traverse")
+def test_ls_recursive_leaves_out_a_file_no_stat_reaches(tmp_path: Path, settled) -> None:
+    """A directory that can be listed but not traversed (mode 600) names files no stat reaches: they are
+    not shown as regular files, and the request does not fail."""
+    _concept(tmp_path, "one")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "notes.txt").write_text("x", encoding="utf-8")
+    locked.chmod(0o600)
+    try:
+        assert [item["path"] for item in B.list_dir(tmp_path, recursive=True)] == ["index.md", "topics/one.md"]
+        assert B.list_dir(tmp_path, "locked", recursive=True, show_all=True) == []
+    finally:
+        locked.chmod(0o755)
+
+
 def test_grep_follows_an_edit(tmp_path: Path, settled) -> None:
     _concept(tmp_path, "one")
     _concept(tmp_path, "two")
