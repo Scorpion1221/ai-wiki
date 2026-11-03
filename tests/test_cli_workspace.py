@@ -182,6 +182,7 @@ def test_http_returns_every_status_and_raises_only_on_the_network(tmp_path, monk
         config = tmp_path / "config.json"
         config.write_text(json.dumps({"endpoint": f"http://127.0.0.1:{server.server_port}", "token": "t"}))
         monkeypatch.setattr(cli, "CONFIG", config)
+        monkeypatch.setenv("AIWIKI_RETRY_S", "0")  # a GET's retries are test_cli_resilience's
         try:
             unmodified = cli._http("GET", "/workspace", headers={"If-None-Match": '"abc"'})
             busy = cli._http("GET", "/workspace", bundle="kb")
