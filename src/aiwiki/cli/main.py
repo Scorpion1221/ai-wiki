@@ -297,7 +297,8 @@ def _post(route: str, payload: dict, *, bundle: str | None = None, method: str =
 
 
 def _http(method: str, route: str, *, bundle: str | None = None, params: dict | None = None,
-          data: bytes | None = None, headers: dict | None = None, timeout: float = 60):
+          data: bytes | None = None, headers: dict | None = None, timeout: float = 60,
+          retry_s: float | None = None):
     """One request, answered as ``(status, headers, body)`` whatever its status.
 
     Only a network failure raises (``OSError``: ``URLError``, a timeout, a truncated or
@@ -306,9 +307,10 @@ def _http(method: str, route: str, *, bundle: str | None = None, params: dict | 
 
     A GET whose failure a lossy line causes (``_transient``: a timeout, the TLS handshake's
     included, or a refused, reset or dropped connection) is sent again with jittered backoff
-    until $AIWIKI_RETRY_S seconds after that first failure (default 20; 0 never retries), each
-    attempt with the whole ``timeout``: counted from the first attempt, a window shorter than
-    the timeout would never resend the one that timed out. Any other method is sent once.
+    until ``retry_s`` (default $AIWIKI_RETRY_S, else 20; 0 never retries) seconds after that
+    first failure, each attempt with the whole ``timeout``: counted from the first attempt, a
+    window shorter than the timeout would never resend the one that timed out. So a GET gives
+    up within 2 x ``timeout`` + the window. Any other method is sent once.
     """
     endpoint, token = _conn(network=True)
     query = {k: v for k, v in {**(params or {}), "bundle": bundle}.items() if v is not None}
@@ -316,11 +318,13 @@ def _http(method: str, route: str, *, bundle: str | None = None, params: dict | 
     sent = {"Authorization": f"Bearer {token}", "User-Agent": _UA, **(headers or {})}
     if data is not None:
         sent.setdefault("Content-Type", "application/json")
-    req = urllib.request.Request(url, data=data, headers=sent, method=method)
-    window = _seconds("AIWIKI_RETRY_S", 20) if method == "GET" else 0
+    window = 0 if method != "GET" else _seconds("AIWIKI_RETRY_S", 20) if retry_s is None else retry_s
     deadline, attempt = None, 0
     while True:
         attempt += 1
+        # A new Request each attempt: a proxy handler rewrites the one it sends (host, type,
+        # selector), so a resent one would leave the TLS tunnel with the token in plain text.
+        req = urllib.request.Request(url, data=data, headers=sent, method=method)
         try:
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -391,7 +395,7 @@ def _backoff(attempt: int, deadline: float, why: str) -> bool:
     left = deadline - time.monotonic()
     if left <= 0:
         return False
-    step = min(_RETRY_CAP_S, _RETRY_BASE_S * 2 ** (attempt - 1))
+    step = min(_RETRY_CAP_S, _RETRY_BASE_S * 2 ** min(attempt - 1, 64))  # 2 ** 1024 overflows a float
     delay = min(left, step / 2 + random.uniform(0, step / 2))  # jittered, so clients do not retry in step
     print(f"ai-wiki: {why}; retrying in {delay:.1f}s", file=sys.stderr)  # stdout stays the answer alone
     time.sleep(delay)
@@ -560,7 +564,7 @@ def _not_found(refused: _Refused, verb: str, path: str, bundle: str | None) -> N
     name += "" if name.endswith(".md") else ".md"
     try:
         status, _headers, body = _http("GET", "/ls", bundle=bundle, params={"recursive": "true"},
-                                       timeout=_seconds("AIWIKI_TIMEOUT", 30, positive=True))
+                                       timeout=_seconds("AIWIKI_TIMEOUT", 30, positive=True), retry_s=0)
         items = json.loads(body).get("items") if status == 200 else None
     except (OSError, ValueError, AttributeError):
         items = None

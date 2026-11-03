@@ -6,6 +6,7 @@ never a traceback; reads retry, writes never do. Backoff is shrunk so the whole 
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import shutil
@@ -409,6 +410,34 @@ def test_a_writer_get_fails_a_setup_fault_at_once(server, monkeypatch) -> None:
     assert calls == [60]
 
 
+def test_a_writer_get_is_a_new_request_each_attempt(server, monkeypatch) -> None:
+    """A proxy handler rewrites the Request it sends: through an https proxy a resent one went out
+    as plain http to port 80 with the bearer token on its third attempt."""
+    endpoint = "https://writer.example"
+    cli.CONFIG.write_text(json.dumps({"endpoint": endpoint, "token": "fixture-token"}))
+    proxy, sent = cli.urllib.request.ProxyHandler({"https": "http://127.0.0.1:9"}), []
+
+    class Answer(io.BytesIO):
+        status, headers = 200, {}
+
+    def urlopen(request, timeout=None):
+        proxy.proxy_open(request, "http://127.0.0.1:9", request.type)  # what the opener does with it
+        sent.append((request.type, request.selector, request.get_header("Authorization")))
+        if len(sent) < 3:
+            raise urllib.error.URLError(ConnectionResetError(54, "Connection reset by peer"))
+        return Answer(b"{}")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+
+    assert cli._http("GET", "/whoami")[0] == 200
+    assert sent == [("https", "/whoami", "Bearer fixture-token")] * 3  # each through the TLS tunnel
+
+
+def test_backoff_never_overflows(monkeypatch) -> None:
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    assert cli._backoff(5000, time.monotonic() + 60, "timed out") is True
+
+
 def test_a_writer_call_that_is_no_get_is_sent_once(server, capsys) -> None:
     server.script["/maint/lease/auditor"] = ["reset", {"lease": {}}]
 
@@ -629,6 +658,12 @@ def test_a_missing_concept_suggests_the_paths_it_meant(server, capsys) -> None:
     server.script["/cat"] = [(404, {"detail": "not found: schema.md"})]
     code, out, _err = run(capsys, "cat", "schema.md")  # a case slip still finds the document
     assert code == 1 and '"ai-wiki cat SCHEMA.md"' in out
+
+    server.script["/ls"] = ["reset"]  # a failed listing is tried once and just suggests a search
+    listed = len(server.routes("/ls"))
+    code, out, err = run(capsys, "cat", "schema.md")
+    assert code == 1 and '"ai-wiki search \\"schema\\""' in out
+    assert len(server.routes("/ls")) == listed + 1 and "retrying" not in err
 
 
 @pytest.mark.parametrize("verb", ["ls", "grep"])
