@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.11 -->
+<!-- ai-wiki:version 0.3.12 -->
 
 # ai-wiki — consult curated team knowledge
 

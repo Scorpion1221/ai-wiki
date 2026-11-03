@@ -57,7 +57,8 @@ _TOP_K_MAX = 1000  # the server's top_k limit (service app.py: le=1000)
 # production server, answers 520-524, or 530 for a tunnel, while its origin restarts), a timeout, a TLS
 # read error, or a refused, reset or dropped connection, backing off from _RETRY_BASE_S (doubling,
 # jittered) up to _RETRY_CAP_S; a retry may run for what is left of the window, a last one at least
-# _RETRY_FLOOR_S.
+# _RETRY_FLOOR_S. A GET through _http (doctor, admin, maint, review, workspace) retries only the
+# network failures, since its callers read every status themselves.
 _RETRY_STATUSES = {502, 503, 504, 520, 521, 522, 523, 524, 530}
 _SECONDS_MAX = 86400  # $AIWIKI_TIMEOUT / $AIWIKI_RETRY_S: a day; far more overflows a socket timeout
 _RETRY_BASE_S = 0.5
@@ -296,12 +297,20 @@ def _post(route: str, payload: dict, *, bundle: str | None = None, method: str =
 
 
 def _http(method: str, route: str, *, bundle: str | None = None, params: dict | None = None,
-          data: bytes | None = None, headers: dict | None = None, timeout: float = 60):
+          data: bytes | None = None, headers: dict | None = None, timeout: float = 60,
+          retry_s: float | None = None):
     """One request, answered as ``(status, headers, body)`` whatever its status.
 
     Only a network failure raises (``OSError``: ``URLError``, a timeout, a truncated or
     garbled answer, an endpoint that is no http(s) URL), so a caller can retry it; the
     returned headers are looked up case-insensitively.
+
+    A GET whose failure a lossy line causes (``_transient``: a timeout, the TLS handshake's
+    included, or a refused, reset or dropped connection) is sent again with jittered backoff
+    until ``retry_s`` (default $AIWIKI_RETRY_S, else 20; 0 never retries) seconds after that
+    first failure, each attempt with the whole ``timeout``: counted from the first attempt, a
+    window shorter than the timeout would never resend the one that timed out. So a GET gives
+    up within 2 x ``timeout`` + the window. Any other method is sent once.
     """
     endpoint, token = _conn(network=True)
     query = {k: v for k, v in {**(params or {}), "bundle": bundle}.items() if v is not None}
@@ -309,15 +318,27 @@ def _http(method: str, route: str, *, bundle: str | None = None, params: dict | 
     sent = {"Authorization": f"Bearer {token}", "User-Agent": _UA, **(headers or {})}
     if data is not None:
         sent.setdefault("Content-Type", "application/json")
-    req = urllib.request.Request(url, data=data, headers=sent, method=method)
-    try:
+    window = 0 if method != "GET" else _seconds("AIWIKI_RETRY_S", 20) if retry_s is None else retry_s
+    deadline, attempt = None, 0
+    while True:
+        attempt += 1
+        # A new Request each attempt: a proxy handler rewrites the one it sends (host, type,
+        # selector), so a resent one would leave the TLS tunnel with the token in plain text.
+        req = urllib.request.Request(url, data=data, headers=sent, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.status, r.headers, r.read()
-        except urllib.error.HTTPError as e:  # every non-2xx, a 304 included
-            return e.code, e.headers, e.read()
-    except http.client.HTTPException as exc:  # IncompleteRead, BadStatusLine: the answer was lost
-        raise OSError(f"{type(exc).__name__}: {exc}") from exc
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return r.status, r.headers, r.read()
+            except urllib.error.HTTPError as e:  # every non-2xx, a 304 included
+                return e.code, e.headers, e.read()
+        except (OSError, http.client.HTTPException) as exc:
+            deadline = deadline or time.monotonic() + window
+            cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if _transient(exc) and _backoff(attempt, deadline, _why(cause)):
+                continue
+            if isinstance(exc, http.client.HTTPException):  # IncompleteRead, BadStatusLine: the answer was lost
+                raise OSError(f"{type(exc).__name__}: {exc}") from exc
+            raise
 
 
 class _Refused(Exception):
@@ -374,7 +395,7 @@ def _backoff(attempt: int, deadline: float, why: str) -> bool:
     left = deadline - time.monotonic()
     if left <= 0:
         return False
-    step = min(_RETRY_CAP_S, _RETRY_BASE_S * 2 ** (attempt - 1))
+    step = min(_RETRY_CAP_S, _RETRY_BASE_S * 2 ** min(attempt - 1, 64))  # 2 ** 1024 overflows a float
     delay = min(left, step / 2 + random.uniform(0, step / 2))  # jittered, so clients do not retry in step
     print(f"ai-wiki: {why}; retrying in {delay:.1f}s", file=sys.stderr)  # stdout stays the answer alone
     time.sleep(delay)
@@ -543,7 +564,7 @@ def _not_found(refused: _Refused, verb: str, path: str, bundle: str | None) -> N
     name += "" if name.endswith(".md") else ".md"
     try:
         status, _headers, body = _http("GET", "/ls", bundle=bundle, params={"recursive": "true"},
-                                       timeout=_seconds("AIWIKI_TIMEOUT", 30, positive=True))
+                                       timeout=_seconds("AIWIKI_TIMEOUT", 30, positive=True), retry_s=0)
         items = json.loads(body).get("items") if status == 200 else None
     except (OSError, ValueError, AttributeError):
         items = None

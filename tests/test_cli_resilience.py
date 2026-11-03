@@ -6,6 +6,7 @@ never a traceback; reads retry, writes never do. Backoff is shrunk so the whole 
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import shutil
@@ -330,6 +331,122 @@ def test_a_write_cloudflare_never_delivered_is_not_resent(server, capsys, tmp_pa
     assert f"server rejected the request (status {status})" in out and "may have been applied" not in out
 
 
+# --- the writer's commands (doctor, admin, maint, review, workspace) go through _http ------------
+
+HANDSHAKE = urllib.error.URLError(TimeoutError("_ssl.c:1064: The handshake operation timed out"))
+WHOAMI = {"principal": "process:ai-wiki-auditor", "scopes": ["audit", "read"], "actor": "process:ai-wiki-auditor",
+          "writer": True, "api": {"changesets": 1}, "client": {"min": "0.3.0"}}
+
+
+def test_doctor_rides_out_a_tls_handshake_that_timed_out(server, capsys, monkeypatch, tmp_path) -> None:
+    """WAIO-1798 (2026-11-03): `review begin` re-ran doctor and its GET /health stalled in the TLS
+    handshake; the run stopped blocked before its first review. The GET is now sent again."""
+    server.script["/whoami"] = [WHOAMI]
+    server.script["/health"] = [{"bundle": "kb", "okf_version": "0.2"}]
+    real, failed = cli.urllib.request.urlopen, []
+
+    def urlopen(request, timeout=None):
+        if request.full_url.split("?")[0].endswith("/health") and not failed:
+            failed.append(timeout)
+            raise HANDSHAKE
+        return real(request, timeout=timeout)
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+
+    code, out, err = run(capsys, "doctor", "--role", "auditor", "--state-dir", tmp_path / "st", "--json")
+
+    report = json.loads(out)
+    assert code == 0 and report["ok"] is True, report
+    assert failed == [60] and server.routes("/health") == ["GET"]  # the first attempt never reached it
+    assert err.count("retrying in") == 1 and "timed out" in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("failure", ["reset", "drop", ("sleep", 0.4, {"bundle": "kb"})])
+def test_a_writer_get_rides_out_a_lost_connection(server, monkeypatch, failure) -> None:
+    """A timeout outlasting the window is resent too: the window starts at the first failure."""
+    server.script["/health"] = [failure, {"bundle": "kb"}]
+    monkeypatch.setenv("AIWIKI_RETRY_S", "0.1")
+
+    status, _headers, body = cli._http("GET", "/health", timeout=0.2)
+
+    assert (status, json.loads(body)) == (200, {"bundle": "kb"}) and server.routes("/health") == ["GET"] * 2
+
+
+def test_a_writer_get_returns_every_status_at_once(server) -> None:
+    """Its callers read the status themselves (a pull waits out a 503 mutation): never retried here."""
+    server.script["/workspace"] = [(503, MUTATING), {}]
+
+    assert cli._http("GET", "/workspace")[0] == 503 and server.routes("/workspace") == ["GET"]
+
+
+def test_a_writer_get_gives_up_after_its_window(server, capsys, monkeypatch) -> None:
+    server.script["/health"] = ["reset"]
+    monkeypatch.setenv("AIWIKI_RETRY_S", "0.15")
+    started = time.monotonic()
+
+    with pytest.raises(OSError):
+        cli._http("GET", "/health")
+
+    assert time.monotonic() - started < 1.5 and len(server.routes("/health")) >= 3
+    monkeypatch.setenv("AIWIKI_RETRY_S", "0")
+    sent = len(server.routes("/health"))
+    capsys.readouterr()
+    with pytest.raises(OSError):
+        cli._http("GET", "/health")
+    assert len(server.routes("/health")) == sent + 1 and "retrying" not in capsys.readouterr().err
+
+
+def test_a_writer_get_fails_a_setup_fault_at_once(server, monkeypatch) -> None:
+    calls = []
+
+    def urlopen(request, timeout=None):
+        calls.append(timeout)
+        raise urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed"))
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(OSError, match="certificate verify failed"):
+        cli._http("GET", "/whoami")
+    assert calls == [60]
+
+
+def test_a_writer_get_is_a_new_request_each_attempt(server, monkeypatch) -> None:
+    """A proxy handler rewrites the Request it sends: through an https proxy a resent one went out
+    as plain http to port 80 with the bearer token on its third attempt."""
+    endpoint = "https://writer.example"
+    cli.CONFIG.write_text(json.dumps({"endpoint": endpoint, "token": "fixture-token"}))
+    proxy, sent = cli.urllib.request.ProxyHandler({"https": "http://127.0.0.1:9"}), []
+
+    class Answer(io.BytesIO):
+        status, headers = 200, {}
+
+    def urlopen(request, timeout=None):
+        proxy.proxy_open(request, "http://127.0.0.1:9", request.type)  # what the opener does with it
+        sent.append((request.type, request.selector, request.get_header("Authorization")))
+        if len(sent) < 3:
+            raise urllib.error.URLError(ConnectionResetError(54, "Connection reset by peer"))
+        return Answer(b"{}")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+
+    assert cli._http("GET", "/whoami")[0] == 200
+    assert sent == [("https", "/whoami", "Bearer fixture-token")] * 3  # each through the TLS tunnel
+
+
+def test_backoff_never_overflows(monkeypatch) -> None:
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+    assert cli._backoff(5000, time.monotonic() + 60, "timed out") is True
+
+
+def test_a_writer_call_that_is_no_get_is_sent_once(server, capsys) -> None:
+    server.script["/maint/lease/auditor"] = ["reset", {"lease": {}}]
+
+    with pytest.raises(OSError):
+        cli._http("POST", "/maint/lease/auditor", data=b"{}")
+
+    assert server.routes("/maint/lease/auditor") == ["POST"] and "retrying" not in capsys.readouterr().err
+
+
 # --- A4: every failure is the standard error, JSON under --json ----------------------------------
 
 
@@ -541,6 +658,12 @@ def test_a_missing_concept_suggests_the_paths_it_meant(server, capsys) -> None:
     server.script["/cat"] = [(404, {"detail": "not found: schema.md"})]
     code, out, _err = run(capsys, "cat", "schema.md")  # a case slip still finds the document
     assert code == 1 and '"ai-wiki cat SCHEMA.md"' in out
+
+    server.script["/ls"] = ["reset"]  # a failed listing is tried once and just suggests a search
+    listed = len(server.routes("/ls"))
+    code, out, err = run(capsys, "cat", "schema.md")
+    assert code == 1 and '"ai-wiki search \\"schema\\""' in out
+    assert len(server.routes("/ls")) == listed + 1 and "retrying" not in err
 
 
 @pytest.mark.parametrize("verb", ["ls", "grep"])
