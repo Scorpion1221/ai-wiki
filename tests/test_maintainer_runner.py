@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -311,7 +312,7 @@ def test_read_retry_is_bounded_and_never_retries_auth(monkeypatch):
         return subprocess.CompletedProcess(command, 1, stdout="server rejected the request (status 503)", stderr="")
 
     monkeypatch.setattr(runner.subprocess, "run", fail)
-    monkeypatch.setattr(runner.time, "sleep", sleeps.append)
+    monkeypatch.setattr(runner, "time", SimpleNamespace(sleep=sleeps.append))  # not the process's time.sleep
     with pytest.raises(runner.Pending):
         runner.cli("jobs", "id", "--json", read=True)
     assert len(calls) == 4 and sleeps == [5, 15, 30]
