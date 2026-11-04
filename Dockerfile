@@ -42,6 +42,11 @@ ENV AIWIKI_BUNDLES=/bundles \
     AIWIKI_PORT=8787 \
     AIWIKI_CURATE=off \
     AIWIKI_DISABLE=ingest,audit,create,delete,changesets,workspace,maint,admin
+# Reads run in the server's worker threads, and glibc gives each thread its own malloc arena (up
+# to 8 per CPU) that keeps what it once held: every bundle change rescans the bundle in whichever
+# thread reads first, so the mirror grew ~85 MiB a day after 0.3.10 (126 -> 267 MiB in 48 h, 30
+# arenas, 2026-11-04). Two arenas keep freed scans reusable. The writer preloads jemalloc instead.
+ENV MALLOC_ARENA_MAX=2
 # Deployed revision reported as /health "build"; declared after `uv sync` so a new revision
 # keeps the dependency layer cached:
 #   docker build --build-arg AIWIKI_BUILD_COMMIT=$(git rev-parse HEAD) -t ai-wiki .
