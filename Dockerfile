@@ -48,6 +48,9 @@ ENV AIWIKI_BUNDLES=/bundles \
 # first, so the mirror grew 126 -> 267 MiB in 48 h after 0.3.10 (30 64-MiB arena heaps,
 # 2026-11-04). Two arenas keep freed scans reusable. The writer preloads jemalloc instead.
 ENV MALLOC_ARENA_MAX=2
+# Hybrid search scores a query with one ~1 ms matrix product; OpenBLAS threads per product would
+# only oversubscribe the 4 CPUs under concurrent requests and add per-thread buffers.
+ENV OPENBLAS_NUM_THREADS=1
 # Deployed revision reported as /health "build"; declared after `uv sync` so a new revision
 # keeps the dependency layer cached:
 #   docker build --build-arg AIWIKI_BUILD_COMMIT=$(git rev-parse HEAD) -t ai-wiki .

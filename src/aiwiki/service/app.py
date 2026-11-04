@@ -336,6 +336,9 @@ def health(bundle: str | None = None, authorization: str | None = Header(default
     with _read_window():
         name, BUNDLE = _resolve(bundle, principal)
         result = {"bundle": name, "service_version": VERSION, "build": build(), **B.health(BUNDLE)}
+        embedding = B.embedding_state(BUNDLE)
+        if embedding is not None:
+            result["embedding"] = embedding
         if CURATE_ON:
             result["writer_agent"] = curate_runtime._agent_metadata()
         return result
@@ -395,8 +398,11 @@ def search(q: str = Query(...), top_k: int = Query(10, gt=0, le=1000), bundle: s
     _enabled("search")
     with _read_window():
         _name, BUNDLE = _resolve(bundle, principal)
-        results, total = B.search_page(BUNDLE, q, top_k)
-        return {"results": results, "total": total}
+        results, total, retrieval = B.hybrid_search_page(BUNDLE, q, top_k)
+        answer = {"results": results, "total": total}
+        if retrieval is not None:  # only with embedding configured: without it the answer is as before
+            answer["retrieval"] = retrieval
+        return answer
 
 
 @app.get("/links")

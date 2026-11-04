@@ -129,6 +129,18 @@ TOON list output keeps concept evidence fields off directories and structural fi
 search/grep/log output includes `shown`, `total`, and `truncated` so callers cannot mistake a
 bounded response for a complete result set.
 
+With an embedding endpoint configured (the `AIWIKI_EMBED_*` rows below), search is hybrid: the
+lexical ranking above is fused with a semantic one, so a question asked in English finds a concept
+written in Chinese. Each concept is cut into chunks of at most 1,800 characters, embedded once and
+cached on disk by the sha256 of its input; a concept scores by its best chunk. The two top-100
+lists are merged by reciprocal rank fusion (lexical:semantic 1:1 for a query with Chinese in it,
+1:3 otherwise) and exact-phrase hits stay first. Each row then says how it was found
+(`retrieval`: lexical, vector or both; `vector_rank`), a row only the semantic side found has no
+`score` and no matched terms, and the answer carries `retrieval` (mode, and the reason whenever
+it answered lexically). Chunk vectors are built in the background; until they are complete, or
+when a query's embedding fails or is slower than `AIWIKI_EMBED_TIMEOUT_S`, the answer is the
+lexical one. `/health` reports `embedding` (model, chunks embedded of total, ready).
+
 An ingest is not verification. New/changed concepts are audited separately; a completed
 audit is either `passed` or `needs_attention`. The latter is a valid outcome that leaves an
 explicitly bounded durable concept unverified; it is not retried without new evidence, except
@@ -291,6 +303,8 @@ contract, credential boundaries, and a separate read-only client workflow.
 | `AIWIKI_LLM` | `codex` (default) or `off`: off, the writer never starts an agent process, ignores `config.agent` and `AIWIKI_AGENT_*`, and answers the legacy Codex routes with 409; it refuses to start without `AIWIKI_AUDIT=external`, since nothing else would verify |
 | `AIWIKI_INTAKE`, `AIWIKI_AUDIT`, `AIWIKI_CHANGESETS_COMMIT`, `AIWIKI_RESTRUCTURE`, `AIWIKI_CODEX_AUDIT_MANUAL` | rollout switches, reported by `GET /whoami` under `modes` (see "Final state" above and `src/aiwiki/service/app.py`) |
 | `AIWIKI_CONFIG` | local client / worker JSON config (default `~/.ai-wiki/config.json`) |
+| `AIWIKI_EMBED_URL`, `AIWIKI_EMBED_MODEL`, `AIWIKI_EMBED_KEY` | service: an OpenAI-compatible embedding endpoint (base URL without `/v1`), its model and bearer key; all three set turns hybrid search on, any unset keeps search lexical and its answers exactly as before |
+| `AIWIKI_EMBED_DIMS`, `AIWIKI_EMBED_TIMEOUT_S`, `AIWIKI_EMBED_CACHE` | service: embedding dimension (default 768), seconds a query's embedding may take before the search answers lexically (default 3), and the chunk vector cache directory (default `/tmp/ai-wiki-embeddings`; one file per bundle, model and dimension) |
 | `AIWIKI_TIMEOUT` | client: seconds each request may take on the standard request path (default 30, at most 86400): the bundle overview (`ai-wiki` alone), `health`, `ls`, `cat`, `grep`, `search`, `links`, `log`, `jobs`, `bundle list`, the writes `ingest`, `audit`, `bundle create` and `bundle rm`, and `maintain` (the commands it runs inherit it, inside their 45 s cap); `doctor`, `admin`, `maint`, `review` and the workspace commands (`workspace`, `concept`, `validate`, `propose`) ignore it, keeping their own timeouts (60 to 300 s) |
 | `AIWIKI_RETRY_S` | client: seconds from a read's (GET) first attempt on that standard path (the read commands just listed) during which it retries a 502/503/504, Cloudflare's 520-524/530, a timeout, TLS read error or dropped connection, with jittered backoff (default 20, at most 86400; 0 never retries); a retry gets what is left of that window, a last one at least 3 s, so a read gives up within max(`AIWIKI_TIMEOUT`, `AIWIKI_RETRY_S` + 3) s (30 at the defaults); a write is never retried. A GET of `doctor`, `admin`, `maint`, `review` and the workspace commands retries only the network failures (a timeout, the TLS handshake's included, a TLS read error, a refused, reset or dropped connection; every status goes back to the command), for this many seconds from its first failure, each attempt with the command's own timeout, so it gives up within twice that timeout plus `AIWIKI_RETRY_S` (about 140 s for `doctor`, about 620 s for a `workspace pull` at the defaults) |
 | `AIWIKI_AGENT_BIN` | override `agent.bin`; Codex executable or compatible wrapper (default `codex`) |

@@ -32,6 +32,7 @@ from aiwiki.engine.document import (
     parse_document,
 )
 from aiwiki.engine.validate import OKF_VERSION, validate_profile_document
+from aiwiki.service import vectors as _vectors
 
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SKIP_TOP = {"sources", ".okf"}
@@ -778,13 +779,107 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
 def search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int]:
     """The first ``top_k`` results of ``search`` and the number of concepts that matched; only the
     rows returned get a snippet."""
+    return hybrid_search_page(root, query, top_k)[:2]
+
+
+def hybrid_search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int, dict | None]:
+    """``search_page`` plus how it was retrieved. With embedding configured (``vectors.settings``)
+    the lexical ranking is fused with the concepts' semantic ranking; whenever that is not
+    available the lexical rows come back unchanged and ``retrieval`` says why. Without it, rows
+    and total are exactly the lexical search's and ``retrieval`` is None.
+
+    ``total`` stays the number of lexical matches either way (plus the concepts only the semantic
+    side found), so it never depends on the embedder's health: the fused order comes first, then
+    every remaining lexical match in lexical order."""
+    vstore = _vectors.store(root)
+    if vstore is None:
+        rows, total = _lexical_search_page(root, query, top_k)
+        return rows, total, None
+    snapshot = _snapshot(root)
+    ranked = _lexical_ranking(root, query, snapshot)
+    index = vstore.ensure(snapshot, _embedding_inputs(snapshot))
+    vector, why = vstore.rank(index, query) if query.strip() else ([], "empty query")
+    state = _vector_state(vstore.state())
+    if not vector:
+        rows = _lexical_rows(ranked[:top_k], query)
+        for row in rows:
+            row["retrieval"] = "lexical"
+        return rows, len(ranked), {"mode": "lexical", "reason": why, **state}
+    lexical_paths = [entry[4][0] for entry in ranked]
+    by_path = {entry[4][0]: entry for entry in ranked}
+    phrase = {entry[4][0] for entry in ranked if entry[0]}
+    fused = _vectors.fuse(lexical_paths, phrase, vector, query)
+    placed = set(fused)
+    order = fused + [p for p in lexical_paths if p not in placed]  # lexical matches past the fusion
+    vector_rank = {path: i + 1 for i, path in enumerate(vector)}
+    records = {rel: (fm, body) for _path, rel, fm, body, _text in snapshot.records}
+    rows = []
+    for path in order[:top_k]:
+        if path in by_path:
+            (row,) = _lexical_rows([by_path[path]], query)
+        elif path in records:
+            row = _vector_only_row(path, *records[path])
+        else:
+            continue
+        row["retrieval"] = "both" if path in by_path and path in vector_rank else (
+            "lexical" if path in by_path else "vector")
+        if path in vector_rank:
+            row["vector_rank"] = vector_rank[path]
+        rows.append(row)
+    return rows, len(order), {"mode": "hybrid", **state}
+
+
+def embedding_state(root: Path) -> dict | None:
+    """The semantic index's state for /health (None when embedding is not configured). It starts
+    the background build for the current snapshot, so a fresh mirror embeds before its first
+    search, but never waits for it."""
+    vstore = _vectors.store(root)
+    if vstore is None:
+        return None
+    snapshot = _snapshot(root)
+    vstore.ensure(snapshot, _embedding_inputs(snapshot))
+    return vstore.state()
+
+
+def _embedding_inputs(snapshot: _Snapshot) -> list[tuple[str, str, str, str]]:
+    return [(rel, fm.get("title") or "", fm.get("description") or "", body)
+            for _path, rel, fm, body, _text in snapshot.records]
+
+
+def _vector_state(state: dict) -> dict:
+    return {"embedding": {k: state[k] for k in ("model", "chunks", "embedded", "ready", "error") if k in state}}
+
+
+def _vector_only_row(rel: str, fm: dict, body: str) -> dict:
+    """A search row for a concept only the semantic ranking found: the lexical row's fields, no
+    lexical score or matched terms; the description already explains it, so the snippet is empty
+    unless there is no description (then the body's opening line)."""
+    meta = concept_metadata(fm)
+    description = str(fm.get("description") or "")
+    return {"path": rel, "title": fm.get("title"), "type": fm.get("type"),
+            "tags": list(fm.get("tags") or []), "score": None,
+            "match": {"phrase": False, "coverage": 0.0, "fields": [], "terms": []},
+            "description": fm.get("description"),
+            "snippet": "" if description else _snippet(body, "", ()), **meta}
+
+
+def _lexical_search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int]:
+    """The lexical ranking: every concept matching a query term, best first."""
+    ranked = _lexical_ranking(root, query)
+    return _lexical_rows(ranked[:top_k], query), len(ranked)
+
+
+def _lexical_ranking(root: Path, query: str, snapshot: _Snapshot | None = None) -> list[tuple]:
+    """Every concept matching a query term, best first, as ``(phrase, score, rank, generated,
+    (rel, fm, body, match, meta))`` without snippets: building a row's snippet is the costly part,
+    so only the rows a caller returns get one (``_lexical_rows``)."""
     phrase = _normalize_search_text(query)
     terms = _tokens(query)
     if not terms:
-        return [], 0
-    index = _derived(_snapshot(root), _SearchIndex)
+        return []
+    index = _derived(snapshot or _snapshot(root), _SearchIndex)
     if not index.records:
-        return [], 0
+        return []
 
     # Each concept's lexical score sums its terms' contributions in query order, as it always has.
     lexical: dict[int, float] = {}
@@ -816,15 +911,20 @@ def search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[di
         scored.append((bool(phrase_fields), score, knowledge_rank, meta["generated_at"], (rel, fm, body, match, meta)))
     # An exact phrase secures recall; the score ranks everything else.
     scored.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
-    rows = [{
+    return scored
+
+
+def _lexical_rows(ranked: list[tuple], query: str) -> list[dict]:
+    """Search rows for ``ranked`` entries of ``_lexical_ranking``, each with its snippet."""
+    phrase, terms = _normalize_search_text(query), _tokens(query)
+    return [{
         "path": rel, "title": fm.get("title"), "type": fm.get("type"),
         "tags": list(fm.get("tags") or []), "score": score,
         "match": match,
         "description": fm.get("description"),
         "snippet": _snippet(body, phrase, terms),
         **meta,
-    } for _phrase, score, _rank, _generated, (rel, fm, body, match, meta) in scored[:top_k]]
-    return rows, len(scored)
+    } for _phrase, score, _rank, _generated, (rel, fm, body, match, meta) in ranked]
 
 
 def _knowledge_rank(meta: dict) -> int:
