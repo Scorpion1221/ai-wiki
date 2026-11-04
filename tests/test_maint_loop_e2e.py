@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from gate_fixture import CURATOR, METRIC, Gate, git
@@ -356,7 +357,9 @@ def test_a_collector_the_network_failed_runs_once_more(loop, capsys, monkeypatch
         return cursor(bundle, name)
 
     monkeypatch.setattr(maint, "_cursor", flaky)
-    monkeypatch.setattr(maint.time, "sleep", sleeps.append)
+    # maint's own name for time only: maint.time.sleep is the process's time.sleep, which a
+    # subprocess wait with a timeout polls with (0.001, 0.002, …) — CI saw [0.001, 60] (2026-11-04).
+    monkeypatch.setattr(maint, "time", SimpleNamespace(sleep=sleeps.append))
     code, begun = wiki_json(capsys, "maint", "begin", "--run", RUN, "--state-dir", loop["st"],
                             "--config", loop["config"])
     assert code == 0 and begun["collect"]["issues"]["status"] == "ok", begun
