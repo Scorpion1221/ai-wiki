@@ -229,10 +229,13 @@ def grade(facts: dict, args: argparse.Namespace) -> list[dict]:
         rows.append(row("维护", "运行", "bad", "窗口内没有任何写入", "每天 02:00 一次"))
     else:
         span = m["span_minutes"]
-        busy = span >= args.min_run_minutes or q["ready"] == 0
+        # A run that took its whole item budget stopped by design, not early (maint end: "budget").
+        spent = m["closed"] >= args.run_items
+        busy = span >= args.min_run_minutes or q["ready"] == 0 or spent
         rows.append(row("维护", "运行时长", "ok" if busy else "bad",
-                        f"{span} 分钟（{cst(parse_ts(m['first_write']))}–{cst(parse_ts(m['last_write']))}）",
-                        f"≥ {args.min_run_minutes} 分钟，或队列已清空"))
+                        f"{span} 分钟（{cst(parse_ts(m['first_write']))}–{cst(parse_ts(m['last_write']))}）"
+                        + ("，条目额度用完" if spent and span < args.min_run_minutes else ""),
+                        f"≥ {args.min_run_minutes} 分钟，或队列已清空，或用完 {args.run_items} 条额度"))
         done = m["closed"]
         rows.append(row("维护", "处理条目", "ok" if done >= args.min_items or q["ready"] == 0 else "bad",
                         f"{done}（写入 {m['outcomes'].get('curated', 0)} · 跳过 {m['outcomes'].get('skipped', 0)} · "
@@ -359,6 +362,8 @@ def build_parser() -> argparse.ArgumentParser:
     t = p.add_argument_group("expectations")
     t.add_argument("--min-run-minutes", type=int, default=180, help="maintainer busy time (deadline 240m)")
     t.add_argument("--min-items", type=int, default=60, help="items the maintainer closes")
+    t.add_argument("--run-items", type=int, default=100,
+                   help="the maintainer prompt's max_items: a run that closed this many stopped on its budget")
     t.add_argument("--min-gate-pct", type=float, default=90, help="changesets accepted on first proposal")
     t.add_argument("--max-skip-pct", type=float, default=60, help="items closed as skipped or duplicate")
     t.add_argument("--min-audits", type=int, default=60, help="concepts the auditor reviews")
