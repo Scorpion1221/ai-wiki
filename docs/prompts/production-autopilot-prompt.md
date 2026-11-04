@@ -9,7 +9,7 @@
 ```sh
 bundle=solvely-wiki                                 # 每条 ai-wiki 命令都带 -b "$bundle"
 run="$MULTICA_ISSUE_ID"
-max_items=200                                       # 每次最多 200 个条目（实际由 deadline 截止）
+max_items=100                                       # 每次最多 100 个条目：宁可慢，每条按 Skill §3.3 自查后再提交
 deadline=240m                                       # maint begin 必须带 --deadline "$deadline"（默认 100m 太短）
 cfg="$HOME/.ai-wiki/maint-solvely-wiki.json"        # 采集参数，内容见下
 ```
