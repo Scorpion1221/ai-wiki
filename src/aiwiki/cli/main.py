@@ -525,6 +525,7 @@ def _search_row(result: dict) -> dict:
         "stale_on": result.get("stale_on") or "",
         "basis": result.get("freshness_basis") or "",
         "score": result.get("score"),
+        "retrieval": result.get("retrieval") or "lexical",
         "phrase": bool(match.get("phrase")),
         "coverage": match.get("coverage"),
         "fields": "|".join(map(str, match.get("fields") or [])),
@@ -1230,17 +1231,24 @@ def main(argv=None) -> int:
                 "shown": len(results),
                 "total": total,
                 "truncated": len(results) < total,
+                **({"retrieval": d["retrieval"]} if isinstance(d.get("retrieval"), dict) else {}),
             }, ensure_ascii=False, indent=2))
         else:
             rows = (_search_row(result) for result in results)
-            groups = [_count_lines(len(results), total),
-                      table_lines(
+            groups = [_count_lines(len(results), total)]
+            retrieval = d.get("retrieval") if isinstance(d.get("retrieval"), dict) else None
+            if retrieval and (retrieval.get("mode") == "hybrid" or retrieval.get("reason")):
+                mode = {"mode": retrieval.get("mode")}
+                if retrieval.get("reason"):
+                    mode["reason"] = retrieval["reason"]
+                groups.append(object_lines("retrieval", mode))
+            groups.append(table_lines(
                           "results", rows,
                           ("path", "title", "status", "trust", "freshness", "verification_current",
                            "generated_at", "verified_at", "current_verified_at", "stale_on", "basis", "score",
-                           "phrase",
+                           "retrieval", "phrase",
                            "coverage", "fields", "terms", "context"),
-                      )]
+                      ))
             if isinstance(total, int) and len(results) < total:
                 top = min(total, _TOP_K_MAX)
                 groups.append(table_lines("help", ({

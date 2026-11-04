@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.14 -->
+<!-- ai-wiki:version 0.3.16 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -72,6 +72,8 @@ covers every concept at any depth and ranks an exact phrase first, then by score
 most and CJK bigrams that straddle words count little, so filler bigrams of a question do not lift
 a long unrelated concept (`phrase`, `coverage`, `fields` and `terms` explain each match; coverage
 does not rank); trust/freshness only break close ties, so apply the evidence gate after retrieval.
+When the server runs hybrid search, a row with `retrieval: vector` was found by meaning, not by
+words: it has no `score` and no `terms`, and that alone is no reason to rewrite the query.
 
 Run one well-formed search and read the top candidates; when the top hits' `terms` show the
 query's distinctive words went unmatched, rewrite it once (the user's other wording,
