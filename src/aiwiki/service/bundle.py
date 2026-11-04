@@ -32,6 +32,7 @@ from aiwiki.engine.document import (
     parse_document,
 )
 from aiwiki.engine.validate import OKF_VERSION, validate_profile_document
+from aiwiki.service import vectors as _vectors
 
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SKIP_TOP = {"sources", ".okf"}
@@ -778,6 +779,70 @@ def search(root: Path, query: str, top_k: int | None = 10) -> list[dict]:
 def search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int]:
     """The first ``top_k`` results of ``search`` and the number of concepts that matched; only the
     rows returned get a snippet."""
+    return hybrid_search_page(root, query, top_k)[:2]
+
+
+def hybrid_search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int, dict | None]:
+    """``search_page`` plus how it was retrieved. With embedding configured (``vectors.settings``)
+    the lexical ranking is fused with the concepts' semantic ranking; whenever that is not
+    available the lexical rows come back unchanged and ``retrieval`` says why. Without it, rows
+    and total are exactly the lexical search's and ``retrieval`` is None."""
+    lexical_rows, lexical_total = _lexical_search_page(root, query, None if _vectors.settings() else top_k)
+    if _vectors.settings() is None:
+        return lexical_rows, lexical_total, None
+    snapshot = _snapshot(root)
+    vstore = _vectors.store(root)
+    index = vstore.ensure(snapshot, [(rel, fm.get("title") or "", fm.get("description") or "", body)
+                                     for _path, rel, fm, body, _text in snapshot.records])
+    vector, why = vstore.rank(index, query) if query.strip() else ([], "empty query")
+    state = vstore.state()
+    if not vector:
+        for row in lexical_rows:
+            row["retrieval"] = "lexical"
+        return lexical_rows[:top_k], lexical_total, {"mode": "lexical", "reason": why, **_vector_state(state)}
+    by_path = {row["path"]: row for row in lexical_rows}
+    phrase = {row["path"] for row in lexical_rows if row["match"]["phrase"]}
+    fused = _vectors.fuse([row["path"] for row in lexical_rows], phrase, vector, query)
+    vector_rank = {path: i + 1 for i, path in enumerate(vector)}
+    rows = []
+    for path in fused[:top_k]:
+        row = by_path.get(path) or _vector_only_row(snapshot, path)
+        if row is None:
+            continue
+        row["retrieval"] = "both" if path in by_path and path in vector_rank else (
+            "lexical" if path in by_path else "vector")
+        if path in vector_rank:
+            row["vector_rank"] = vector_rank[path]
+        rows.append(row)
+    return rows, len(fused), {"mode": "hybrid", **_vector_state(state)}
+
+
+def embedding_state(root: Path) -> dict | None:
+    """The semantic index's state for /health (None when embedding is not configured); it never
+    embeds, only reports what the last search found."""
+    vstore = _vectors.store(root)
+    return None if vstore is None else vstore.state()
+
+
+def _vector_state(state: dict) -> dict:
+    return {"embedding": {k: state[k] for k in ("model", "chunks", "embedded", "ready", "error") if k in state}}
+
+
+def _vector_only_row(snapshot: _Snapshot, path: str) -> dict | None:
+    """A search row for a concept only the semantic ranking found: the lexical row's fields, no
+    lexical score or matched terms, and its description's opening as the snippet."""
+    for _path, rel, fm, body, _text in snapshot.records:
+        if rel == path:
+            meta = concept_metadata(fm)
+            return {"path": rel, "title": fm.get("title"), "type": fm.get("type"),
+                    "tags": list(fm.get("tags") or []), "score": None,
+                    "match": {"phrase": False, "coverage": 0.0, "fields": [], "terms": []},
+                    "description": fm.get("description"), "snippet": _snippet(body, "", ()), **meta}
+    return None
+
+
+def _lexical_search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int]:
+    """The lexical ranking: every concept matching a query term, best first."""
     phrase = _normalize_search_text(query)
     terms = _tokens(query)
     if not terms:
