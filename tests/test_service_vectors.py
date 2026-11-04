@@ -171,6 +171,7 @@ def test_an_english_question_finds_the_chinese_concept(tmp_path, embedder) -> No
     assert rows[0]["path"] == "features/tutor-init.md"
     assert rows[0]["retrieval"] == "vector" and rows[0]["vector_rank"] == 1 and rows[0]["score"] is None
     assert rows[0]["match"] == {"phrase": False, "coverage": 0.0, "fields": [], "terms": []}
+    assert rows[0]["snippet"] == "" and rows[0]["description"]  # the description explains it once
 
 
 def test_rows_found_both_ways_keep_their_lexical_score_and_terms(tmp_path, embedder) -> None:
