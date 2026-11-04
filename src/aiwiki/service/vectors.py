@@ -28,6 +28,7 @@ CHUNK_CHARS, CHUNK_OVERLAP = 1800, 200
 RRF_K = 60
 CANDIDATES = 100  # each list contributes its top 100 to the fusion
 BATCH = 16  # chunks per embedding request while building
+PAUSE_S = 30  # after a failed query embedding, searches stay lexical this long instead of each waiting
 _CJK = re.compile(r"[一-鿿]")
 _FOOTNOTE_DEF = re.compile(r"(?m)^\[\^[^\]]+\]:.*$")
 _FRONTMATTER = re.compile(r"^---\n.*?\n---\n?", re.S)
@@ -44,10 +45,10 @@ except AttributeError:  # 3.11
 class Settings:
     url: str
     model: str
-    key: str
-    dims: int
-    timeout: float
-    cache_dir: Path
+    key: str = field(repr=False)  # never in a log line or a traceback's repr
+    dims: int = 768
+    timeout: float = 3.0
+    cache_dir: Path = Path("/tmp/ai-wiki-embeddings")
 
     @property
     def tag(self) -> str:
@@ -61,8 +62,13 @@ def settings(environ=os.environ) -> Settings | None:
                                                                    "AIWIKI_EMBED_KEY"))
     if not (url and model and key):
         return None
-    dims = int(environ.get("AIWIKI_EMBED_DIMS", "768"))
-    timeout = float(environ.get("AIWIKI_EMBED_TIMEOUT_S", "3"))
+    try:
+        dims = int(environ.get("AIWIKI_EMBED_DIMS", "768"))
+        timeout = float(environ.get("AIWIKI_EMBED_TIMEOUT_S", "3"))
+    except ValueError:
+        return None  # a malformed setting keeps search lexical rather than failing every request
+    if dims <= 0 or not (0 < timeout <= 60):
+        return None
     cache = Path(environ.get("AIWIKI_EMBED_CACHE", "/tmp/ai-wiki-embeddings")).expanduser()
     return Settings(url.rstrip("/"), model, key, dims, timeout, cache)
 
@@ -110,33 +116,70 @@ def _unit(vec) -> array | None:
     return array("f", (x / norm for x in values))
 
 
-def embed(config: Settings, inputs: list[str], timeout: float) -> list[array]:
-    """Unit vectors for ``inputs`` from the endpoint, in order; raises on any failure or a
-    malformed answer (wrong count, wrong dimension, non-numbers)."""
+class EmbedError(Exception):
+    """The endpoint failed, timed out or answered something that is not the vectors asked for."""
+
+
+def _post(config: Settings, inputs: list[str], timeout: float) -> list[array]:
     body = json.dumps({"model": config.model, "input": inputs, "dimensions": config.dims}).encode()
     req = urllib.request.Request(f"{config.url}/v1/embeddings", data=body, method="POST", headers={
         "Authorization": f"Bearer {config.key}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as response:
-        answer = json.load(response)
-    rows = sorted(answer.get("data") or [], key=lambda row: row.get("index", 0))
-    vectors = [_unit(row.get("embedding")) for row in rows]
+        answer = json.loads(response.read())
+    rows = answer.get("data") if isinstance(answer, dict) else None
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise EmbedError("the embedding endpoint answered no data list")
+    order = [row.get("index") for row in rows]
+    if sorted(i for i in order if type(i) is int) != list(range(len(inputs))):  # each input exactly once
+        raise EmbedError("the embedding endpoint answered vectors without a usable index")
+    vectors = [_unit(row.get("embedding")) for row in sorted(rows, key=lambda row: row["index"])]
     if len(vectors) != len(inputs) or any(v is None or len(v) != config.dims for v in vectors):
-        raise ValueError(f"the embedding endpoint answered {len(vectors)} vectors for {len(inputs)} inputs")
+        raise EmbedError(f"the embedding endpoint answered {len(vectors)} vectors for {len(inputs)} inputs")
     return vectors
+
+
+def embed(config: Settings, inputs: list[str], timeout: float) -> list[array]:
+    """Unit vectors for ``inputs`` from the endpoint, in order, within ``timeout`` seconds in all
+    (DNS, connection and a slowly trickling answer included); any failure or malformed answer
+    raises EmbedError, never anything else. A request that outlives the deadline finishes on its
+    own daemon thread and is discarded."""
+    result: dict = {}
+
+    def call():
+        try:
+            result["vectors"] = _post(config, inputs, timeout)
+        except BaseException as exc:  # noqa: BLE001 - every failure is the caller's EmbedError
+            result["error"] = exc
+
+    worker = threading.Thread(target=call, name="embedding-request", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise EmbedError(f"no answer within {timeout:g}s")
+    if "error" in result:
+        exc = result["error"]
+        raise EmbedError(_why(exc)) from (exc if isinstance(exc, Exception) else None)
+    return result["vectors"]
 
 
 @dataclass
 class _Index:
     """Chunk vectors of one snapshot's concepts, filled by the builder thread."""
     owners: list[str] = field(default_factory=list)  # the concept path of each chunk
-    inputs: list[str] = field(default_factory=list)
+    shas: list[str] = field(default_factory=list)  # sha256 of each chunk's embedding input
+    pending: dict[int, str] = field(default_factory=dict)  # chunk position -> input, until embedded
     vectors: dict[int, array] = field(default_factory=dict)  # chunk position -> unit vector
     error: str | None = None
 
 
 class Store:
     """The vector side of one bundle path: a disk cache shared by every snapshot, and the index of
-    the newest snapshot it was asked about. Thread-safe; the builder runs at most once at a time."""
+    the newest snapshot it was asked about. Thread-safe; one builder at a time, always working on
+    the newest index, so a pull during a build never embeds a chunk twice.
+
+    The cache file holds exactly the current index's vectors once a build completes (it is
+    rewritten atomically, so it never grows with history); an unwritable cache directory only
+    means the vectors live in memory until the next restart."""
 
     def __init__(self, config: Settings, bundle: Path):
         self.config = config
@@ -146,29 +189,53 @@ class Store:
         self.index: _Index | None = None
         self.key: object = None  # the snapshot the index belongs to
         self.building = False
+        self.disk_error: str | None = None
+        self.paused_until = 0.0  # monotonic time until which query embedding is skipped
+        self.paused_why = ""
         self._load()
 
     def _load(self) -> None:
         try:
-            with open(self.path, encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        row = json.loads(line)
-                        vec = _unit(row["v"])
-                    except (ValueError, KeyError, TypeError):
-                        continue  # a torn last line after a crash: that chunk is embedded again
-                    if vec is not None and len(vec) == self.config.dims:
-                        self.cache[row["s"]] = vec
-        except FileNotFoundError:
-            pass
+            raw = self.path.read_bytes()
+        except OSError:
+            return
+        complete, _sep, _torn = raw.rpartition(b"\n")  # a torn last line after a crash is dropped
+        for line in complete.decode("utf-8", "replace").splitlines():
+            try:
+                row = json.loads(line)
+                vec = _unit(row["v"])
+                sha = row["s"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if vec is not None and len(vec) == self.config.dims and isinstance(sha, str):
+                self.cache[sha] = vec
 
     def _append(self, rows: list[tuple[str, array]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as f:
-            for sha, vec in rows:
-                f.write(json.dumps({"s": sha, "v": [round(x, 6) for x in vec]}) + "\n")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write("".join(json.dumps({"s": sha, "v": [round(x, 6) for x in vec]}) + "\n"
+                                for sha, vec in rows))
+        except OSError as exc:
+            self.disk_error = _why(exc)
 
-    def ensure(self, key: object, concepts: list[tuple[str, str, str, str]]) -> _Index:
+    def _compact(self, index: _Index) -> None:
+        """Keep only ``index``'s vectors, on disk and in memory: chunks a pull replaced are dropped."""
+        with self.lock:
+            if self.index is not index:
+                return
+            keep = {sha: self.cache[sha] for sha in index.shas if sha in self.cache}
+            self.cache = keep
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                for sha, vec in keep.items():
+                    f.write(json.dumps({"s": sha, "v": [round(x, 6) for x in vec]}) + "\n")
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            self.disk_error = _why(exc)
+
+    def ensure(self, key: object, concepts) -> _Index:
         """The index for snapshot ``key`` (its (path, title, description, body) concepts), starting
         the builder for whatever the cache lacks. Never waits for an embedding."""
         with self.lock:
@@ -176,63 +243,93 @@ class Store:
                 index = _Index()
                 for path, title, description, body in concepts:
                     for text in chunks(title, description, body):
+                        i = len(index.owners)
+                        sha = _sha(text)
                         index.owners.append(path)
-                        index.inputs.append(text)
-                for i, text in enumerate(index.inputs):
-                    vec = self.cache.get(_sha(text))
-                    if vec is not None:
-                        index.vectors[i] = vec
+                        index.shas.append(sha)
+                        vec = self.cache.get(sha)
+                        if vec is not None:
+                            index.vectors[i] = vec
+                        else:
+                            index.pending[i] = text
                 self.index, self.key = index, key
             index = self.index
-            if len(index.vectors) < len(index.inputs) and not self.building:
+            if index.pending and not self.building:
                 self.building = True
-                threading.Thread(target=self._build, args=(index,), name="embedding-builder", daemon=True).start()
+                threading.Thread(target=self._build, name="embedding-builder", daemon=True).start()
             return index
 
-    def _build(self, index: _Index) -> None:
+    def _next_batch(self) -> tuple[_Index, list[int], list[str]] | None:
+        """Up to BATCH chunks the newest index still lacks; ones the cache already holds (embedded
+        for an older index) are filled in without a request."""
+        with self.lock:
+            index = self.index
+            if index is None:
+                return None
+            for i in [i for i in index.pending if index.shas[i] in self.cache]:
+                index.vectors[i] = self.cache[index.shas[i]]
+                del index.pending[i]
+            part = list(index.pending)[:BATCH]
+            return (index, part, [index.pending[i] for i in part]) if part else None
+
+    def _build(self) -> None:
+        failures = 0
+        done_for = None
         try:
-            todo = [i for i in range(len(index.inputs)) if i not in index.vectors]
-            for start in range(0, len(todo), BATCH):
-                part = todo[start:start + BATCH]
-                texts = [index.inputs[i] for i in part]
-                for attempt in range(5):
-                    try:
-                        vectors = embed(self.config, texts, timeout=max(30.0, self.config.timeout))
-                        break
-                    except (OSError, ValueError) as exc:
-                        index.error = _why(exc)
-                        time.sleep(min(60, 2 ** attempt))
-                else:
-                    return  # the next search after this snapshot's successor, or a restart, tries again
+            while True:
+                batch = self._next_batch()
+                if batch is None:
+                    with self.lock:
+                        done_for = self.index
+                    break
+                index, part, texts = batch
+                try:
+                    vectors = embed(self.config, texts, timeout=max(30.0, self.config.timeout))
+                except EmbedError as exc:
+                    index.error = str(exc)
+                    failures += 1
+                    if failures >= 5:
+                        return  # the next search, or a restart, tries again
+                    time.sleep(min(60, 2 ** failures))
+                    continue
+                failures = 0
                 rows = []
                 with self.lock:
                     for i, vec in zip(part, vectors, strict=True):
-                        index.vectors[i] = vec
-                        sha = _sha(index.inputs[i])
+                        sha = index.shas[i]
                         self.cache[sha] = vec
                         rows.append((sha, vec))
+                        if index.pending.pop(i, None) is not None:
+                            index.vectors[i] = vec
                 self._append(rows)
                 index.error = None
         finally:
             with self.lock:
                 self.building = False
+            if done_for is not None and not done_for.pending:
+                self._compact(done_for)
 
     def state(self) -> dict:
         index = self.index
-        total = len(index.inputs) if index else 0
+        total = len(index.owners) if index else 0
         done = len(index.vectors) if index else 0
+        error = (index.error if index else None) or self.disk_error
         return {"enabled": True, "model": self.config.model, "dims": self.config.dims,
                 "chunks": total, "embedded": done, "ready": bool(total) and done == total,
-                **({"error": index.error} if index and index.error else {})}
+                **({"error": error} if error else {})}
 
     def rank(self, index: _Index, query: str) -> tuple[list[str], str | None]:
         """Concept paths by their best chunk's cosine to ``query`` (top CANDIDATES), or ([], why)."""
-        if not index.inputs or len(index.vectors) < len(index.inputs):
-            return [], f"chunk vectors are being built ({len(index.vectors)}/{len(index.inputs)})"
+        if not index.owners or index.pending:
+            return [], f"chunk vectors are being built ({len(index.vectors)}/{len(index.owners)})"
+        left = self.paused_until - time.monotonic()
+        if left > 0:
+            return [], f"query embedding paused for {left:.0f}s after: {self.paused_why}"
         try:
             (qv,) = embed(self.config, [query_input(query)], timeout=self.config.timeout)
-        except (OSError, ValueError) as exc:
-            return [], f"query embedding failed: {_why(exc)}"
+        except EmbedError as exc:
+            self.paused_why, self.paused_until = str(exc), time.monotonic() + PAUSE_S
+            return [], f"query embedding failed: {exc}"
         best: dict[str, float] = {}
         for i, owner in enumerate(index.owners):
             sim = _dot(index.vectors[i], qv)

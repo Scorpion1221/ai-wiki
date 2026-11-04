@@ -29,7 +29,8 @@ def _vector(text: str) -> list[float]:
 
 class _Embedder:
     def __init__(self):
-        self.mode = "ok"  # ok | fail | slow | short | wrong-dims
+        self.mode = "ok"  # ok | fail | slow | short | wrong-dims | null-index | list-body | truncated | trickle
+        self.block: threading.Event | None = None  # set: requests wait on it (a build held mid-way)
         self.requests: list[list[str]] = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -53,14 +54,34 @@ class _Embedder:
                     return
                 if outer.mode == "slow":
                     time.sleep(1.0)
+                if outer.block is not None:
+                    outer.block.wait(5)
                 data = [{"index": i, "embedding": _vector(t)} for i, t in enumerate(body["input"])]
                 if outer.mode == "short":
                     data = data[:-1]
                 if outer.mode == "wrong-dims":
                     data = [{"index": d["index"], "embedding": d["embedding"][:2]} for d in data]
-                raw = json.dumps({"data": data}).encode()
+                if outer.mode == "null-index":
+                    data = [{"index": None, "embedding": d["embedding"]} for d in data]
+                answer = {"data": data}
+                if outer.mode == "list-body":
+                    answer = data
+                raw = json.dumps(answer).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                if outer.mode == "truncated":
+                    self.send_header("Content-Length", str(len(raw) + 100))
+                    self.end_headers()
+                    self.wfile.write(raw[: len(raw) // 2])
+                    return
+                if outer.mode == "trickle":
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    for byte in raw[:20]:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.2)
+                    return
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -174,7 +195,7 @@ def test_an_exact_phrase_hit_stays_first(tmp_path, embedder) -> None:
     assert rows[0]["path"] == lexical[0]["path"]
 
 
-@pytest.mark.parametrize("mode", ["fail", "slow", "short", "wrong-dims"])
+@pytest.mark.parametrize("mode", ["fail", "slow", "short", "wrong-dims", "null-index", "list-body", "truncated"])
 def test_a_failing_query_embedding_falls_back_to_lexical(tmp_path, embedder, mode) -> None:
     root = _bundle(tmp_path / "kb")
     _ready(root)
@@ -261,3 +282,133 @@ def test_fusion_weights_follow_the_query_language() -> None:
     lexical, vector = ["a", "b", "c"], ["c", "b", "a"]
     assert V.fuse(lexical, set(), vector, "english words")[0] == "c"  # meaning leads in English
     assert V.fuse(lexical, {"b"}, vector, "english words")[0] == "b"  # a phrase hit stays first
+
+
+def test_the_query_timeout_bounds_the_whole_call(tmp_path, embedder) -> None:
+    """A server trickling one byte at a time would hold a per-read socket timeout forever."""
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    embedder.mode = "trickle"
+
+    started = time.monotonic()
+    _rows, _total, retrieval = B.hybrid_search_page(root, "needle", 10)
+
+    assert time.monotonic() - started < 1.5  # AIWIKI_EMBED_TIMEOUT_S=0.5 here; 20 bytes take 4 s
+    assert retrieval["mode"] == "lexical" and "no answer within" in retrieval["reason"]
+
+
+def test_after_a_failed_query_embedding_searches_stay_lexical_without_waiting(tmp_path, embedder) -> None:
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    embedder.mode = "slow"
+    B.hybrid_search_page(root, "needle", 10)
+    embedder.requests.clear()
+
+    started = time.monotonic()
+    _rows, _total, retrieval = B.hybrid_search_page(root, "needle", 10)
+
+    assert time.monotonic() - started < 0.2 and embedder.requests == []
+    assert retrieval["mode"] == "lexical" and retrieval["reason"].startswith("query embedding paused")
+
+
+def test_a_pull_during_the_build_never_embeds_a_chunk_twice(tmp_path, embedder, monkeypatch) -> None:
+    monkeypatch.setattr(V, "BATCH", 1)
+    root = _bundle(tmp_path / "kb")
+    embedder.block = threading.Event()
+    B.hybrid_search_page(root, "warm up", 5)  # the builder starts and waits inside its first request
+    time.sleep(0.1)
+    edited = root / "features" / "tutor-init.md"
+    edited.write_text(edited.read_text(encoding="utf-8").replace("8 秒", "12 秒"), encoding="utf-8")
+    time.sleep(0.15)
+    B.hybrid_search_page(root, "warm up", 5)  # the new snapshot replaces the index mid-build
+    embedder.block.set()
+    _ready(root)
+
+    embedded = [text for batch in embedder.requests for text in batch if not text.startswith("task:")]
+    assert len(embedded) == len(set(embedded))
+    assert len(embedded) <= 4  # three concepts, plus at most the one old version already in flight
+
+
+def test_an_unwritable_cache_keeps_vectors_in_memory(tmp_path, embedder, monkeypatch) -> None:
+    blocked = tmp_path / "ro"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    monkeypatch.setenv("AIWIKI_EMBED_CACHE", str(blocked / "cache"))
+    V._stores.clear()
+    root = _bundle(tmp_path / "kb")
+    try:
+        _ready(root)
+        rows, _total, retrieval = B.hybrid_search_page(root, "how long does the classroom take to start", 5)
+    finally:
+        blocked.chmod(0o700)
+
+    assert retrieval["mode"] == "hybrid" and rows[0]["path"] == "features/tutor-init.md"
+    assert "error" in B.embedding_state(root)
+    assert sum(len(b) for b in embedder.requests if not b[0].startswith("task:")) == 3
+
+
+def test_the_cache_keeps_only_current_chunks(tmp_path, embedder) -> None:
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    edited = root / "features" / "tutor-init.md"
+    for n in range(3):
+        edited.write_text(edited.read_text(encoding="utf-8").replace(f"{8 + n} 秒", f"{9 + n} 秒"), encoding="utf-8")
+        time.sleep(0.15)
+        _ready(root)
+    time.sleep(0.2)  # compaction runs when the builder finishes
+
+    cache = next((tmp_path / "embed-cache").glob("*.jsonl"))
+    assert len(cache.read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_total_counts_every_lexical_match_whatever_the_embedder_does(tmp_path, embedder) -> None:
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    lexical_total = B._lexical_search_page(root, "定价", None)[1]
+
+    hybrid = B.hybrid_search_page(root, "定价", 10)
+    embedder.mode = "fail"
+    V._stores[root].paused_until = 0
+    fallback = B.hybrid_search_page(root, "定价", 10)
+
+    assert hybrid[2]["mode"] == "hybrid" and fallback[2]["mode"] == "lexical"
+    assert hybrid[1] >= lexical_total and fallback[1] == lexical_total
+
+
+@pytest.mark.parametrize("name,value", [("AIWIKI_EMBED_DIMS", "many"), ("AIWIKI_EMBED_TIMEOUT_S", "soon"),
+                                        ("AIWIKI_EMBED_TIMEOUT_S", "0")])
+def test_a_malformed_setting_keeps_search_lexical(tmp_path, embedder, monkeypatch, name, value) -> None:
+    monkeypatch.setenv(name, value)
+    root = _bundle(tmp_path / "kb")
+
+    rows, total, retrieval = B.hybrid_search_page(root, "needle", 10)
+
+    assert retrieval is None and B.embedding_state(root) is None
+    assert (rows, total) == B._lexical_search_page(root, "needle", 10)
+
+
+def test_the_key_is_not_in_the_settings_repr(embedder) -> None:
+    assert "fixture-key" not in repr(V.settings())
+
+
+def test_search_and_health_endpoints(tmp_path, embedder, monkeypatch) -> None:
+    from test_smoke import AUTH, _client
+
+    root = _bundle(tmp_path / "kb")
+    client = _client(root, monkeypatch)
+    health = client.get("/health", headers=AUTH).json()  # starts the build
+    assert health["embedding"]["model"] == "fixture-model"
+    end = time.monotonic() + 5
+    while not client.get("/health", headers=AUTH).json()["embedding"]["ready"]:
+        assert time.monotonic() < end
+        time.sleep(0.02)
+
+    answer = client.get("/search", params={"q": "how long does the classroom take to start"}, headers=AUTH).json()
+
+    assert answer["retrieval"]["mode"] == "hybrid"
+    assert answer["results"][0]["path"] == "features/tutor-init.md" and answer["results"][0]["retrieval"] == "vector"
+    for name in ("AIWIKI_EMBED_URL", "AIWIKI_EMBED_MODEL", "AIWIKI_EMBED_KEY"):
+        monkeypatch.delenv(name)
+    off = _client(root, monkeypatch)
+    assert "embedding" not in off.get("/health", headers=AUTH).json()
+    assert set(off.get("/search", params={"q": "needle"}, headers=AUTH).json()) == {"results", "total"}
