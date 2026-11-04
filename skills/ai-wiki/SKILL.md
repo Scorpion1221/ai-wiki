@@ -76,8 +76,8 @@ does not rank); trust/freshness only break close ties, so apply the evidence gat
 Run one well-formed search and read the top candidates; when the top hits' `terms` show the
 query's distinctive words went unmatched, rewrite it once (the user's other wording,
 a paraphrase, the other language). Most concepts are written in Chinese, so an English question
-whose distinctive words went unmatched is rewritten with Chinese keywords or the event, table or
-field name. Zero hits is not "nothing": retry with synonyms or the table,
+whose distinctive words went unmatched is rewritten once, with Chinese keywords or the event,
+table or field name. Zero hits is not "nothing": retry with synonyms or the table,
 event or field name (`grep --fixed`) before saying the wiki has nothing. Do not fan out further.
 JSON `search`/`grep`/`log` output carries `shown`, `total` and `truncated`: check them before
 treating bounded output as complete. Never rerun an identical command to confirm an empty answer.
