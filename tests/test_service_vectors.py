@@ -146,6 +146,14 @@ def _ready(root: Path, deadline: float = 5.0) -> None:
     raise AssertionError(f"embedding never finished: {B.embedding_state(root)}")
 
 
+def _builder_idle(root: Path, deadline: float = 5.0) -> None:
+    """Wait until the store's builder thread (and its closing compaction) has finished."""
+    end = time.monotonic() + deadline
+    while V._stores[root].building or any(t.name == "embedding-builder" for t in threading.enumerate()):
+        assert time.monotonic() < end, "the embedding builder never finished"
+        time.sleep(0.01)
+
+
 def test_without_embedding_settings_search_is_the_lexical_search(tmp_path, monkeypatch) -> None:
     for name in ("AIWIKI_EMBED_URL", "AIWIKI_EMBED_MODEL", "AIWIKI_EMBED_KEY"):
         monkeypatch.delenv(name, raising=False)
@@ -245,6 +253,7 @@ def test_chunk_vectors_are_cached_on_disk_and_only_changes_are_embedded(tmp_path
 def test_a_torn_cache_line_is_embedded_again(tmp_path, embedder) -> None:
     root = _bundle(tmp_path / "kb")
     _ready(root)
+    _builder_idle(root)  # the compaction that ends the build rewrites the file: tear it afterwards
     cache = next((tmp_path / "embed-cache").glob("*.jsonl"))
     lines = cache.read_text(encoding="utf-8").splitlines()
     cache.write_text("\n".join(lines[:-1] + [lines[-1][:20]]) + "\n", encoding="utf-8")
@@ -356,7 +365,7 @@ def test_the_cache_keeps_only_current_chunks(tmp_path, embedder) -> None:
         edited.write_text(edited.read_text(encoding="utf-8").replace(f"{8 + n} 秒", f"{9 + n} 秒"), encoding="utf-8")
         time.sleep(0.15)
         _ready(root)
-    time.sleep(0.2)  # compaction runs when the builder finishes
+    _builder_idle(root)  # compaction runs when the builder finishes
 
     cache = next((tmp_path / "embed-cache").glob("*.jsonl"))
     assert len(cache.read_text(encoding="utf-8").splitlines()) == 3
