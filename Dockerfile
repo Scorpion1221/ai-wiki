@@ -42,11 +42,11 @@ ENV AIWIKI_BUNDLES=/bundles \
     AIWIKI_PORT=8787 \
     AIWIKI_CURATE=off \
     AIWIKI_DISABLE=ingest,audit,create,delete,changesets,workspace,maint,admin
-# Reads run in the server's worker threads, and glibc adds a malloc arena whenever a thread finds
-# the others busy (up to 8 per CPU); freed memory stays fragmented across them. Every bundle change
-# rescans the bundle in whichever thread reads first, so the mirror grew 126 -> 267 MiB in 48 h
-# after 0.3.10 (30 64-MiB arena heaps, 2026-11-04). Two arenas keep freed scans reusable. The
-# writer preloads jemalloc instead.
+# Reads run in the server's worker threads, and glibc gives each new thread its own malloc arena
+# until there are 8 per CPU (an exited thread's arena is reused, never freed); freed memory stays
+# fragmented across them. Every bundle change rescans the bundle in whichever thread reads
+# first, so the mirror grew 126 -> 267 MiB in 48 h after 0.3.10 (30 64-MiB arena heaps,
+# 2026-11-04). Two arenas keep freed scans reusable. The writer preloads jemalloc instead.
 ENV MALLOC_ARENA_MAX=2
 # Deployed revision reported as /health "build"; declared after `uv sync` so a new revision
 # keeps the dependency layer cached:
