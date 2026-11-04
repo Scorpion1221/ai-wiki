@@ -216,6 +216,7 @@ class Store:
             with open(self.path, "a", encoding="utf-8") as f:
                 f.write("".join(json.dumps({"s": sha, "v": [round(x, 6) for x in vec]}) + "\n"
                                 for sha, vec in rows))
+            self.disk_error = None
         except OSError as exc:
             self.disk_error = _why(exc)
 
@@ -232,6 +233,7 @@ class Store:
                 for sha, vec in keep.items():
                     f.write(json.dumps({"s": sha, "v": [round(x, 6) for x in vec]}) + "\n")
             os.replace(tmp, self.path)
+            self.disk_error = None
         except OSError as exc:
             self.disk_error = _why(exc)
 
@@ -299,8 +301,9 @@ class Store:
                         sha = index.shas[i]
                         self.cache[sha] = vec
                         rows.append((sha, vec))
-                        if index.pending.pop(i, None) is not None:
-                            index.vectors[i] = vec
+                        if i in index.pending:
+                            index.vectors[i] = vec  # before leaving pending: rank reads vectors once pending is empty
+                            del index.pending[i]
                 self._append(rows)
                 index.error = None
         finally:

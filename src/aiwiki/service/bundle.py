@@ -852,14 +852,15 @@ def _vector_state(state: dict) -> dict:
 
 def _vector_only_row(rel: str, fm: dict, body: str) -> dict:
     """A search row for a concept only the semantic ranking found: the lexical row's fields, no
-    lexical score or matched terms, and its description's opening as the snippet."""
+    lexical score or matched terms; the description already explains it, so the snippet is empty
+    unless there is no description (then the body's opening line)."""
     meta = concept_metadata(fm)
     description = str(fm.get("description") or "")
     return {"path": rel, "title": fm.get("title"), "type": fm.get("type"),
             "tags": list(fm.get("tags") or []), "score": None,
             "match": {"phrase": False, "coverage": 0.0, "fields": [], "terms": []},
             "description": fm.get("description"),
-            "snippet": description[:160] if description else _snippet(body, "", ()), **meta}
+            "snippet": "" if description else _snippet(body, "", ()), **meta}
 
 
 def _lexical_search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[list[dict], int]:
