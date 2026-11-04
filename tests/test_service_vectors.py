@@ -413,3 +413,49 @@ def test_search_and_health_endpoints(tmp_path, embedder, monkeypatch) -> None:
     off = _client(root, monkeypatch)
     assert "embedding" not in off.get("/health", headers=AUTH).json()
     assert set(off.get("/search", params={"q": "needle"}, headers=AUTH).json()) == {"results", "total"}
+
+
+def test_rank_matches_a_reference_scan_and_builds_the_matrix_once(tmp_path, embedder) -> None:
+    """The matrix product ranks exactly like scoring each chunk in Python, ties broken by path,
+    and concurrent first searches build the matrix once."""
+    import concurrent.futures as cf
+    import random
+
+    rng = random.Random(7)
+    index = V._Index()
+    for n in range(60):
+        path = f"c/{n:02d}.md"
+        for _ in range(rng.randint(1, 4)):
+            vec = [rng.choice([0.0, 1.0, rng.random()]) for _ in range(DIMS)]  # ties included
+            index.owners.append(path)
+            index.shas.append(f"{len(index.owners)}")
+            index.vectors[len(index.owners) - 1] = V._unit(vec) or V._unit([1.0] * DIMS)
+    query = V._unit([0.3, 0.1, 0.9, 0.2])
+    best = {}
+    for i, owner in enumerate(index.owners):
+        sim = sum(a * b for a, b in zip(index.vectors[i], query, strict=True))
+        best[owner] = max(best.get(owner, -2.0), sim)
+    reference = sorted(best, key=lambda p: (-round(best[p], 5), p))[:V.CANDIDATES]
+
+    builds = []
+    real_stack = V.np.stack
+
+    def counted_stack(*args, **kwargs):
+        builds.append(1)
+        return real_stack(*args, **kwargs)
+
+    store = V.Store(V.settings(), tmp_path)
+    original = V.embed
+    V.embed = lambda config, inputs, timeout: [query]
+    V.np.stack = counted_stack
+    try:
+        with cf.ThreadPoolExecutor(8) as ex:
+            results = list(ex.map(lambda _: store.rank(index, "q")[0], range(8)))
+    finally:
+        V.embed, V.np.stack = original, real_stack
+
+    assert len(builds) == 1
+    assert all(r == results[0] for r in results)
+    ranked = results[0]
+    assert sorted(ranked) == sorted(reference)
+    assert all(round(best[a], 5) >= round(best[b], 5) for a, b in zip(ranked, ranked[1:], strict=False))

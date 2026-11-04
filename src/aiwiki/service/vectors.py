@@ -175,16 +175,21 @@ class _Index:
     matrix: np.ndarray | None = None  # all chunk vectors as one float32 matrix, once complete
     owner_ids: np.ndarray | None = None  # each row's concept, as a position in ``concepts``
     concepts: list[str] = field(default_factory=list)
+    matrix_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def ready_matrix(self) -> np.ndarray:
-        """The chunk vectors as one matrix (built once per complete index): a query is then one
-        matrix product, ~2 ms over 2,656 x 768 instead of ~400 ms of Python dot products on the
-        mirror's CPU."""
+        """The chunk vectors as one matrix (built once per complete index, by the first request
+        while concurrent ones wait for it): a query is then one matrix product, ~2 ms over
+        2,656 x 768 instead of ~400 ms of Python dot products on the mirror's CPU."""
         if self.matrix is None:
-            self.concepts = list(dict.fromkeys(self.owners))
-            position = {path: i for i, path in enumerate(self.concepts)}
-            self.owner_ids = np.fromiter((position[p] for p in self.owners), dtype=np.int64, count=len(self.owners))
-            self.matrix = np.stack([np.frombuffer(self.vectors[i], dtype=np.float32) for i in range(len(self.owners))])
+            with self.matrix_lock:
+                if self.matrix is None:
+                    self.concepts = list(dict.fromkeys(self.owners))
+                    position = {path: i for i, path in enumerate(self.concepts)}
+                    self.owner_ids = np.fromiter((position[p] for p in self.owners), dtype=np.int64,
+                                                 count=len(self.owners))
+                    self.matrix = np.stack([np.frombuffer(self.vectors[i], dtype=np.float32)
+                                            for i in range(len(self.owners))])
         return self.matrix
 
 
