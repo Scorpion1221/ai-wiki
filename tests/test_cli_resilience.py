@@ -428,9 +428,37 @@ def test_a_writer_get_is_a_new_request_each_attempt(server, monkeypatch) -> None
         return Answer(b"{}")
 
     monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(cli.urllib.request, "proxy_bypass", lambda _host: False)  # no_proxy would skip the rewrite
 
     assert cli._http("GET", "/whoami")[0] == 200
     assert sent == [("https", "/whoami", "Bearer fixture-token")] * 3  # each through the TLS tunnel
+
+
+@pytest.mark.parametrize("first", ["reset", "503"])
+def test_a_read_is_a_new_request_each_attempt(server, monkeypatch, first) -> None:
+    """The standard read path resent one Request: behind an https proxy its second attempt went out
+    as plain http (absolute URI to the proxy) with the bearer token (offline probe, 2026-11-04)."""
+    cli.CONFIG.write_text(json.dumps({"endpoint": "https://writer.example", "token": "fixture-token"}))
+    proxy, sent = cli.urllib.request.ProxyHandler({"https": "http://127.0.0.1:9"}), []
+
+    class Answer(io.BytesIO):
+        status, headers = 200, {}
+
+    def urlopen(request, timeout=None):
+        proxy.proxy_open(request, "http://127.0.0.1:9", request.type)  # what the opener does with it
+        sent.append((request.type, request.selector, request.get_header("Authorization")))
+        if len(sent) < 3:
+            if first == "503":
+                raise urllib.error.HTTPError(request.full_url, 503, "unavailable", {}, io.BytesIO(b""))
+            raise urllib.error.URLError(ConnectionResetError(54, "Connection reset by peer"))
+        return Answer(b"{}")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(cli.urllib.request, "proxy_bypass", lambda _host: False)
+    monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
+
+    assert cli._api("/search", q="x") == {}
+    assert sent == [("https", "/search?q=x", "Bearer fixture-token")] * 3  # each through the TLS tunnel
 
 
 def test_backoff_never_overflows(monkeypatch) -> None:
