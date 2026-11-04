@@ -444,8 +444,10 @@ def _send(req: urllib.request.Request, raise_on: Container[int] = ()) -> dict:
         attempt += 1
         tried = f" (after {attempt} attempts)" if attempt > 1 else ""
         wait = timeout if attempt == 1 else min(timeout, max(deadline - time.monotonic(), _RETRY_FLOOR_S))
+        # A new Request each attempt, as in _http: a proxy handler rewrites the one it sends.
+        sent = urllib.request.Request(req.full_url, data=req.data, headers=req.headers, method=req.get_method())
         try:
-            with urllib.request.urlopen(req, timeout=wait) as r:
+            with urllib.request.urlopen(sent, timeout=wait) as r:
                 body = r.read()
             break
         except urllib.error.HTTPError as e:
