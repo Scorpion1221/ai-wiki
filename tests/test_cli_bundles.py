@@ -312,8 +312,8 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
     assert "verification_current,generated_at,verified_at,current_verified_at,stale_on,basis,score" in search_out
     assert '"2026-11-11","default",8' in search_out
     assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_out
-    assert "score,phrase,coverage,fields,terms,context" in search_out
-    assert '8,true,1.0,"title|body","x"' in search_out
+    assert "score,retrieval,phrase,coverage,fields,terms,context" in search_out
+    assert '8,"lexical",true,1.0,"title|body","x"' in search_out
 
 
 def test_ls_separates_structural_entries_from_concepts_without_null_columns(monkeypatch, capsys) -> None:
