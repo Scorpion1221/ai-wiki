@@ -442,15 +442,22 @@ def test_rank_matches_a_reference_scan_and_builds_the_matrix_once(tmp_path, embe
 
     def counted_stack(*args, **kwargs):
         builds.append(1)
+        time.sleep(0.05)  # a slow build, so concurrent first searches overlap it
         return real_stack(*args, **kwargs)
 
     store = V.Store(V.settings(), tmp_path)
     original = V.embed
     V.embed = lambda config, inputs, timeout: [query]
     V.np.stack = counted_stack
+    start = threading.Barrier(8)
+
+    def first_search(_):
+        start.wait()
+        return store.rank(index, "q")[0]
+
     try:
         with cf.ThreadPoolExecutor(8) as ex:
-            results = list(ex.map(lambda _: store.rank(index, "q")[0], range(8)))
+            results = list(ex.map(first_search, range(8)))
     finally:
         V.embed, V.np.stack = original, real_stack
 
