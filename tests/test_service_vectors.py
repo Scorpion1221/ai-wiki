@@ -146,6 +146,14 @@ def _ready(root: Path, deadline: float = 5.0) -> None:
     raise AssertionError(f"embedding never finished: {B.embedding_state(root)}")
 
 
+def _builder_idle(root: Path, deadline: float = 5.0) -> None:
+    """Wait until the store's builder thread (and its closing compaction) has finished."""
+    end = time.monotonic() + deadline
+    while V._stores[root].building or any(t.name == "embedding-builder" for t in threading.enumerate()):
+        assert time.monotonic() < end, "the embedding builder never finished"
+        time.sleep(0.01)
+
+
 def test_without_embedding_settings_search_is_the_lexical_search(tmp_path, monkeypatch) -> None:
     for name in ("AIWIKI_EMBED_URL", "AIWIKI_EMBED_MODEL", "AIWIKI_EMBED_KEY"):
         monkeypatch.delenv(name, raising=False)
@@ -245,6 +253,7 @@ def test_chunk_vectors_are_cached_on_disk_and_only_changes_are_embedded(tmp_path
 def test_a_torn_cache_line_is_embedded_again(tmp_path, embedder) -> None:
     root = _bundle(tmp_path / "kb")
     _ready(root)
+    _builder_idle(root)  # the compaction that ends the build rewrites the file: tear it afterwards
     cache = next((tmp_path / "embed-cache").glob("*.jsonl"))
     lines = cache.read_text(encoding="utf-8").splitlines()
     cache.write_text("\n".join(lines[:-1] + [lines[-1][:20]]) + "\n", encoding="utf-8")
@@ -356,7 +365,7 @@ def test_the_cache_keeps_only_current_chunks(tmp_path, embedder) -> None:
         edited.write_text(edited.read_text(encoding="utf-8").replace(f"{8 + n} 秒", f"{9 + n} 秒"), encoding="utf-8")
         time.sleep(0.15)
         _ready(root)
-    time.sleep(0.2)  # compaction runs when the builder finishes
+    _builder_idle(root)  # compaction runs when the builder finishes
 
     cache = next((tmp_path / "embed-cache").glob("*.jsonl"))
     assert len(cache.read_text(encoding="utf-8").splitlines()) == 3
@@ -413,3 +422,56 @@ def test_search_and_health_endpoints(tmp_path, embedder, monkeypatch) -> None:
     off = _client(root, monkeypatch)
     assert "embedding" not in off.get("/health", headers=AUTH).json()
     assert set(off.get("/search", params={"q": "needle"}, headers=AUTH).json()) == {"results", "total"}
+
+
+def test_rank_matches_a_reference_scan_and_builds_the_matrix_once(tmp_path, embedder) -> None:
+    """The matrix product ranks exactly like scoring each chunk in Python, ties broken by path,
+    and concurrent first searches build the matrix once."""
+    import concurrent.futures as cf
+    import random
+
+    rng = random.Random(7)
+    index = V._Index()
+    for n in range(60):
+        path = f"c/{n:02d}.md"
+        for _ in range(rng.randint(1, 4)):
+            vec = [rng.choice([0.0, 1.0, rng.random()]) for _ in range(DIMS)]  # ties included
+            index.owners.append(path)
+            index.shas.append(f"{len(index.owners)}")
+            index.vectors[len(index.owners) - 1] = V._unit(vec) or V._unit([1.0] * DIMS)
+    query = V._unit([0.3, 0.1, 0.9, 0.2])
+    best = {}
+    for i, owner in enumerate(index.owners):
+        sim = sum(a * b for a, b in zip(index.vectors[i], query, strict=True))
+        best[owner] = max(best.get(owner, -2.0), sim)
+    reference = sorted(best, key=lambda p: (-round(best[p], 5), p))[:V.CANDIDATES]
+
+    builds = []
+    real_stack = V.np.stack
+
+    def counted_stack(*args, **kwargs):
+        builds.append(1)
+        time.sleep(0.05)  # a slow build, so concurrent first searches overlap it
+        return real_stack(*args, **kwargs)
+
+    store = V.Store(V.settings(), tmp_path)
+    original = V.embed
+    V.embed = lambda config, inputs, timeout: [query]
+    V.np.stack = counted_stack
+    start = threading.Barrier(8)
+
+    def first_search(_):
+        start.wait()
+        return store.rank(index, "q")[0]
+
+    try:
+        with cf.ThreadPoolExecutor(8) as ex:
+            results = list(ex.map(first_search, range(8)))
+    finally:
+        V.embed, V.np.stack = original, real_stack
+
+    assert len(builds) == 1
+    assert all(r == results[0] for r in results)
+    ranked = results[0]
+    assert sorted(ranked) == sorted(reference)
+    assert all(round(best[a], 5) >= round(best[b], 5) for a, b in zip(ranked, ranked[1:], strict=False))
