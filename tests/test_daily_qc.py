@@ -251,3 +251,16 @@ def test_a_missing_bundle_is_an_error_not_a_clean_day(tmp_path: Path) -> None:
     proc = subprocess.run([sys.executable, str(SCRIPT), "--bundle", str(tmp_path / "nope")],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 2 and json.loads(proc.stdout)["grade"] is None
+
+
+def test_a_run_that_spends_its_item_budget_stopped_on_purpose(bundle: Bundle, monkeypatch) -> None:
+    # 11-03: 200 items in 162 minutes, stopped on max_items, 20 new items still ready.
+    monkeypatch.setitem(globals(), "NOW", datetime.now(UTC).replace(microsecond=0))
+    for i in range(100):
+        bundle.close("curated", 7.9 - i * 0.02)
+        bundle.changeset(f"c{i:011d}", 7.9 - i * 0.02)
+    for _i in range(20):
+        bundle.item("ready", created=at(1))
+    by = {row["check"]: row for row in qc(bundle)[1]["rows"]}
+    assert by["运行时长"]["grade"] == "ok" and "额度用完" in by["运行时长"]["value"], by["运行时长"]
+    assert {row["check"]: row["grade"] for row in qc(bundle, "--run-items", "200")[1]["rows"]}["运行时长"] == "bad"

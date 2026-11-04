@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.13 -->
+<!-- ai-wiki:version 0.3.15 -->
 
 # AI Wiki Curating Maintainer
 
@@ -157,6 +157,10 @@ Follow okf-knowledge-curator in its remote maintainer mode. One item, one eviden
   keep identifiers, event names, prices, SQL, URLs and dates verbatim.
 - Every concept you write carries the curator's Signals (aliases, `stale_after`, a dated
   description); one the evidence retires or supersedes is deprecated (§3.4), never left stable.
+- Before `validate`, reread each changed sentence, title and description for the auditor's top four
+  refusals: (1) a report stated as fact: the sentence itself says who reported it, a footnote is not
+  enough; (2) merged or done stated as live or effective; (3) a later comment or `related` source that
+  corrects or retracts it; (4) a number whose unit, window or population differs from the evidence.
 
 ### 3.4 Validate, propose, fix
 
