@@ -14,15 +14,19 @@ from __future__ import annotations
 
 import hashlib
 import os
+import pickle
 import shutil
 import tempfile
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-from ..engine.document import current_verified, normalize_verified
+from ..engine.digests import file_sha256
+from ..engine.document import current_verified, markdown_paths, normalize_verified, parse_document
 from ..engine.scan_sources import _source_resource_rel
 from ..engine.validate import parse_doc, should_check
 
@@ -76,8 +80,8 @@ def _agent_tree_snapshot(bundle: Path, *, digests: bool = False) -> dict[str, by
             path = base / name
             if path.is_symlink() or not path.is_file():
                 continue
-            data = path.read_bytes()
-            snapshot[path.relative_to(bundle).as_posix()] = hashlib.sha256(data).hexdigest() if digests else data
+            rel = path.relative_to(bundle).as_posix()
+            snapshot[rel] = file_sha256(path) if digests else path.read_bytes()
     return snapshot
 
 
@@ -160,7 +164,7 @@ def _source_snapshot(bundle: Path) -> dict[str, str]:
         rel = path.relative_to(bundle)
         if "inbox" in rel.parts or path.name == ".hashes.yaml":
             continue
-        snapshot[rel.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        snapshot[rel.as_posix()] = file_sha256(path)
     return snapshot
 
 
@@ -226,14 +230,63 @@ def _generated_signature(frontmatter: dict) -> str:
     return yaml.safe_dump(frontmatter.get("generated"), sort_keys=True, allow_unicode=True)
 
 
+# A concept's parse and signatures by its exact text (2026-11-06). One changeset judged every
+# concept ~6 times (the gate's workspace copy, then the live tree, before and after the pass); the
+# canonical dump in _substantive_signature is pure-Python PyYAML (libyaml's dumper folds long strings
+# differently, so switching would change signatures) and was ~20 s of a ~49 s transaction on the
+# writer host. Keyed by the sha256 of the bytes on disk, an edited file is always judged afresh, and
+# a file that fails to parse is never cached.
+_JUDGED: OrderedDict[bytes, tuple[bytes, str, str, str]] = OrderedDict()  # sha256(text) -> result
+_JUDGED_LOCK = threading.Lock()
+_JUDGED_BUDGET = 32 << 20  # bytes held (pickled frontmatter + body), least recently used dropped first
+_judged_bytes = 0
+
+
+def _concept_paths(bundle: Path) -> list[Path]:
+    """``sorted(p for p in bundle.rglob("*.md") if should_check(p, bundle))``, without listing the
+    operational ``.okf`` tree that ``should_check`` refuses anyway (``markdown_paths``)."""
+    return [path for path in markdown_paths(bundle) if should_check(path, bundle)]
+
+
+def _judged(path: Path) -> tuple[dict, str, str, str]:
+    """``parse_doc(path)`` with the concept's substantive and generated signatures. Raises what
+    ``parse_doc`` raises; the frontmatter is the caller's own copy."""
+    global _judged_bytes
+    if path.is_symlink():
+        parse_doc(path)  # the refusal parse_doc gives a symlink
+    raw = path.read_bytes()
+    key = hashlib.sha256(raw).digest()
+    with _JUDGED_LOCK:
+        hit = _JUDGED.get(key)
+        if hit is not None:
+            _JUDGED.move_to_end(key)
+    if hit is None:
+        # Parse the very bytes the key names, decoded as parse_doc's read_text does (UTF-8, universal
+        # newlines), so a file rewritten between the two reads can never be cached under the old key.
+        document = parse_document(raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n"))
+        frontmatter, body = document.frontmatter, document.body
+        hit = (frontmatter, body, _substantive_signature(frontmatter, body), _generated_signature(frontmatter))
+        try:
+            blob = pickle.dumps(frontmatter, protocol=pickle.HIGHEST_PROTOCOL)
+        except (RecursionError, pickle.PicklingError):
+            return hit  # too deep to copy this way: judged, never cached
+        with _JUDGED_LOCK:
+            if key not in _JUDGED:
+                _JUDGED[key] = (blob, *hit[1:])
+                _judged_bytes += len(blob) + len(body)
+                while _judged_bytes > _JUDGED_BUDGET and _JUDGED:
+                    _old, (old_blob, old_body, *_rest) = _JUDGED.popitem(last=False)
+                    _judged_bytes -= len(old_blob) + len(old_body)
+        return hit
+    return (pickle.loads(hit[0]), *hit[1:])  # noqa: S301 - bytes pickled here from parse_doc output
+
+
 def _concept_snapshot(bundle: Path) -> dict[str, _ConceptState]:
     """Substantive content and trust bookkeeping before the untrusted curation pass."""
     snapshot: dict[str, _ConceptState] = {}
-    for path in sorted(bundle.rglob("*.md")):
-        if not should_check(path, bundle):
-            continue
+    for path in _concept_paths(bundle):
         try:
-            frontmatter, body = parse_doc(path)
+            frontmatter, body, substantive_sig, generated_sig = _judged(path)
         except (OSError, ValueError):
             continue
         events = frozenset(
@@ -242,8 +295,8 @@ def _concept_snapshot(bundle: Path) -> dict[str, _ConceptState]:
         )
         generated_at, generated_at_raw = _generated_at(frontmatter)
         snapshot[path.relative_to(bundle).as_posix()] = _ConceptState(
-            substantive_signature=_substantive_signature(frontmatter, body),
-            generated_signature=_generated_signature(frontmatter),
+            substantive_signature=substantive_sig,
+            generated_signature=generated_sig,
             generated_at=generated_at,
             generated_at_raw=generated_at_raw,
             verified_events=events,
@@ -265,13 +318,11 @@ def _curation_policy_errors(
     """
     errors: list[str] = []
     after: set[str] = set()
-    for path in sorted(bundle.rglob("*.md")):
-        if not should_check(path, bundle):
-            continue
+    for path in _concept_paths(bundle):
         rel = path.relative_to(bundle).as_posix()
         after.add(rel)
         try:
-            frontmatter, body = parse_doc(path)
+            frontmatter, body, substantive_sig, generated_sig = _judged(path)
         except (OSError, ValueError):
             continue  # deterministic bundle validation reports the parser error
         current_events = {
@@ -318,12 +369,10 @@ def _curation_policy_errors(
             generated = frontmatter.get("generated")
             generated_by = generated.get("by") if isinstance(generated, dict) else None
             generated_at, generated_at_raw = _generated_at(frontmatter)
-            generated_changed = _generated_signature(frontmatter) != prior.generated_signature
+            generated_changed = generated_sig != prior.generated_signature
             if current_events != prior.verified_events:
                 errors.append(f"{rel}: curation must preserve verification history unchanged")
-            substantive_changed = (
-                _substantive_signature(frontmatter, body) != prior.substantive_signature
-            )
+            substantive_changed = substantive_sig != prior.substantive_signature
             if generated_changed and not substantive_changed:
                 errors.append(
                     f"{rel}: curation must not change generated metadata without substantive changes"
@@ -373,16 +422,14 @@ def _curation_provenance_errors(
 ) -> list[str]:
     """Every concept authored by this pass must cite this pass's immutable evidence."""
     errors: list[str] = []
-    for path in sorted(bundle.rglob("*.md")):
-        if not should_check(path, bundle):
-            continue
+    for path in _concept_paths(bundle):
         rel = path.relative_to(bundle).as_posix()
         try:
-            frontmatter, body = parse_doc(path)
+            frontmatter, _body, substantive_sig, _generated_sig = _judged(path)
         except (OSError, ValueError):
             continue
         prior = before.get(rel)
-        if prior is not None and _substantive_signature(frontmatter, body) == prior.substantive_signature:
+        if prior is not None and substantive_sig == prior.substantive_signature:
             continue
         cited: set[str] = set()
         sources = frontmatter.get("sources")
