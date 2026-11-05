@@ -213,6 +213,17 @@ retired: a full `ai-wiki skill install` (as `ai-wiki update` runs it) removes an
 whose SKILL.md still names it, never a foreign directory of that name. The `ai-wiki maintain`
 command it drove stays as a legacy CLI command.
 
+### Multica workspace skills are pointers
+
+Multica copies each agent's mounted workspace skill into the task directory and never reads
+`~/.agents`, so a full copy there lags every `ai-wiki update`. The workspace copies are therefore
+`multica/<name>/SKILL.md`: the skill's own frontmatter (its trigger) plus three fixed steps (update
+the CLI, then read the installed skill at the `skill_md` path `ai-wiki skill` lists). A release
+reaches agents through `ai-wiki update` alone. `python3 scripts/multica_pointers.py --check` fails
+when a skill's frontmatter changed; only then regenerate and republish the pointer
+(`multica skill update <id> --content-file multica/<name>/SKILL.md`), with its `references/` and
+`assets/` removed from the workspace copy.
+
 The CLI is non-interactive: usage/API failures are structured on stdout with exit code 2/1, and destructive `bundle rm` requires `--yes`. Bare `-v`, `-V`, and `--version` probes return only the version.
 
 ## Configuration
