@@ -19,9 +19,12 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
@@ -33,6 +36,8 @@ from pathlib import Path
 import yaml
 
 from ..engine import append_log, bookkeeping, scan_sources
+from ..engine.digests import file_sha256
+from ..engine.document import load_yaml
 from ..engine.gen_indexes import generate_indexes
 from ..engine.lint import lint
 from ..engine.render_viz import generate_visualization
@@ -356,8 +361,41 @@ _NO_AUTO_GC = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
 GC_AUTO = ("-c", "gc.auto=256", "-c", "gc.autoPackLimit=10", "-c", "gc.autoDetach=false", "-c", "pack.threads=1")
 
 
+# One SSH connection to the bundle's remote, shared by the writer's fetches and pushes (2026-11-06):
+# every changeset made 2-3 of them, and each opened a new connection to GitLab, ~1.5 s of handshake
+# out of ~2.2 s on the writer host (0.7 s once the connection is reused). The master connection
+# lives in a private per-user directory and closes 10 minutes after the last use. An explicit
+# GIT_SSH_COMMAND or core.sshCommand, or AIWIKI_GIT_SSH_REUSE=0, leaves Git's own choice untouched.
+_SSH_REUSE_DIR: str | None = None
+
+
+def _ssh_env() -> dict[str, str] | None:
+    """The environment for a ``git`` child: SSH connection reuse added, or None to inherit as is."""
+    global _SSH_REUSE_DIR
+    if os.environ.get("AIWIKI_GIT_SSH_REUSE", "1") == "0" or "GIT_SSH_COMMAND" in os.environ or "GIT_SSH" in os.environ:
+        return None
+    if _SSH_REUSE_DIR is None:
+        directory = Path(tempfile.gettempdir()) / f"ai-wiki-ssh-{os.getuid()}"
+        try:
+            directory.mkdir(mode=0o700, exist_ok=True)
+            info = directory.lstat()
+            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077 or stat.S_ISLNK(info.st_mode):
+                return None  # someone else's directory, or too open: never put a control socket there
+        except OSError:
+            return None
+        _SSH_REUSE_DIR = str(directory)
+    command = (f"ssh -o ControlMaster=auto -o ControlPersist=600 "
+               f"-o ControlPath={shlex.quote(_SSH_REUSE_DIR)}/%C")
+    return {**os.environ, "GIT_SSH_COMMAND": command}
+
+
 def _git(root: Path, *args: str, t: int = GIT_TIMEOUT_S) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *_NO_AUTO_GC, "-C", str(root), *args], capture_output=True, text=True, timeout=t)
+    env = _ssh_env() if args[:1] in (("fetch",), ("push",), ("pull",), ("ls-remote",)) else None
+    if env is not None and subprocess.run(["git", "-C", str(root), "config", "--get", "core.sshCommand"],
+                                          capture_output=True, text=True, timeout=t).stdout.strip():
+        env = None  # the repository chose its own ssh command
+    return subprocess.run(["git", *_NO_AUTO_GC, "-C", str(root), *args], capture_output=True, text=True, timeout=t,
+                          env=env)
 
 
 def _gc_auto(root: Path) -> None:
@@ -582,7 +620,7 @@ def _source_drift_errors(bundle: Path) -> list[str]:
     if not baseline_path.is_file() or baseline_path.is_symlink():
         return []
     try:
-        loaded = yaml.safe_load(baseline_path.read_text(encoding="utf-8")) or {}
+        loaded = load_yaml(baseline_path.read_text(encoding="utf-8")) or {}
         if not isinstance(loaded, dict):
             return [f"{scan_sources.HASHES}: source hash baseline must be a mapping"]
         baseline = {str(key): str(value) for key, value in loaded.items()}
@@ -751,15 +789,13 @@ def _git_metadata_snapshot(bundle: Path) -> dict[str, _MetadataEntry]:
 
     def capture(path: Path) -> None:
         rel = path.relative_to(bundle).as_posix()
-        stat = path.lstat()
-        mode = stat.st_mode & 0o7777
+        mode = path.lstat().st_mode & 0o7777
         if path.is_symlink():
             entries[rel] = _MetadataEntry("symlink", mode, os.readlink(path))
         elif path.is_dir():
             entries[rel] = _MetadataEntry("dir", mode)
         elif path.is_file() and _GIT_OBJECT_FILE.fullmatch(rel):
-            with path.open("rb") as handle:
-                entries[rel] = _MetadataEntry("file", mode, sha256=hashlib.file_digest(handle, "sha256").hexdigest())
+            entries[rel] = _MetadataEntry("file", mode, sha256=file_sha256(path))
         elif path.is_file():
             entries[rel] = _MetadataEntry("file", mode, path.read_bytes())
         else:
