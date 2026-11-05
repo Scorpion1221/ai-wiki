@@ -442,7 +442,11 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
         return PREFLIGHT, {"run": run, "failed": "doctor", "checks": failed}
     # Shared update.lock until the run pointer is written: `ai-wiki update` never installs under a beginning run.
     started = update.UpdateLock(shared=True)
-    if not started.acquire():
+    try:
+        acquired = started.acquire()
+    except update.StateUnwritable as exc:
+        return PREFLIGHT, {"run": run, "failed": "state_unwritable", "error": f"{exc}; no lease was taken"}
+    if not acquired:
         return PREFLIGHT, {"run": run, "failed": "update_running", "error": f"{started.path} stayed held for "
                            f"{update.LOCK_TIMEOUT} s by an `ai-wiki update`; no lease was taken"}
     try:

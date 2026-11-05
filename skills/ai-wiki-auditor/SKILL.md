@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on a correction your own run wrote.
 ---
-<!-- ai-wiki:version 0.3.16 -->
+<!-- ai-wiki:version 0.3.17 -->
 
 # AI Wiki Auditor
 
@@ -64,8 +64,9 @@ ai-wiki -b "$bundle" review begin --run "$run" --max "$max" --triage-max "$triag
 
 It reruns doctor, takes the auditor lease (3 h, one auditor run at a time), pulls the published
 bundle into `$WS` and prints the backlog sizes (`triage` too). Exit `4`: `failed` names `doctor`,
-`update_running` (an install held the CLI past 900 s; no lease was taken), `lease` (`holder` shows
-who holds it) or `workspace`: stop (§5, blocked). Rerunning `begin` with the same run is safe.
+`update_running` (an install held the CLI past 900 s; no lease was taken), `state_unwritable` (this
+shell cannot write `~/.ai-wiki`; no lease was taken), `lease` (`holder` shows who holds it) or
+`workspace`: stop (§5, blocked). Rerunning `begin` with the same run is safe.
 
 ## 3. The review loop
 
