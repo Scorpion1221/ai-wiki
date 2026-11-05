@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from aiwiki.service import malloc as _malloc
+
 CHUNK_CHARS, CHUNK_OVERLAP = 1800, 200
 RRF_K = 60
 CANDIDATES = 100  # each list contributes its top 100 to the fusion
@@ -190,6 +192,7 @@ class _Index:
                                                  count=len(self.owners))
                     self.matrix = np.stack([np.frombuffer(self.vectors[i], dtype=np.float32)
                                             for i in range(len(self.owners))])
+                    _malloc.trim()  # the previous index's matrix, freed when this index replaced it
         return self.matrix
 
 
@@ -390,6 +393,12 @@ def fuse(lexical: list[str], phrase: set[str], vector: list[str], query: str) ->
 
 _stores: dict[Path, Store] = {}
 _stores_lock = threading.Lock()
+
+
+def stores() -> list[Path]:
+    """The bundles a search or /health has given a vector store, i.e. the ones being embedded."""
+    with _stores_lock:
+        return list(_stores)
 
 
 def store(bundle: Path) -> Store | None:

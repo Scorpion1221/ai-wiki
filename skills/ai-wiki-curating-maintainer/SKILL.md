@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.16 -->
+<!-- ai-wiki:version 0.3.17 -->
 
 # AI Wiki Curating Maintainer
 
@@ -58,7 +58,8 @@ judge none of this. Run `begin` and `propose` with a 600 s tool timeout; rerun a
 - Exit `0`: go to §3. Exit `5`: a collector was partial or failed and kept what it could not
   collect; still run §3 (the report decides whether that blocks the issue).
 - Exit `4`: `failed` names `doctor`, `update_running` (an install held the CLI past 900 s; no lease
-  was taken), `lease` (`holder` shows who) or `workspace`. Stop: post the output, set blocked (§5).
+  was taken), `state_unwritable` (this shell cannot write `~/.ai-wiki`; no lease was taken), `lease`
+  (`holder` shows who) or `workspace`. Stop: post the output, set blocked (§5).
 - Repeating `begin` with the same `--run` is safe: it keeps the run's budget, taken items and
   lease, and resets workspace edits of an item the writer took back.
 

@@ -424,6 +424,55 @@ def test_search_and_health_endpoints(tmp_path, embedder, monkeypatch) -> None:
     assert set(off.get("/search", params={"q": "needle"}, headers=AUTH).json()) == {"results", "total"}
 
 
+def test_a_new_index_trims_once_its_matrix_is_built(tmp_path, embedder, monkeypatch) -> None:
+    """Each pull builds a slightly larger matrix than the one it frees; the freed one goes back to the system."""
+    from types import SimpleNamespace
+
+    trims = []
+    monkeypatch.setattr(V, "_malloc", SimpleNamespace(trim=lambda: trims.append(1)))
+    monkeypatch.setattr(B, "_malloc", SimpleNamespace(trim=lambda: None))  # rescans trim on their own
+    root = _bundle(tmp_path / "kb")
+    time.sleep(0.15)  # past the racy window: one snapshot, so one index
+    _ready(root)
+    B.hybrid_search_page(root, "classroom", 5)
+    B.hybrid_search_page(root, "classroom", 5)
+    assert len(trims) == 1                                   # the matrix is built once per index
+
+
+def test_trim_runs_where_glibc_has_it_and_is_harmless_elsewhere() -> None:
+    from aiwiki.service import malloc
+
+    malloc.trim()
+
+
+def test_a_pull_is_embedded_before_the_next_search_asks(tmp_path, embedder, monkeypatch) -> None:
+    """2026-11-05: the first search after each production pull was answered lexically ("chunk vectors are being
+    built"), because only a request started the build. The service's warmer starts it on its own."""
+    from test_smoke import AUTH, _client
+
+    root = _bundle(tmp_path / "kb")
+    client = _client(root, monkeypatch)
+    from aiwiki.service import app as appmod
+
+    monkeypatch.setattr(appmod, "EMBED_WARM_S", 0.05, raising=False)
+    with client:
+        client.get("/health", headers=AUTH)                 # the mirror's first request registers the bundle
+        end = time.monotonic() + 5
+        while not V._stores[root].state()["ready"]:
+            assert time.monotonic() < end
+            time.sleep(0.02)
+        chunks = V._stores[root].state()["chunks"]
+        edited = root / "features" / "tutor-init.md"
+        edited.write_text(edited.read_text(encoding="utf-8") + "\n\n" + "pulled paragraph " * 120 + "\n",
+                          encoding="utf-8")
+        end = time.monotonic() + 5                           # no request from here on: only the warmer looks
+        while not (V._stores[root].state()["chunks"] > chunks and V._stores[root].state()["ready"]):
+            assert time.monotonic() < end, V._stores[root].state()
+            time.sleep(0.02)
+        answer = client.get("/search", params={"q": "how long does the classroom take to start"}, headers=AUTH)
+    assert answer.json()["retrieval"]["mode"] == "hybrid"
+
+
 def test_rank_matches_a_reference_scan_and_builds_the_matrix_once(tmp_path, embedder) -> None:
     """The matrix product ranks exactly like scoring each chunk in Python, ties broken by path,
     and concurrent first searches build the matrix once."""

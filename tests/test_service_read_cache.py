@@ -51,6 +51,22 @@ def test_the_snapshot_is_reused_until_the_bundle_changes(tmp_path: Path, settled
     assert B._snapshot(tmp_path) is first
 
 
+def test_a_rescan_hands_the_replaced_snapshot_back_to_the_system(tmp_path: Path, settled, monkeypatch) -> None:
+    """2026-11-05: the 0.3.16 mirror grew 150 -> 290 MiB in 12 h of pulls; freed scans stayed in glibc's heaps.
+    A rescan trims once the old snapshot is released; a reused snapshot trims nothing."""
+    import weakref
+
+    trims = []
+    _concept(tmp_path, "one")
+    old = weakref.ref(B._snapshot(tmp_path))
+    monkeypatch.setattr(B, "_malloc", SimpleNamespace(trim=lambda: trims.append(old() is None)))
+    B._snapshot(tmp_path)
+    assert trims == []
+    _rewrite(tmp_path / "topics" / "one.md", "needle", "needle edited")
+    B._snapshot(tmp_path)
+    assert trims == [True]                                   # trimmed after the replaced snapshot was freed
+
+
 def test_an_edit_is_seen_even_when_size_and_mtime_are_restored(tmp_path: Path, settled) -> None:
     _concept(tmp_path, "one")
     path = tmp_path / "topics" / "one.md"

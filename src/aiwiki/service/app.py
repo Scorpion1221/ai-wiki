@@ -54,6 +54,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -70,7 +71,7 @@ from ..runtime import changeset, secrets
 from ..runtime import curate as curate_runtime
 from ..runtime.config import LLM_MODES
 from ..runtime.failure import failure
-from . import attention, auth, inbox, triage, worker
+from . import attention, auth, inbox, triage, vectors, worker
 from . import bundle as B
 from . import ingest as I
 from . import maint_state as M
@@ -153,10 +154,27 @@ QUOTAS = {
 _COUNTED = {"deprecations_per_day": "deprecations", "reviews_per_day": "reviews_requested"}  # job field
 
 
+# How often the semantic index catches up with a pull on its own (2026-11-05): otherwise the first
+# search after each pull starts the embedding and is answered lexically (A2 never waits for it).
+EMBED_WARM_S = 15.0
+
+
+def _warm_embeddings(stop: threading.Event) -> None:
+    """Every EMBED_WARM_S, start embedding what a pull changed in each bundle already being embedded."""
+    while not stop.wait(EMBED_WARM_S):
+        for path in vectors.stores():
+            try:
+                with worker.serialized_read():
+                    B.embedding_state(path)
+            except Exception:  # noqa: BLE001 - a writer mutation or a vanished bundle waits for the next pass
+                pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # On a writer (curation enabled): start the serial worker, recover prior jobs, and
     # sweep the inbox on a timer to pick up sources dropped out-of-band.
+    stop = threading.Event()
     with auth.reload_on_sighup(AUTH):
         if CURATE_ON:
             if not worker.recover(list(_registry().values())):
@@ -165,7 +183,12 @@ async def lifespan(app: FastAPI):
                 )
             worker.ensure_started()
             worker.start_sweeper(lambda: list(_registry().values()))
-        yield
+        if vectors.settings() is not None:
+            threading.Thread(target=_warm_embeddings, args=(stop,), name="embedding-warmer", daemon=True).start()
+        try:
+            yield
+        finally:
+            stop.set()
 
 
 app = FastAPI(title="ai-wiki", version=VERSION, lifespan=lifespan)
