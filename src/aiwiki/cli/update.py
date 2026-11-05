@@ -172,7 +172,7 @@ class StateUnwritable(Exception):
     """The state directory cannot be written here (read-only mount, no permission), so no lock can be taken."""
 
     def __init__(self, path: Path, exc: OSError):
-        super().__init__(f"{path.parent} cannot be written here ({exc.strerror or exc})")
+        super().__init__(f"{exc.filename or path} cannot be written here ({exc.strerror or exc})")
         self.path = path
 
 

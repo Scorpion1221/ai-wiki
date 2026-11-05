@@ -440,8 +440,12 @@ def test_a_new_index_trims_once_its_matrix_is_built(tmp_path, embedder, monkeypa
 
 
 def test_trim_runs_where_glibc_has_it_and_is_harmless_elsewhere() -> None:
+    import platform
+
     from aiwiki.service import malloc
 
+    if platform.libc_ver()[0] == "glibc":
+        assert malloc._malloc_trim is not None                # the read mirror's image: the symbol resolves
     malloc.trim()
 
 
@@ -471,6 +475,34 @@ def test_a_pull_is_embedded_before_the_next_search_asks(tmp_path, embedder, monk
             time.sleep(0.02)
         answer = client.get("/search", params={"q": "how long does the classroom take to start"}, headers=AUTH)
     assert answer.json()["retrieval"]["mode"] == "hybrid"
+
+
+def test_the_warmer_leaves_a_builder_that_gave_up_to_the_next_search(tmp_path, embedder, monkeypatch) -> None:
+    """While the endpoint is down the warmer does not restart the builder every pass; a search still does."""
+    from test_smoke import AUTH, _client
+
+    from aiwiki.service import app as appmod
+
+    monkeypatch.setattr(V.time, "sleep", lambda _s: None)    # the builder's backoff, not the test's clock
+    root = _bundle(tmp_path / "kb")
+    embedder.mode = "fail"
+    client = _client(root, monkeypatch)
+    monkeypatch.setattr(appmod, "EMBED_WARM_S", 0.02, raising=False)
+    with client:
+        client.get("/health", headers=AUTH)
+        end = time.monotonic() + 5
+        while not V.gave_up(root):
+            assert time.monotonic() < end
+            time.sleep(0.01)
+        _builder_idle(root)
+        asked = len(embedder.requests)
+        time.sleep(0.2)                                      # ten warmer passes
+        assert len(embedder.requests) == asked
+        client.get("/search", params={"q": "classroom"}, headers=AUTH)
+        end = time.monotonic() + 5
+        while len(embedder.requests) == asked:              # a search restarts the build
+            assert time.monotonic() < end
+            time.sleep(0.01)
 
 
 def test_rank_matches_a_reference_scan_and_builds_the_matrix_once(tmp_path, embedder) -> None:

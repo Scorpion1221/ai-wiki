@@ -48,6 +48,7 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -159,15 +160,23 @@ _COUNTED = {"deprecations_per_day": "deprecations", "reviews_per_day": "reviews_
 EMBED_WARM_S = 15.0
 
 
+_log = logging.getLogger(__name__)
+
+
 def _warm_embeddings(stop: threading.Event) -> None:
-    """Every EMBED_WARM_S, start embedding what a pull changed in each bundle already being embedded."""
+    """Every EMBED_WARM_S, start embedding what a pull changed in each bundle already being embedded.
+    A builder that gave up on a failing endpoint is left to the next search, as before."""
     while not stop.wait(EMBED_WARM_S):
         for path in vectors.stores():
+            if vectors.gave_up(path):
+                continue
             try:
                 with worker.serialized_read():
                     B.embedding_state(path)
-            except Exception:  # noqa: BLE001 - a writer mutation or a vanished bundle waits for the next pass
-                pass
+            except worker.ReadBusy:
+                pass  # a writer mutation: the next pass
+            except Exception:  # noqa: BLE001 - the warmer must outlive a bad bundle; say why
+                _log.warning("embedding warmer: %s", path, exc_info=True)
 
 
 @asynccontextmanager

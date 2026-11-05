@@ -206,11 +206,16 @@ def _snapshot(root: Path) -> _Snapshot:
             return cached
         settled = all(_settled(entry[-1], now) for entry in fingerprint[1])
         snapshot = _scan(root, fingerprint, began, settled)
+        replaced = False
         with _snapshot_guard:
             if generation == _generation:  # a scan that overlapped a writer's drop is this request's only
                 _snapshots[root] = snapshot
-        del cached
-        _malloc.trim()  # the replaced snapshot's records and derived indexes
+                replaced = cached is not None and cached.settled  # once per pull, not per racy rescan
+        if replaced:
+            # The replaced snapshot's records and derived indexes. With hybrid search the vector store
+            # still holds it until its next index, whose matrix build trims again (vectors.ready_matrix).
+            del cached
+            _malloc.trim()
         return snapshot
 
 

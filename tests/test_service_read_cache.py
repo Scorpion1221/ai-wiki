@@ -65,6 +65,13 @@ def test_a_rescan_hands_the_replaced_snapshot_back_to_the_system(tmp_path: Path,
     _rewrite(tmp_path / "topics" / "one.md", "needle", "needle edited")
     B._snapshot(tmp_path)
     assert trims == [True]                                   # trimmed after the replaced snapshot was freed
+    _rewrite(tmp_path / "topics" / "one.md", "edited", "edited again")
+    monkeypatch.setattr(B, "time", SimpleNamespace(time_ns=time.time_ns, monotonic_ns=time.monotonic_ns))
+    B._snapshot(tmp_path)                                    # the pull replaces a settled snapshot: one trim ...
+    assert len(trims) == 2
+    B._snapshot(tmp_path)                                    # ... its racy rescans replace an unsettled one: none
+    B._snapshot(tmp_path)
+    assert len(trims) == 2
 
 
 def test_an_edit_is_seen_even_when_size_and_mtime_are_restored(tmp_path: Path, settled) -> None:
