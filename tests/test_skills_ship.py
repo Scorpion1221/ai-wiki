@@ -248,6 +248,37 @@ def test_update_refuses_while_a_maintain_or_another_update_holds_its_lock(update
     assert cli.main(["update", "--state-dir", str(ledger)]) == 0  # both released: it installs
 
 
+def test_a_read_only_state_dir_is_refused_not_a_traceback(updater, monkeypatch, capsys) -> None:
+    """A Codex sandbox mounts ~/.ai-wiki read-only: update refuses with a code, --check still reports, and a
+    beginning run takes no lease (2026-11-04: three `ai-wiki update` tracebacks on EROFS update.lock)."""
+    import errno
+    import os
+
+    from aiwiki.cli import maint, update
+
+    state, calls, _begin = updater
+    real_open = os.open
+
+    def read_only(path, flags, *args):
+        if str(path).endswith("update.lock"):
+            raise OSError(errno.EROFS, "Read-only file system", str(path))
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(update.os, "open", read_only)
+    assert cli.main(["update"]) == 1
+    out = capsys.readouterr().out
+    assert 'code: "state_unwritable"' in out and "Read-only file system" in out and "Traceback" not in out
+    assert calls == []                                       # neither uv nor the skill install ran
+    assert cli.main(["update", "--check"]) == 0              # nothing can hold an unopenable lock: it reports
+    assert "available: true" in capsys.readouterr().out
+    leased = []
+    monkeypatch.setattr(maint, "_call", lambda *a, **k: leased.append(a) or (200, {}))
+    monkeypatch.setattr("aiwiki.cli.doctor.run", lambda *a, **k: {"ok": True, "checks": []})
+    code, result = maint.begin("kb", run="WAIO-3", state_dir=state, config=state / "none.json",
+                               max_items=1, deadline_s=60, only=("inbox",), workspace_dir=None)
+    assert code == maint.PREFLIGHT and result["failed"] == "state_unwritable" and leased == []
+
+
 def _hold_then_release(path: Path, mode: int, seconds: float):
     """Another process (a thread with its own open file) holds ``path`` for ``seconds``."""
     import fcntl

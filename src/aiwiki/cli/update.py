@@ -9,10 +9,13 @@ already at ``main`` it still repairs stale skills. A failed skill step never und
 ``maintain`` holds its ``runner.lock``. It checks and installs holding ``<state dir>/update.lock`` exclusively;
 ``maint begin`` and ``review begin`` hold it shared until their run pointer is written, so neither starts under
 the other. Every holder waits up to ``LOCK_TIMEOUT`` for the lock (``--check`` too, for an install) and only then
-refuses (``update_running``). ``--check`` reports a live run and then offers no update.
+refuses (``update_running``). ``--check`` reports a live run and then offers no update. A state directory
+this process cannot write (a sandbox that mounts it read-only) is refused as ``state_unwritable``: nothing is
+installed, and ``maint begin`` / ``review begin`` take no lease.
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -32,6 +35,7 @@ BRANCH = "main"
 LATER = "before your next run (never during one)"
 LOCK_TIMEOUT = 900  # seconds: the uv install's own timeout
 LIVE_FIELDS = ("kind", "bundle", "run", "age_minutes")
+UNWRITABLE = (errno.EROFS, errno.EACCES, errno.EPERM)  # a sandbox that mounts the state directory read-only
 
 
 def _held(path: Path) -> bool:
@@ -164,6 +168,14 @@ def _default_state_dir() -> Path:
     return cli._STATE_DIR.expanduser()
 
 
+class StateUnwritable(Exception):
+    """The state directory cannot be written here (read-only mount, no permission), so no lock can be taken."""
+
+    def __init__(self, path: Path, exc: OSError):
+        super().__init__(f"{exc.filename or path} cannot be written here ({exc.strerror or exc})")
+        self.path = path
+
+
 class UpdateLock:
     """``update.lock`` in the default state directory, whatever ``--state-dir`` a run uses: exclusive while
     ``update`` checks for live runs and installs, shared while a run begins (until its pointer is written)."""
@@ -172,13 +184,21 @@ class UpdateLock:
         self.path, self.shared, self.fd = _default_state_dir() / "update.lock", shared, None
 
     def acquire(self, *, create: bool = True) -> bool:
-        """Wait up to LOCK_TIMEOUT; False when it stayed held. Without ``create``, no lock file means no holder."""
-        if create:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Wait up to LOCK_TIMEOUT; False when it stayed held. Without ``create``, no lock file means no holder
+        and an unreadable one cannot be probed, so neither holds anything up; with it, a state directory this
+        process cannot write raises StateUnwritable."""
         try:
+            if create:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
             self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT if create else os.O_RDONLY, 0o600)
         except FileNotFoundError:
             return True
+        except OSError as exc:
+            if exc.errno not in UNWRITABLE:
+                raise
+            if not create:
+                return True
+            raise StateUnwritable(self.path, exc) from exc
         deadline = time.monotonic() + LOCK_TIMEOUT
         while True:
             try:
@@ -205,7 +225,12 @@ def update_command(args) -> int:
     # The default state directory always; ``--state-dir`` adds others, such as a legacy ``maintain`` ledger.
     dirs = list(dict.fromkeys([_default_state_dir(), *(Path(d).expanduser() for d in args.state_dir or ())]))
     lock = UpdateLock(shared=args.check)
-    if not lock.acquire(create=not args.check):  # --check waits for an install, then reports what it left
+    try:
+        acquired = lock.acquire(create=not args.check)  # --check waits for an install, then reports what it left
+    except StateUnwritable as exc:
+        return _refuse("state_unwritable", f"{exc}; nothing was installed. Go on with the installed version: a "
+                       f"later run that can write {exc.path.parent} updates it", [])
+    if not acquired:
         return _busy(lock)
     try:
         if args.check:

@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from aiwiki.service import malloc as _malloc
+
 CHUNK_CHARS, CHUNK_OVERLAP = 1800, 200
 RRF_K = 60
 CANDIDATES = 100  # each list contributes its top 100 to the fusion
@@ -190,6 +192,7 @@ class _Index:
                                                  count=len(self.owners))
                     self.matrix = np.stack([np.frombuffer(self.vectors[i], dtype=np.float32)
                                             for i in range(len(self.owners))])
+                    _malloc.trim()  # the previous index, its matrix and snapshot, freed when this index replaced them
         return self.matrix
 
 
@@ -213,6 +216,7 @@ class Store:
         self.disk_error: str | None = None
         self.paused_until = 0.0  # monotonic time until which query embedding is skipped
         self.paused_why = ""
+        self.gave_up = False  # the builder stopped after repeated endpoint failures; a search restarts it
         self._load()
 
     def _load(self) -> None:
@@ -278,7 +282,7 @@ class Store:
                 self.index, self.key = index, key
             index = self.index
             if index.pending and not self.building:
-                self.building = True
+                self.building, self.gave_up = True, False
                 threading.Thread(target=self._build, name="embedding-builder", daemon=True).start()
             return index
 
@@ -312,6 +316,7 @@ class Store:
                     index.error = str(exc)
                     failures += 1
                     if failures >= 5:
+                        self.gave_up = True
                         return  # the next search, or a restart, tries again
                     time.sleep(min(60, 2 ** failures))
                     continue
@@ -390,6 +395,19 @@ def fuse(lexical: list[str], phrase: set[str], vector: list[str], query: str) ->
 
 _stores: dict[Path, Store] = {}
 _stores_lock = threading.Lock()
+
+
+def stores() -> list[Path]:
+    """The bundles a search or /health has given a vector store, i.e. the ones being embedded."""
+    with _stores_lock:
+        return list(_stores)
+
+
+def gave_up(bundle: Path) -> bool:
+    """Whether the bundle's builder stopped on a failing endpoint (the warmer leaves it to the next search)."""
+    with _stores_lock:
+        current = _stores.get(bundle)
+    return bool(current and current.gave_up)
 
 
 def store(bundle: Path) -> Store | None:
