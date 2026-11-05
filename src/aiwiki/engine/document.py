@@ -125,7 +125,10 @@ def load_yaml(text: str) -> object:
     if cached is not None:
         return pickle.loads(cached)  # noqa: S301 - bytes this module pickled from safe_load output
     value = _load_yaml_uncached(text)
-    blob = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    try:
+        blob = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except (RecursionError, pickle.PicklingError):
+        return value  # nesting too deep to copy this way: answered, never cached
     with _YAML_CACHE_LOCK:
         if text not in _YAML_CACHE:
             _YAML_CACHE[text] = blob

@@ -266,7 +266,10 @@ def _judged(path: Path) -> tuple[dict, str, str, str]:
         document = parse_document(raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n"))
         frontmatter, body = document.frontmatter, document.body
         hit = (frontmatter, body, _substantive_signature(frontmatter, body), _generated_signature(frontmatter))
-        blob = pickle.dumps(frontmatter, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            blob = pickle.dumps(frontmatter, protocol=pickle.HIGHEST_PROTOCOL)
+        except (RecursionError, pickle.PicklingError):
+            return hit  # too deep to copy this way: judged, never cached
         with _JUDGED_LOCK:
             if key not in _JUDGED:
                 _JUDGED[key] = (blob, *hit[1:])

@@ -78,8 +78,8 @@ def _walk(root: Path) -> tuple[list[Path], list[str]]:
             (dirs if is_dir else others).append(entry)
         errors.extend(f"{rel}{entry.name}: symlinks are not allowed in an OKF bundle"
                       for entry in dirs + others if entry.is_symlink())
-        files.extend(Path(entry.path) for entry in others
-                     if os.path.splitext(entry.name)[1] == ".md" and not entry.is_symlink()
+        files.extend(Path(entry.path) for entry in others  # Path.suffix, as before: '..md' differs by version
+                     if Path(entry.name).suffix == ".md" and not entry.is_symlink()
                      and entry.is_file(follow_symlinks=False))
         for entry in dirs:
             if entry.name != ".git" and not entry.is_symlink():

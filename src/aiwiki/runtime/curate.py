@@ -376,6 +376,10 @@ def _ssh_env() -> dict[str, str] | None:
         return None
     if _SSH_REUSE_DIR is None:
         directory = Path(tempfile.gettempdir()) / f"ai-wiki-ssh-{os.getuid()}"
+        if len(os.fsencode(directory)) + 1 + 40 + 17 > 100:  # dir/%C (40) plus ssh's temporary ".<16>"
+            directory = Path("/tmp") / f"ai-wiki-ssh-{os.getuid()}"
+            if len(os.fsencode(directory)) + 58 > 100:
+                return None
         try:
             directory.mkdir(mode=0o700, exist_ok=True)
             info = directory.lstat()

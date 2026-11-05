@@ -5,6 +5,8 @@ value, errors are never cached, and the bundle walks give exactly the old answer
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -87,7 +89,8 @@ def test_judged_refuses_a_symlink_like_parse_doc(tmp_path: Path) -> None:
         policy._judged(link)
 
 
-def test_file_digest_follows_a_rewrite_with_the_same_size_and_mtime(tmp_path: Path) -> None:
+def test_file_digest_follows_a_rewrite_with_the_same_size_and_mtime(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(digests, "_TEMP", "/nonexistent-temp/")  # tmp_path counts as a cached tree here
     path = tmp_path / "evidence.bin"
     path.write_bytes(b"aaaa")
     first = digests.file_sha256(path)
@@ -98,6 +101,59 @@ def test_file_digest_follows_a_rewrite_with_the_same_size_and_mtime(tmp_path: Pa
     assert digests.file_sha256(path) != first
     path.write_bytes(b"aaaa")
     assert digests.file_sha256(path) == first
+    assert str(path) in digests._CACHE
+
+
+def test_file_digest_never_holds_a_path_under_the_temp_directory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(digests, "_TEMP", str(tmp_path.resolve()) + "/")
+    path = tmp_path / "gate-copy.bin"
+    path.write_bytes(b"x")
+    assert digests.file_sha256(path) and str(path) not in digests._CACHE
+
+
+def test_a_value_pickle_cannot_copy_is_answered_and_not_cached(monkeypatch) -> None:
+    def refuse(*_args, **_kwargs):
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(document.pickle, "dumps", refuse)
+    text = "deep: [[[[1]]]]\nunique: refusal-probe\n"
+    assert document.load_yaml(text) == {"deep": [[[[1]]]], "unique": "refusal-probe"}
+    assert text not in document._YAML_CACHE
+
+
+def test_ssh_reuse_respects_every_opt_out(tmp_path: Path, monkeypatch) -> None:
+    from aiwiki.runtime import curate
+
+    short = Path(tempfile.mkdtemp(prefix="aw", dir="/tmp"))  # a temp dir short enough for a socket path
+    monkeypatch.setattr(curate, "_SSH_REUSE_DIR", None)
+    monkeypatch.setattr(curate.tempfile, "gettempdir", lambda: str(short))
+    for name in ("GIT_SSH", "GIT_SSH_COMMAND", "AIWIKI_GIT_SSH_REUSE"):
+        monkeypatch.delenv(name, raising=False)
+    env = curate._ssh_env()
+    assert env is not None and "ControlMaster=auto" in env["GIT_SSH_COMMAND"]
+    control = short / f"ai-wiki-ssh-{os.getuid()}"
+    assert curate._SSH_REUSE_DIR == str(control)
+    assert control.is_dir() and (control.stat().st_mode & 0o777) == 0o700
+    for name, value in (("AIWIKI_GIT_SSH_REUSE", "0"), ("GIT_SSH_COMMAND", "ssh -i key"), ("GIT_SSH", "/bin/ssh")):
+        monkeypatch.setenv(name, value)
+        assert curate._ssh_env() is None
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(curate, "_SSH_REUSE_DIR", None)
+    control.chmod(0o755)  # someone else could reach a socket here: no reuse
+    assert curate._ssh_env() is None
+    shutil.rmtree(short)
+
+
+def test_ssh_reuse_moves_off_a_temp_dir_too_long_for_a_socket(monkeypatch) -> None:
+    from aiwiki.runtime import curate
+
+    monkeypatch.setattr(curate, "_SSH_REUSE_DIR", None)
+    monkeypatch.setattr(curate.tempfile, "gettempdir", lambda: "/var/folders/" + "x" * 60 + "/T")
+    for name in ("GIT_SSH", "GIT_SSH_COMMAND", "AIWIKI_GIT_SSH_REUSE"):
+        monkeypatch.delenv(name, raising=False)
+    env = curate._ssh_env()
+    assert env is not None and curate._SSH_REUSE_DIR == f"/tmp/ai-wiki-ssh-{os.getuid()}"
+    assert len(curate._SSH_REUSE_DIR) + 58 <= 100
 
 
 def test_validation_walk_matches_the_old_walks(tmp_path: Path) -> None:
@@ -108,6 +164,7 @@ def test_validation_walk_matches_the_old_walks(tmp_path: Path) -> None:
     (root / ".okf" / "jobs").mkdir(parents=True)
     (root / ".okf" / "jobs" / "x.md").write_text("not a concept\n", encoding="utf-8")
     (root / "metrics" / "dir.md").mkdir()
+    _write(root / "metrics" / "..md", 3)  # Path.suffix and splitext disagree on it in Python <= 3.13
     outside = tmp_path / "outside.md"
     _write(outside, 2)
     (root / "metrics" / "link.md").symlink_to(outside)
