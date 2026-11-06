@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from array import array
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +34,8 @@ RRF_K = 60
 CANDIDATES = 100  # each list contributes its top 100 to the fusion
 BATCH = 16  # chunks per embedding request while building
 PAUSE_S = 30  # after a failed query embedding, searches stay lexical this long instead of each waiting
+QUERY_CACHE = 2048  # query vectors kept per store, most recently used first (~6 MiB at 768 dims)
+QUERY_KEY_MAX = 1000  # characters: a longer query is embedded but not kept (agents' queries are a few words)
 _CJK = re.compile(r"[一-鿿]")
 _FOOTNOTE_DEF = re.compile(r"(?m)^\[\^[^\]]+\]:.*$")
 _FRONTMATTER = re.compile(r"^---\n.*?\n---\n?", re.S)
@@ -217,6 +220,10 @@ class Store:
         self.paused_until = 0.0  # monotonic time until which query embedding is skipped
         self.paused_why = ""
         self.gave_up = False  # the builder stopped after repeated endpoint failures; a search restarts it
+        # A query's vector depends only on the query and the model, so a repeated query (agents rerun their searches)
+        # skips the endpoint, and stays hybrid while it is slow or failing (2026-11-05: 37% of query embeddings timed
+        # out for ten hours). Memory only: a restart forgets it.
+        self.queries: OrderedDict[str, array] = OrderedDict()
         self._load()
 
     def _load(self) -> None:
@@ -352,14 +359,26 @@ class Store:
         """Concept paths by their best chunk's cosine to ``query`` (top CANDIDATES), or ([], why)."""
         if not index.owners or index.pending:
             return [], f"chunk vectors are being built ({len(index.vectors)}/{len(index.owners)})"
-        left = self.paused_until - time.monotonic()
-        if left > 0:
-            return [], f"query embedding paused for {left:.0f}s after: {self.paused_why}"
-        try:
-            (qv,) = embed(self.config, [query_input(query)], timeout=self.config.timeout)
-        except EmbedError as exc:
-            self.paused_why, self.paused_until = str(exc), time.monotonic() + PAUSE_S
-            return [], f"query embedding failed: {exc}"
+        text = query_input(query)
+        with self.lock:
+            qv = self.queries.get(text)
+            if qv is not None:
+                self.queries.move_to_end(text)
+        if qv is None:
+            left = self.paused_until - time.monotonic()
+            if left > 0:
+                return [], f"query embedding paused for {left:.0f}s after: {self.paused_why}"
+            try:
+                (qv,) = embed(self.config, [text], timeout=self.config.timeout)
+            except EmbedError as exc:
+                self.paused_why, self.paused_until = str(exc), time.monotonic() + PAUSE_S
+                return [], f"query embedding failed: {exc}"
+            if len(text) <= QUERY_KEY_MAX:
+                with self.lock:
+                    self.queries[text] = qv
+                    self.queries.move_to_end(text)
+                    while len(self.queries) > QUERY_CACHE:
+                        self.queries.popitem(last=False)
         sims = index.ready_matrix() @ np.frombuffer(qv, dtype=np.float32)
         best = np.full(len(index.concepts), -2.0, dtype=np.float32)
         np.maximum.at(best, index.owner_ids, sims)  # a concept scores by its best chunk
