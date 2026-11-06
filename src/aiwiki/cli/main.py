@@ -50,6 +50,9 @@ CONNECT_HINT = "set AIWIKI_TOKEN in the environment, then: ai-wiki config set --
 _UA = f"ai-wiki-cli/{VERSION} (+https://github.com/Scorpion1221/ai-wiki)"
 _DESCRIPTION = "Read and maintain a curated OKF knowledge bundle over its service API"
 _VERSION_FLAGS = {"-v", "-V", "--version"}
+# Commands that never talk to a bundle. Agents told "every ai-wiki command carries -b <bundle>" also send it here
+# (`ai-wiki -b kb --version`, `ai-wiki update --check -b kb`; ~2-6 usage errors a day, 2026-11-06): it is dropped.
+_BUNDLELESS = {"update", "skill"}
 _DEFAULT_CAT_CHARS = 8000
 _DEFAULT_GREP_LIMIT = 100
 _TOP_K_MAX = 1000  # the server's top_k limit (service app.py: le=1000)
@@ -179,6 +182,34 @@ def _compatible(service_version: object) -> bool:
 
     client = major_minor(VERSION)
     return client is not None and client == major_minor(service_version)
+
+
+def _drop_unused_bundle(args: list[str]) -> list[str]:
+    """``args`` without its ``-b/--bundle NAME`` (or ``--bundle=NAME``) when the command uses no bundle: a bare
+    version probe or ``update``/``skill``. Any other command keeps it exactly as given, and so does anything that
+    was not a well-formed bundle argument: a NAME that looks like an option (``update -b --check``, from an empty
+    ``$BUNDLE``, must stay a usage error, not become a full install) and anything after ``--``."""
+    rest, bundle, i = [], False, 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            rest += args[i:]
+            break
+        if arg in ("-b", "--bundle"):
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                return args
+            bundle, i = True, i + 2
+            continue
+        if arg.startswith("--bundle="):
+            bundle, i = True, i + 1
+            continue
+        rest.append(arg)
+        i += 1
+    if not bundle or not rest:
+        return args
+    if (len(rest) == 1 and rest[0] in _VERSION_FLAGS) or rest[0] in _BUNDLELESS:
+        return rest
+    return args
 
 
 def _command_path(args: list[str]) -> str:
@@ -699,6 +730,7 @@ def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     # argparse takes any unambiguous prefix of an option, and no other option starts with --j.
     _JSON_ERRORS = any(len(arg) > 2 and "--json".startswith(arg) for arg in args)
+    args = _drop_unused_bundle(args)
     if len(args) == 1 and args[0] in _VERSION_FLAGS:
         print(VERSION)
         return 0
