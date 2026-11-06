@@ -321,6 +321,62 @@ def test_after_a_failed_query_embedding_searches_stay_lexical_without_waiting(tm
     assert retrieval["mode"] == "lexical" and retrieval["reason"].startswith("query embedding paused")
 
 
+def test_a_repeated_query_reuses_its_vector_and_stays_hybrid_while_the_endpoint_fails(tmp_path, embedder) -> None:
+    """2026-11-05: for ten hours 37% of the mirror's query embeddings timed out and those searches came back
+    lexical, although agents rerun the same searches. A query embedded once is not sent again."""
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    embedder.requests.clear()
+    first = B.hybrid_search_page(root, "how long does the classroom take to start", 10)
+    assert first[2]["mode"] == "hybrid" and len(embedder.requests) == 1
+
+    second = B.hybrid_search_page(root, "how long does the classroom take to start", 10)
+    assert len(embedder.requests) == 1 and second[:2] == first[:2] and second[2]["mode"] == "hybrid"
+
+    embedder.mode = "fail"
+    failed = B.hybrid_search_page(root, "pricing experiment", 10)  # a new query: embedded, fails, pauses
+    assert failed[2]["mode"] == "lexical" and failed[2]["reason"].startswith("query embedding failed")
+    paused = B.hybrid_search_page(root, "how long does the classroom take to start", 10)
+    assert paused[:2] == first[:2] and paused[2]["mode"] == "hybrid"       # a cached one, during the pause
+    assert len(embedder.requests) == 2
+
+
+def test_the_query_vector_cache_is_bounded_least_recently_used(tmp_path, embedder, monkeypatch) -> None:
+    monkeypatch.setattr(V, "QUERY_CACHE", 3)
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    for q in ("one", "two", "three"):
+        B.hybrid_search_page(root, q, 5)
+    B.hybrid_search_page(root, "one", 5)                     # "one" is now the most recent
+    B.hybrid_search_page(root, "four", 5)                    # evicts "two", the least recent
+    store = V._stores[root]
+    assert list(store.queries) == [V.query_input(q) for q in ("three", "one", "four")]
+    embedder.requests.clear()
+    B.hybrid_search_page(root, "two", 5)
+    assert embedder.requests == [[V.query_input("two")]]
+
+
+def test_a_failed_query_embedding_is_not_cached(tmp_path, embedder) -> None:
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    embedder.mode = "wrong-dims"
+    assert B.hybrid_search_page(root, "needle", 10)[2]["mode"] == "lexical"
+    assert V.query_input("needle") not in V._stores[root].queries
+    V._stores[root].paused_until = 0.0                       # past the pause
+    embedder.mode = "ok"
+    assert B.hybrid_search_page(root, "needle", 10)[2]["mode"] == "hybrid"
+
+
+def test_another_model_never_reuses_a_cached_query_vector(tmp_path, embedder, monkeypatch) -> None:
+    """The cache lives in the store, and a change of model, dimension or endpoint makes a new store."""
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    B.hybrid_search_page(root, "needle", 10)
+    old = V._stores[root]
+    monkeypatch.setenv("AIWIKI_EMBED_MODEL", "fixture-model-2")
+    assert V.store(root) is not old and not V.store(root).queries
+
+
 def test_a_pull_during_the_build_never_embeds_a_chunk_twice(tmp_path, embedder, monkeypatch) -> None:
     monkeypatch.setattr(V, "BATCH", 1)
     root = _bundle(tmp_path / "kb")
@@ -379,6 +435,7 @@ def test_total_counts_every_lexical_match_whatever_the_embedder_does(tmp_path, e
     hybrid = B.hybrid_search_page(root, "定价", 10)
     embedder.mode = "fail"
     V._stores[root].paused_until = 0
+    V._stores[root].queries.clear()                          # else the same query reuses its vector
     fallback = B.hybrid_search_page(root, "定价", 10)
 
     assert hybrid[2]["mode"] == "hybrid" and fallback[2]["mode"] == "lexical"
