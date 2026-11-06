@@ -201,6 +201,62 @@ def test_version_fast_paths_are_bare(capsys) -> None:
     assert capsys.readouterr().out == f"{VERSION}\n"
 
 
+@pytest.mark.parametrize("args", [["-b", "kb", "--version"], ["--bundle", "kb", "-V"], ["--bundle=kb", "-v"]])
+def test_a_version_probe_with_a_bundle_is_still_the_bare_version(capsys, args) -> None:
+    """2026-11-06: the auditor runs `ai-wiki -b solvely-wiki --version` every run and got a usage error."""
+    from aiwiki.cli import entry
+    from aiwiki.version import VERSION
+
+    assert entry.main(args) == 0
+    assert capsys.readouterr().out == f"{VERSION}\n"
+
+
+def test_update_and_skill_ignore_a_bundle_they_never_use(monkeypatch) -> None:
+    """`ai-wiki update --check -b solvely-wiki` was `unrecognized arguments: -b solvely-wiki` (2026-11-06)."""
+    from aiwiki.cli import update
+
+    seen = []
+    monkeypatch.setattr(update, "update_command", lambda a: seen.append(("update", a.check, a.bundle)) or 0)
+    monkeypatch.setattr(update, "skill_command", lambda a: seen.append(("skill", a.action, a.bundle)) or 0)
+    assert cli.main(["update", "--check", "-b", "solvely-wiki"]) == 0
+    assert cli.main(["-b", "solvely-wiki", "update", "--check"]) == 0
+    assert cli.main(["skill", "--bundle=solvely-wiki"]) == 0
+    assert seen == [("update", True, None), ("update", True, None), ("skill", None, None)]
+
+
+@pytest.mark.parametrize("args,expect", [
+    (["-b", "kb", "search", "x"], "kb"),                         # a bundle command keeps it
+    (["search", "x", "-b", "kb"], "usage"),                      # after the command it was, and stays, an error
+    (["-b", "--check", "update"], "usage"),                      # an option is not a bundle name: still an error
+    (["update", "-b", "--check"], "usage"),                      # (an empty $BUNDLE): never a full install
+    (["-b", "kb"], "usage"),                                     # no command: argparse still says what is missing
+    (["-b"], "usage"),
+])
+def test_only_a_well_formed_bundle_on_an_unbundled_command_is_dropped(monkeypatch, capsys, args, expect) -> None:
+    from aiwiki.cli import update
+
+    ran, asked = [], []
+    monkeypatch.setattr(update, "update_command", lambda a: ran.append(a) or 0)
+    monkeypatch.setattr(cli, "_api", lambda route, bundle=None, **k: asked.append((route, bundle)) or {"results": []})
+    if expect == "usage":
+        with pytest.raises(SystemExit) as stop:
+            cli.main(args)
+        assert stop.value.code == 2 and 'kind: "usage"' in capsys.readouterr().out and not ran and not asked
+    else:
+        cli.main(args)
+        assert asked == [("/search", expect)]
+
+
+def test_skill_names_after_a_double_dash_are_left_alone(monkeypatch) -> None:
+    """`ai-wiki skill install -- -b kb` passes `-b` and `kb` as skill names, as before."""
+    from aiwiki.cli import update
+
+    seen = []
+    monkeypatch.setattr(update, "skill_command", lambda a: seen.append(a.names) or 0)
+    cli.main(["skill", "install", "--", "-b", "kb"])
+    assert seen == [["-b", "kb"]]
+
+
 def test_home_view_is_live_content(monkeypatch, tmp_path: Path, capsys) -> None:
     _point_config(monkeypatch, tmp_path)
     cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"])
