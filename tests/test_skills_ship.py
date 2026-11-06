@@ -66,7 +66,19 @@ def test_every_skill_updates_before_a_run_and_keeps_tokens_out_of_argv() -> None
     behind = '"workspace Skill is behind the CLI; publish it"'
     prompts = [ROOT / "docs" / "prompts" / f"{role}-agent-instructions.md"
                for role in ("production", "shadow", "auditor")]
-    for path in [ROOT / "skills" / name / "SKILL.md" for name in skills.NAMES] + prompts:
+    # Since 0.3.18 the attached workspace Skill is a pointer (multica/), so the agent instructions follow the
+    # installed copy directly instead of comparing a stamp the pointer no longer carries.
+    for path in prompts:
+        text = " ".join(path.read_text("utf-8").split())
+        assert "ai-wiki:version" not in text and behind not in text, f"{path.stem}: pointers carry no stamp"
+        # Every run follows the installed copy, not only one that updated: another agent may have updated the CLI.
+        assert "updated or not, follow the installed copy" in text, f"{path.stem}: not gated on this agent updating"
+        assert "`ai-wiki skill` lists" in text and "skill_md" in text and "only a pointer" in text, \
+            f"{path.stem}: follow the installed copy that `ai-wiki skill` lists"
+        assert '"ai-wiki is not installed on this runtime"' in text, f"{path.stem}: stop blocked when unreadable"
+        assert re.search(r"`ai-wiki update --check[^`]*`", text) and re.search(r"`ai-wiki update[^`]*&& hash -r`", text)
+        assert "Never update " in text and "never retry" in text and "install by hand" in text and "--token" not in text
+    for path in [ROOT / "skills" / name / "SKILL.md" for name in skills.NAMES]:
         name = path.parent.name if path.name == "SKILL.md" else path.stem
         text = " ".join(path.read_text("utf-8").split())
         assert re.search(r"`ai-wiki update --check[^`]*`", text), f"{name}: its preflight runs `ai-wiki update --check`"
@@ -225,6 +237,8 @@ def test_update_goes_ahead_past_a_run_older_than_the_lease(updater, capsys) -> N
     out = capsys.readouterr().out
     assert [argv[1:3] for argv in calls][:2] == [["tool", "install"], ["skill", "install"]]
     assert "/s/ai-wiki/SKILL.md" in out                      # the new code's install table, with each SKILL.md
+    # After an install the help row sends agents back to the installed SKILL.md, never to a stamp comparison.
+    assert "re-read the installed SKILL.md" in out and "ai-wiki:version" not in out and "publish it" not in out
 
 
 def test_update_refuses_while_a_maintain_or_another_update_holds_its_lock(updater, tmp_path, monkeypatch,

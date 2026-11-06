@@ -4,8 +4,9 @@
 Multica copies each agent's mounted workspace skill into the task directory and never reads ``~/.agents``, so a full
 copy there lags every ``ai-wiki update`` until someone republishes it. A pointer keeps only the skill's frontmatter
 (its trigger) and tells the agent to update the CLI and then read the installed skill, which the CLI keeps in step.
-Republish ``multica/<name>/SKILL.md`` with ``multica skill update <id> --content-file`` only when ``--check`` fails,
-i.e. when a skill's frontmatter or these steps change.
+``--check`` (and CI) keep the committed pointers equal to this generator. Republish
+``multica/<name>/SKILL.md`` with ``multica skill update <id> --content-file`` only when a release changes a file
+under ``multica/`` or a read-back of the workspace copy differs from it.
 """
 from __future__ import annotations
 
