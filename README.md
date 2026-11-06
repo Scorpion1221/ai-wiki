@@ -207,8 +207,7 @@ ai-wiki update                   # uv-installs main's head, then the new code in
 Install keeps a platform-managed `multica-metadata.json` but replaces every other file in
 these skill directories, so stale bundled scripts cannot silently override the shipped
 version; a directory whose SKILL.md names another skill is never touched. From a checkout,
-`python3 scripts/sync_skills.py --check|--apply` does the same against the repository copy. Publish the same directories to Multica and compare them against this
-check before enabling its Maintainer automation. The legacy `ai-wiki-maintainer` skill is
+`python3 scripts/sync_skills.py --check|--apply` does the same against the repository copy. On Multica, publish only the pointers in `multica/` (next section). The legacy `ai-wiki-maintainer` skill is
 retired: a full `ai-wiki skill install` (as `ai-wiki update` runs it) removes an installed copy
 whose SKILL.md still names it, never a foreign directory of that name. The `ai-wiki maintain`
 command it drove stays as a legacy CLI command.
@@ -219,10 +218,11 @@ Multica copies each agent's mounted workspace skill into the task directory and 
 `~/.agents`, so a full copy there lags every `ai-wiki update`. The workspace copies are therefore
 `multica/<name>/SKILL.md`: the skill's own frontmatter (its trigger) plus three fixed steps (update
 the CLI, then read the installed skill at the `skill_md` path `ai-wiki skill` lists). A release
-reaches agents through `ai-wiki update` alone. `python3 scripts/multica_pointers.py --check` fails
-when a skill's frontmatter changed; only then regenerate and republish the pointer
-(`multica skill update <id> --content-file multica/<name>/SKILL.md`), with its `references/` and
-`assets/` removed from the workspace copy.
+reaches agents through `ai-wiki update` alone. `python3 scripts/multica_pointers.py` regenerates the
+pointers (CI keeps them current); republish one (`multica skill update <id> --content-file
+multica/<name>/SKILL.md`, with no `references/` or `assets/` in the workspace copy) only when the
+release changes a file under `multica/` (`git diff <previous release>..HEAD -- multica/`) or a
+read-back of the workspace copy differs from `multica/<name>/SKILL.md`.
 
 The CLI is non-interactive: usage/API failures are structured on stdout with exit code 2/1, and destructive `bundle rm` requires `--yes`. Bare `-v`, `-V`, and `--version` probes return only the version.
 
