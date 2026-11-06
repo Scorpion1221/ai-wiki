@@ -367,14 +367,40 @@ def test_a_failed_query_embedding_is_not_cached(tmp_path, embedder) -> None:
     assert B.hybrid_search_page(root, "needle", 10)[2]["mode"] == "hybrid"
 
 
-def test_another_model_never_reuses_a_cached_query_vector(tmp_path, embedder, monkeypatch) -> None:
-    """The cache lives in the store, and a change of model, dimension or endpoint makes a new store."""
+@pytest.mark.parametrize("name,value", [("AIWIKI_EMBED_MODEL", "fixture-model-2"), ("AIWIKI_EMBED_DIMS", "16"),
+                                        ("AIWIKI_EMBED_URL", "http://127.0.0.1:9"), ("AIWIKI_EMBED_KEY", "other-key")])
+def test_another_embedder_never_reuses_a_cached_query_vector(tmp_path, embedder, monkeypatch, name, value) -> None:
+    """The cache lives in the store, and a change of model, dimension, endpoint or key makes a new store."""
     root = _bundle(tmp_path / "kb")
     _ready(root)
     B.hybrid_search_page(root, "needle", 10)
     old = V._stores[root]
-    monkeypatch.setenv("AIWIKI_EMBED_MODEL", "fixture-model-2")
+    assert old.queries
+    monkeypatch.setenv(name, value)
     assert V.store(root) is not old and not V.store(root).queries
+
+
+def test_query_vectors_stay_in_memory(tmp_path, embedder) -> None:
+    """Only chunk vectors go to the cache file; a restart forgets query vectors."""
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    _builder_idle(root)
+    files = {p: p.read_bytes() for p in (tmp_path / "embed-cache").iterdir()}
+    for q in ("one", "two", "three"):
+        B.hybrid_search_page(root, q, 5)
+    assert V._stores[root].queries
+    assert {p: p.read_bytes() for p in (tmp_path / "embed-cache").iterdir()} == files
+
+
+def test_a_very_long_query_is_embedded_but_not_cached(tmp_path, embedder) -> None:
+    """The cache is bounded by entries; a key past QUERY_KEY_MAX characters is not kept, so no handful of huge
+    queries can grow it past its budget."""
+    root = _bundle(tmp_path / "kb")
+    _ready(root)
+    long_query = "classroom " * (V.QUERY_KEY_MAX // 10 + 1)
+    assert B.hybrid_search_page(root, long_query, 5)[2]["mode"] == "hybrid"
+    assert B.hybrid_search_page(root, "classroom", 5)[2]["mode"] == "hybrid"
+    assert list(V._stores[root].queries) == [V.query_input("classroom")]
 
 
 def test_a_pull_during_the_build_never_embeds_a_chunk_twice(tmp_path, embedder, monkeypatch) -> None:

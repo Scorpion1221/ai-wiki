@@ -35,6 +35,7 @@ CANDIDATES = 100  # each list contributes its top 100 to the fusion
 BATCH = 16  # chunks per embedding request while building
 PAUSE_S = 30  # after a failed query embedding, searches stay lexical this long instead of each waiting
 QUERY_CACHE = 2048  # query vectors kept per store, most recently used first (~6 MiB at 768 dims)
+QUERY_KEY_MAX = 1000  # characters: a longer query is embedded but not kept (agents' queries are a few words)
 _CJK = re.compile(r"[一-鿿]")
 _FOOTNOTE_DEF = re.compile(r"(?m)^\[\^[^\]]+\]:.*$")
 _FRONTMATTER = re.compile(r"^---\n.*?\n---\n?", re.S)
@@ -372,11 +373,12 @@ class Store:
             except EmbedError as exc:
                 self.paused_why, self.paused_until = str(exc), time.monotonic() + PAUSE_S
                 return [], f"query embedding failed: {exc}"
-            with self.lock:
-                self.queries[text] = qv
-                self.queries.move_to_end(text)
-                while len(self.queries) > QUERY_CACHE:
-                    self.queries.popitem(last=False)
+            if len(text) <= QUERY_KEY_MAX:
+                with self.lock:
+                    self.queries[text] = qv
+                    self.queries.move_to_end(text)
+                    while len(self.queries) > QUERY_CACHE:
+                        self.queries.popitem(last=False)
         sims = index.ready_matrix() @ np.frombuffer(qv, dtype=np.float32)
         best = np.full(len(index.concepts), -2.0, dtype=np.float32)
         np.maximum.at(best, index.owner_ids, sims)  # a concept scores by its best chunk
