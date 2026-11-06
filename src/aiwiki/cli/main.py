@@ -186,11 +186,18 @@ def _compatible(service_version: object) -> bool:
 
 def _drop_unused_bundle(args: list[str]) -> list[str]:
     """``args`` without its ``-b/--bundle NAME`` (or ``--bundle=NAME``) when the command uses no bundle: a bare
-    version probe or ``update``/``skill``. Any other command keeps it exactly as given."""
+    version probe or ``update``/``skill``. Any other command keeps it exactly as given, and so does anything that
+    was not a well-formed bundle argument: a NAME that looks like an option (``update -b --check``, from an empty
+    ``$BUNDLE``, must stay a usage error, not become a full install) and anything after ``--``."""
     rest, bundle, i = [], False, 0
     while i < len(args):
         arg = args[i]
-        if arg in ("-b", "--bundle") and i + 1 < len(args):
+        if arg == "--":
+            rest += args[i:]
+            break
+        if arg in ("-b", "--bundle"):
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                return args
             bundle, i = True, i + 2
             continue
         if arg.startswith("--bundle="):
