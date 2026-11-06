@@ -262,9 +262,10 @@ class Store:
         except OSError as exc:
             self.disk_error = _why(exc)
 
-    def ensure(self, key: object, concepts) -> _Index:
+    def ensure(self, key: object, concepts, restart: bool = True) -> _Index:
         """The index for snapshot ``key`` (its (path, title, description, body) concepts), starting
-        the builder for whatever the cache lacks. Never waits for an embedding."""
+        the builder for whatever the cache lacks, unless it gave up and ``restart`` is false (decided
+        under the lock, so a builder giving up meanwhile stays given up). Never waits for an embedding."""
         with self.lock:
             if self.key is not key:
                 index = _Index()
@@ -281,7 +282,7 @@ class Store:
                             index.pending[i] = text
                 self.index, self.key = index, key
             index = self.index
-            if index.pending and not self.building:
+            if index.pending and not self.building and (restart or not self.gave_up):
                 self.building, self.gave_up = True, False
                 threading.Thread(target=self._build, name="embedding-builder", daemon=True).start()
             return index

@@ -155,24 +155,24 @@ QUOTAS = {
 _COUNTED = {"deprecations_per_day": "deprecations", "reviews_per_day": "reviews_requested"}  # job field
 
 
-# How often the semantic index catches up with a pull on its own (2026-11-05): otherwise the first
-# search after each pull starts the embedding and is answered lexically (A2 never waits for it).
-EMBED_WARM_S = 15.0
+# How often a pull is prepared for reads on its own: otherwise the first search after each pull starts
+# the embedding and is answered lexically (2026-11-05; A2 never waits for it), and builds the search
+# index itself (~2 s, 2026-11-06). A pass with nothing changed costs one stat walk (~10 ms).
+EMBED_WARM_S = 5.0
 
 
 _log = logging.getLogger(__name__)
 
 
 def _warm_embeddings(stop: threading.Event) -> None:
-    """Every EMBED_WARM_S, start embedding what a pull changed in each bundle already being embedded.
-    A builder that gave up on a failing endpoint is left to the next search, as before."""
+    """Every EMBED_WARM_S, prepare each bundle already being embedded for its next read: start
+    embedding what a pull changed and build the new snapshot's search index and link graph. A builder
+    that gave up on a failing endpoint is left to the next search, as before; the indexes are still built."""
     while not stop.wait(EMBED_WARM_S):
         for path in vectors.stores():
-            if vectors.gave_up(path):
-                continue
             try:
                 with worker.serialized_read():
-                    B.embedding_state(path)
+                    B.warm(path)
             except worker.ReadBusy:
                 pass  # a writer mutation: the next pass
             except Exception:  # noqa: BLE001 - the warmer must outlive a bad bundle; say why

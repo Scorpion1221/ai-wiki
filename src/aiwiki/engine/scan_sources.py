@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import posixpath
@@ -30,6 +29,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from .digests import file_sha256
 from .document import load_yaml
 
 SOURCES = "sources"
@@ -42,7 +42,7 @@ _LEGACY_STATUSES = {"reviewed", "canonical", "stale"}
 
 
 def _hash_file(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    return file_sha256(p)
 
 
 def _frontmatter(text: str) -> dict:
@@ -243,7 +243,7 @@ def main(argv=None) -> int:
     hpath = root / HASHES
     prior = {}
     if hpath.exists():
-        loaded = yaml.safe_load(hpath.read_text(encoding="utf-8"))
+        loaded = load_yaml(hpath.read_text(encoding="utf-8"))  # the 2,000-line ledger: libyaml
         if isinstance(loaded, dict):
             prior = loaded
     new = sorted(set(cur) - set(prior))

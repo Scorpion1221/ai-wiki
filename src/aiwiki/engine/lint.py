@@ -24,7 +24,14 @@ from pathlib import Path
 
 import yaml
 
-from .document import DEFAULT_STALE_DAYS, freshness_basis, has_symlink_component, load_yaml, stale_date
+from .document import (
+    DEFAULT_STALE_DAYS,
+    freshness_basis,
+    has_symlink_component,
+    load_yaml,
+    markdown_paths,
+    stale_date,
+)
 
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SKIP_TOP = {"sources", ".okf"}
@@ -51,7 +58,7 @@ def _parse(text):
 
 
 def _concepts(root):
-    for p in sorted(root.rglob("*.md")):
+    for p in markdown_paths(root):  # SKIP_TOP holds .okf too
         if has_symlink_component(root, p):
             continue
         rel = p.relative_to(root)

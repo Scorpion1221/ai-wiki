@@ -45,7 +45,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -53,7 +52,8 @@ from typing import Any
 
 import yaml
 
-from .document import load_yaml
+from .document import load_yaml, markdown_paths
+from .validate import _walk
 
 RESERVED = {"index.md", "log.md", "SCHEMA.md", "purpose.md"}
 SOURCES_DIR = "sources"
@@ -105,7 +105,7 @@ def _load_sidecar(root: Path) -> dict[str, Any]:
 def _dirs_to_index(root: Path) -> set[Path]:
     """Root plus every ancestor directory that (recursively) holds a concept."""
     dirs = {root}
-    for p in root.rglob("*.md"):
+    for p in markdown_paths(root):  # _is_concept refuses .okf too
         if not _is_concept(p, root):
             continue
         d = p.parent
@@ -138,25 +138,11 @@ def _source_title(path: Path) -> str:
 
 
 def _assert_no_symlinks(root: Path) -> None:
-    """Refuse a bundle symlink before index generation can follow its target."""
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-        base = Path(directory)
-        safe_dirs: list[str] = []
-        for name in sorted(dirnames):
-            path = base / name
-            if path.is_symlink():
-                raise ValueError(
-                    f"{path.relative_to(root).as_posix()}: symlinks are not allowed in an OKF bundle"
-                )
-            if name != ".git":
-                safe_dirs.append(name)
-        dirnames[:] = safe_dirs
-        for name in sorted(filenames):
-            path = base / name
-            if path.is_symlink():
-                raise ValueError(
-                    f"{path.relative_to(root).as_posix()}: symlinks are not allowed in an OKF bundle"
-                )
+    """Refuse a bundle symlink before index generation can follow its target. The first symlink in
+    walk order raises, as before; the walk is validate's single-listing one (``_walk``)."""
+    errors = _walk(root)[1]
+    if errors:
+        raise ValueError(errors[0])
 
 
 def generate_indexes(root: Path) -> tuple[list[Path], list[str]]:

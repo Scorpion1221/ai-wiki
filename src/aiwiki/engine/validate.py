@@ -52,45 +52,52 @@ def parse_doc(path: Path) -> tuple[dict[str, Any], str]:
     return document.frontmatter, document.body
 
 
-def _markdown_files(root: Path) -> list[Path]:
+def _walk(root: Path) -> tuple[list[Path], list[str]]:
+    """One walk of the bundle: its markdown files and its symlink errors, exactly what the walks of
+    ``_markdown_files`` and ``_bundle_symlink_errors`` find (same entries, same order) but with
+    each entry's type read from its directory listing instead of another ``lstat``. The writer's
+    bundle holds ~17,700 operational files under ``.okf``, and validate() walked it four times:
+    ~2.7 s of the ~3.7 s one validation took on the writer host (2026-11-06). As in
+    ``os.walk(followlinks=False)``, an entry counts as a directory when ``is_dir()`` (which follows a
+    link) says so, an unreadable directory is skipped, and a linked directory is never entered."""
     files: list[Path] = []
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-        base = Path(directory)
-        dirnames[:] = sorted(
-            name for name in dirnames
-            if name != ".git" and not (base / name).is_symlink()
-        )
-        for name in sorted(filenames):
-            path = base / name
-            if path.suffix == ".md" and not path.is_symlink() and path.is_file():
-                files.append(path)
-    return sorted(files)
+    errors: list[str] = []
+
+    def visit(directory: str, rel: str) -> None:
+        try:
+            with os.scandir(directory) as listing:
+                entries = sorted(listing, key=lambda entry: entry.name)
+        except OSError:
+            return
+        dirs, others = [], []
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            (dirs if is_dir else others).append(entry)
+        errors.extend(f"{rel}{entry.name}: symlinks are not allowed in an OKF bundle"
+                      for entry in dirs + others if entry.is_symlink())
+        files.extend(Path(entry.path) for entry in others  # Path.suffix, as before: '..md' differs by version
+                     if Path(entry.name).suffix == ".md" and not entry.is_symlink()
+                     and entry.is_file(follow_symlinks=False))
+        for entry in dirs:
+            if entry.name != ".git" and not entry.is_symlink():
+                visit(entry.path, f"{rel}{entry.name}/")
+
+    visit(os.fspath(root), "")
+    return sorted(files), errors
+
+
+def _markdown_files(root: Path) -> list[Path]:
+    return _walk(root)[0]
 
 
 def _bundle_symlink_errors(root: Path) -> list[str]:
     """Find bundle symlinks without following or opening their targets."""
     if root.is_symlink():
         return [".: symlinks are not allowed in an OKF bundle"]
-    errors: list[str] = []
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
-        base = Path(directory)
-        safe_dirs: list[str] = []
-        for name in sorted(dirnames):
-            path = base / name
-            if path.is_symlink():
-                errors.append(
-                    f"{path.relative_to(root).as_posix()}: symlinks are not allowed in an OKF bundle"
-                )
-            elif name != ".git":
-                safe_dirs.append(name)
-        dirnames[:] = safe_dirs
-        for name in sorted(filenames):
-            path = base / name
-            if path.is_symlink():
-                errors.append(
-                    f"{path.relative_to(root).as_posix()}: symlinks are not allowed in an OKF bundle"
-                )
-    return errors
+    return _walk(root)[1]
 
 
 def _is_profile_concept(path: Path, root: Path) -> bool:
@@ -401,12 +408,34 @@ def validate_profile_document(frontmatter: dict[str, Any], body: str) -> list[st
     return errors
 
 
-def validate_okf_conformance(root: Path) -> list[str]:
-    """Validate the exact minimum OKF v0.2 bundle contract."""
-    errors = _bundle_symlink_errors(root)
+def _loader(documents: dict | None):
+    """``load_document`` for concept files, remembering each result (or its error) in ``documents``
+    when the caller shares one dict between the two checks of a single validate()."""
+    def load(path: Path):
+        if documents is None:
+            return load_document(path)
+        if path not in documents:
+            try:
+                documents[path] = load_document(path)
+            except (OSError, UnicodeError, OKFDocumentError) as exc:
+                documents[path] = exc
+        result = documents[path]
+        if isinstance(result, Exception):
+            raise result
+        return result
+    return load
+
+
+def validate_okf_conformance(root: Path, walked: tuple[list[Path], list[str]] | None = None,
+                             documents: dict | None = None) -> list[str]:
+    """Validate the exact minimum OKF v0.2 bundle contract. ``walked`` (``_walk(root)``) and
+    ``documents`` let validate() read the bundle once for both checks."""
     if root.is_symlink():
-        return errors
-    for path in _markdown_files(root):
+        return _bundle_symlink_errors(root)
+    files, symlink_errors = walked or _walk(root)
+    errors = list(symlink_errors)
+    load = _loader(documents)
+    for path in files:
         rel = path.relative_to(root)
         if path.name == "index.md":
             errors.extend(f"{rel}: {error}" for error in _validate_index(path, root))
@@ -415,7 +444,7 @@ def validate_okf_conformance(root: Path) -> list[str]:
             errors.extend(f"{rel}: {error}" for error in _validate_log(path))
             continue
         try:
-            document = load_document(path)
+            document = load(path)
         except (OSError, UnicodeError, OKFDocumentError) as exc:
             errors.append(f"{rel}: {exc}")
             continue
@@ -463,11 +492,14 @@ def _validate_log(path: Path) -> list[str]:
     return errors
 
 
-def validate_profile(root: Path) -> list[str]:
+def validate_profile(root: Path, walked: tuple[list[Path], list[str]] | None = None,
+                     documents: dict | None = None) -> list[str]:
     """Validate the stricter AI Wiki producer profile for OKF v0.2 concepts."""
-    errors = _bundle_symlink_errors(root)
     if root.is_symlink():
-        return errors
+        return _bundle_symlink_errors(root)
+    files, symlink_errors = walked or _walk(root)
+    errors = list(symlink_errors)
+    load = _loader(documents)
     root_index = root / "index.md"
     if root_index.is_symlink():
         pass  # the filesystem safety error above is sufficient; never read target
@@ -482,12 +514,12 @@ def validate_profile(root: Path) -> list[str]:
             if str(index_document.frontmatter.get("okf_version") or "") != OKF_VERSION:
                 errors.append(f'index.md: okf_version must be "{OKF_VERSION}"')
 
-    for path in _markdown_files(root):
+    for path in files:
         if not should_check(path, root):
             continue
         rel = path.relative_to(root)
         try:
-            document = load_document(path)
+            document = load(path)
         except (OSError, UnicodeError, OKFDocumentError):
             # Exact conformance reports the more useful parser error.
             continue
@@ -499,7 +531,10 @@ def validate_profile(root: Path) -> list[str]:
 
 def validate(root: Path) -> list[str]:
     """Run exact OKF v0.2 conformance followed by the strict AI Wiki profile."""
-    return list(dict.fromkeys(validate_okf_conformance(root) + validate_profile(root)))
+    walked = None if root.is_symlink() else _walk(root)
+    documents: dict = {}  # neither check edits a document it reads
+    return list(dict.fromkeys(validate_okf_conformance(root, walked, documents)
+                              + validate_profile(root, walked, documents)))
 
 
 def _body_spill_findings(root: Path, rels) -> list[str]:
