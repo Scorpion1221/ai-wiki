@@ -849,6 +849,19 @@ def embedding_state(root: Path) -> dict | None:
     return vstore.state()
 
 
+def warm(root: Path) -> None:
+    """Prepare the current snapshot for reads before one asks: start embedding what it lacks, unless
+    the builder gave up on a failing endpoint (that is left to the next search); then build its search
+    index and link graph, which the first /search and /links after a pull would otherwise build
+    themselves (~2 s and ~1.3 s on the production bundle, 2026-11-06)."""
+    snapshot = _snapshot(root)
+    vstore = _vectors.store(root)
+    if vstore is not None:
+        vstore.ensure(snapshot, _embedding_inputs(snapshot), restart=False)
+    _derived(snapshot, _SearchIndex)
+    _derived(snapshot, _LinkGraph)
+
+
 def _embedding_inputs(snapshot: _Snapshot) -> list[tuple[str, str, str, str]]:
     return [(rel, fm.get("title") or "", fm.get("description") or "", body)
             for _path, rel, fm, body, _text in snapshot.records]

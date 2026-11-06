@@ -477,6 +477,49 @@ def test_a_pull_is_embedded_before_the_next_search_asks(tmp_path, embedder, monk
     assert answer.json()["retrieval"]["mode"] == "hybrid"
 
 
+def _warmed(root: Path, before, deadline: float = 5.0):
+    """Wait until the cached snapshot is a settled one other than ``before`` with its search index
+    and link graph built; return it."""
+    end = time.monotonic() + deadline
+    while True:
+        snap = B._snapshots.get(root)
+        if (snap is not None and snap is not before and snap.settled
+                and B._SearchIndex in snap.derived and B._LinkGraph in snap.derived):
+            return snap
+        assert time.monotonic() < end, None if snap is None else (snap is before, snap.settled, list(snap.derived))
+        time.sleep(0.02)
+
+
+@pytest.mark.parametrize("endpoint", ["ok", "fail"])
+def test_a_pull_has_its_search_index_and_link_graph_before_the_next_read(tmp_path, embedder, monkeypatch,
+                                                                          endpoint) -> None:
+    """2026-11-06: in production the first search after each pull took ~2.8 s, the next one ~0.35 s: the
+    warmer embedded the pull but left the search index (~2 s) and link graph (~1.3 s) to the first request.
+    The warmer builds them too, also while the embedder is down and its builder has given up."""
+    from test_smoke import AUTH, _client
+
+    monkeypatch.setattr(V.time, "sleep", lambda _s: None)    # the builder's backoff, not the test's clock
+    root = _bundle(tmp_path / "kb")
+    embedder.mode = endpoint
+    client = _client(root, monkeypatch)                     # sets the token the app module reads on import
+    from aiwiki.service import app as appmod
+
+    monkeypatch.setattr(appmod, "EMBED_WARM_S", 0.02, raising=False)
+    with client:
+        client.get("/health", headers=AUTH)                 # the mirror's first request registers the bundle
+        first = _warmed(root, None)
+        edited = root / "features" / "tutor-init.md"
+        edited.write_text(edited.read_text(encoding="utf-8") + "\n\nA pulled paragraph about latency.\n",
+                          encoding="utf-8")
+        pulled = _warmed(root, first)                       # no request from here on: only the warmer looks
+        built = {cls: pulled.derived[cls] for cls in (B._SearchIndex, B._LinkGraph)}
+        assert client.get("/search", params={"q": "pulled paragraph latency"}, headers=AUTH).json()["results"]
+        assert client.get("/links", params={"path": "features/tutor-init.md"}, headers=AUTH).status_code == 200
+        _builder_idle(root)                                 # the search may have restarted it: end it here
+    assert B._snapshots[root] is pulled                    # the reads used the warmed snapshot ...
+    assert all(pulled.derived[cls] is index for cls, index in built.items())  # ... and its indexes as built
+
+
 def test_the_warmer_leaves_a_builder_that_gave_up_to_the_next_search(tmp_path, embedder, monkeypatch) -> None:
     """While the endpoint is down the warmer does not restart the builder every pass; a search still does."""
     from test_smoke import AUTH, _client
