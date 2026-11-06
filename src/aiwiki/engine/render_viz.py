@@ -30,6 +30,7 @@ from aiwiki.engine.document import (
     bundle_okf_version,
     concept_metadata,
     has_symlink_component,
+    markdown_paths,
     parse_document,
 )
 from aiwiki.engine.validate import validate_profile_document
@@ -141,7 +142,7 @@ def _extract_links(body: str, doc_dir: Path, bundle_root: Path) -> list[str]:
 
 def _walk_concepts(bundle_root: Path) -> list[Concept]:
     concepts: list[Concept] = []
-    for md_path in sorted(bundle_root.rglob("*.md")):
+    for md_path in markdown_paths(bundle_root):  # .okf is skipped below too
         if has_symlink_component(bundle_root, md_path):
             continue
         rel_path = md_path.relative_to(bundle_root)
