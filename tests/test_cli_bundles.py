@@ -201,6 +201,38 @@ def test_version_fast_paths_are_bare(capsys) -> None:
     assert capsys.readouterr().out == f"{VERSION}\n"
 
 
+@pytest.mark.parametrize("args", [["-b", "kb", "--version"], ["--bundle", "kb", "-V"], ["--bundle=kb", "-v"]])
+def test_a_version_probe_with_a_bundle_is_still_the_bare_version(capsys, args) -> None:
+    """2026-11-06: the auditor runs `ai-wiki -b solvely-wiki --version` every run and got a usage error."""
+    from aiwiki.cli import entry
+    from aiwiki.version import VERSION
+
+    assert entry.main(args) == 0
+    assert capsys.readouterr().out == f"{VERSION}\n"
+
+
+def test_update_and_skill_ignore_a_bundle_they_never_use(monkeypatch) -> None:
+    """`ai-wiki update --check -b solvely-wiki` was `unrecognized arguments: -b solvely-wiki` (2026-11-06)."""
+    from aiwiki.cli import update
+
+    seen = []
+    monkeypatch.setattr(update, "update_command", lambda a: seen.append(("update", a.check, a.bundle)) or 0)
+    monkeypatch.setattr(update, "skill_command", lambda a: seen.append(("skill", a.action, a.bundle)) or 0)
+    assert cli.main(["update", "--check", "-b", "solvely-wiki"]) == 0
+    assert cli.main(["-b", "solvely-wiki", "update", "--check"]) == 0
+    assert cli.main(["skill", "--bundle=solvely-wiki"]) == 0
+    assert seen == [("update", True, None), ("update", True, None), ("skill", None, None)]
+
+
+def test_a_bundle_still_reaches_every_command_that_reads_one(monkeypatch) -> None:
+    from aiwiki.cli import main as m
+
+    assert m._drop_unused_bundle(["-b", "kb", "search", "x"]) == ["-b", "kb", "search", "x"]
+    assert m._drop_unused_bundle(["search", "x", "-b", "kb"]) == ["search", "x", "-b", "kb"]
+    assert m._drop_unused_bundle(["-b", "kb"]) == ["-b", "kb"]          # nothing else: argparse says what is missing
+    assert m._drop_unused_bundle(["-b"]) == ["-b"]
+
+
 def test_home_view_is_live_content(monkeypatch, tmp_path: Path, capsys) -> None:
     _point_config(monkeypatch, tmp_path)
     cli.main(["config", "set", "--endpoint", "https://h/", "--token", "tok"])
