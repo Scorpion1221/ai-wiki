@@ -11,6 +11,9 @@ contains an invalid document.
 from __future__ import annotations
 
 import os
+import pickle
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -83,11 +86,7 @@ def parse_document(text: str, *, require_frontmatter: bool = True) -> OKFDocumen
     return OKFDocument(frontmatter=frontmatter, body=body)
 
 
-def load_yaml(text: str) -> object:
-    """``yaml.safe_load``, through libyaml when PyYAML has it. Every gate re-reads every
-    concept's frontmatter, so the parser is most of a changeset's cost. libyaml and the Python
-    parser agree on valid YAML, but word their errors differently: on any error the Python
-    parser runs again, so callers and the gate see the same message as before."""
+def _load_yaml_uncached(text: str) -> object:
     if _FAST_LOADER is None:
         return yaml.safe_load(text)
     try:
@@ -96,9 +95,78 @@ def load_yaml(text: str) -> object:
         return yaml.safe_load(text)
 
 
+# Parsed frontmatter by its exact text (2026-11-06). One changeset reads every concept's
+# frontmatter about 22 times (the gate's validate, snapshots and policy on the workspace copy, then
+# the writer's on the live tree, then indexes, source hashes, lint and the viz): ~16,000 parses,
+# 20 s of a ~49 s transaction on the writer host, for ~700 texts that are almost all unchanged.
+# The cache is keyed by the text itself, so an edited file always parses afresh and an error is
+# never cached (it raises again, with the same message). Callers get their own copy each time,
+# unpickled (twice as fast as copy.deepcopy, and like it keeps an alias's shared object shared):
+# several of them edit the mapping they are handed (bookkeeping, normalisation).
+_YAML_CACHE: OrderedDict[str, bytes] = OrderedDict()
+_YAML_CACHE_LOCK = threading.Lock()
+_YAML_CACHE_BUDGET = 16 << 20  # bytes of keys and pickles held, least recently used dropped first
+_YAML_CACHE_TEXT_MAX = 32 << 10  # larger texts (the source-hash ledger, which every commit changes) parse uncached
+_yaml_cache_bytes = 0
+
+
+def load_yaml(text: str) -> object:
+    """``yaml.safe_load``, through libyaml when PyYAML has it. libyaml and the Python parser agree
+    on valid YAML, but word their errors differently: on any error the Python parser runs again,
+    so callers and the gate see the same message as before. A text parsed before is answered from
+    ``_YAML_CACHE`` as a fresh copy."""
+    global _yaml_cache_bytes
+    if len(text) > _YAML_CACHE_TEXT_MAX:
+        return _load_yaml_uncached(text)
+    with _YAML_CACHE_LOCK:
+        cached = _YAML_CACHE.get(text)
+        if cached is not None:
+            _YAML_CACHE.move_to_end(text)
+    if cached is not None:
+        return pickle.loads(cached)  # noqa: S301 - bytes this module pickled from safe_load output
+    value = _load_yaml_uncached(text)
+    try:
+        blob = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except (RecursionError, pickle.PicklingError):
+        return value  # nesting too deep to copy this way: answered, never cached
+    with _YAML_CACHE_LOCK:
+        if text not in _YAML_CACHE:
+            _YAML_CACHE[text] = blob
+            _yaml_cache_bytes += len(text) + len(blob)
+            while _yaml_cache_bytes > _YAML_CACHE_BUDGET and _YAML_CACHE:
+                old_text, old_blob = _YAML_CACHE.popitem(last=False)
+                _yaml_cache_bytes -= len(old_text) + len(old_blob)
+    return value
+
+
 
 def load_document(path: Path, *, require_frontmatter: bool = True) -> OKFDocument:
     return parse_document(path.read_text(encoding="utf-8"), require_frontmatter=require_frontmatter)
+
+
+def markdown_paths(root: Path) -> list[Path]:
+    """``sorted(root.rglob("*.md"))`` except what lies under the bundle's top-level ``.okf``.
+
+    Every reader that walks a bundle for concepts skips ``.okf`` (job receipts, work items, triage:
+    ~17,700 files on the writer, against ~2,800 bundle files), yet rglob listed and stat-ed all of it
+    on each call, several times per changeset (2026-11-06). Like rglob, it never enters a symlinked
+    directory and lists a symlink or a directory named ``*.md`` for the caller to judge.
+    """
+    found: list[Path] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as listing:
+                entries = list(listing)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.endswith(".md"):
+                found.append(Path(entry.path))
+            if entry.is_dir(follow_symlinks=False) and not (directory == root and entry.name == ".okf"):
+                pending.append(Path(entry.path))
+    return sorted(found)
 
 
 def has_symlink_component(root: Path, path: Path) -> bool:
