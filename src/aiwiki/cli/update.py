@@ -303,8 +303,8 @@ def _install() -> int:
     groups = [object_lines("update", data), step.stdout.strip().splitlines()]
     if data["available"]:
         groups.append(table_lines("help", ({
-            "command": "compare the <!-- ai-wiki:version --> of the Skill you follow with `now`",
-            "purpose": "if they differ, read the installed SKILL.md listed above; if you cannot, stop blocked: "
-                       "workspace Skill is behind the CLI; publish it"},), ("command", "purpose")))
+            "command": "re-read the installed SKILL.md listed above before you continue",
+            "purpose": "it changed with the CLI; any Multica workspace copy is only a pointer to it"},),
+            ("command", "purpose")))
     emit(*groups)
     return 0

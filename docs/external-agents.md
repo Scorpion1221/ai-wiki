@@ -140,13 +140,14 @@ the Multica registry).
 
 ## 4. Attach the skills and the prompt
 
-1. Publish the skills from the release checkout: `python3 scripts/sync_skills.py --apply`
-   installs the canonical copies under `~/.agents/skills`; `--check` detects drift. In
-   Multica, create or update the skill from that `SKILL.md` (`multica skill create|update
-   --content-file`) and attach it (`multica agent skills set <agent-id> --skill-ids …`).
-   The agent follows that attached copy, which `ai-wiki update` never touches: republish it at
-   every release (AGENTS.md §5), or the agent stops blocked with "workspace Skill is behind
-   the CLI; publish it".
+1. Install the skills on the runtime with the CLI (`ai-wiki skill install`; `ai-wiki update`
+   keeps them current). In Multica, create the workspace skill from the pointer
+   `multica/<name>/SKILL.md` (`multica skill create|update --content-file`; no references or
+   assets) and attach it without replacing other skills (`multica agent skills add <agent-id>
+   --skill-ids …`). The pointer sends the agent to the installed copy, so releases need no
+   republish; republish only when the release changes a file under `multica/` (`git diff <previous
+   release>..HEAD -- multica/`) or a read-back of the workspace copy differs from
+   `multica/<name>/SKILL.md`.
 2. Paste the agent instructions: the text after the `---` line of the role's
    `*-agent-instructions.md`, verbatim.
 3. Schedule the prompt: the role's `*-autopilot-prompt.md`, with its placeholders filled in,
