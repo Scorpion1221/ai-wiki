@@ -63,10 +63,12 @@ class Bundle:
         self.job(job_id, kind="ingest", mode="changeset", status=status, principal=MAINTAINER, run=RUN,
                  created=at(hours), finished=at(hours - 0.01))
 
-    def audit(self, job_id: str, hours: float, verdicts: list[str]) -> None:
+    def audit(self, job_id: str, hours: float, verdicts: list[str], paths: list[str] | None = None) -> None:
+        """One audit changeset; each review a concept of its own unless ``paths`` names them."""
+        paths = paths or [f"m/{job_id}-{i}.md" for i in range(len(verdicts))]
         self.job(job_id, kind="audit", mode="changeset", status="done", principal=AUDITOR, run=AUDIT_RUN,
                  created=at(hours), finished=at(hours - 0.01),
-                 reviews=[{"path": f"m/{i}.md", "verdict": v, "outcome": v} for i, v in enumerate(verdicts)])
+                 reviews=[{"path": p, "verdict": v, "outcome": v} for p, v in zip(paths, verdicts, strict=True)])
 
     def triage(self, review_id: str, hours: float, verdict: str, claims: int = 0) -> None:
         (self.root / ".okf" / "triage" / f"tr_{review_id}.json").write_text(json.dumps({
@@ -117,8 +119,9 @@ def test_a_full_run_meets_the_bar_and_the_misses_are_flagged(bundle: Bundle) -> 
     assert m["outcomes"] == {"curated": 77, "skipped": 35, "duplicate": 38}
     assert a["concepts"] == 100 and a["verdicts"]["verified"] == 35 and a["triage_verdicts"] == {"missed": 10,
                                                                                                 "upheld": 10}
+    assert a["first_reviews"] == {"verified": 35, "corrected": 40, "unverified": 25} and a["re_reviews"] == {}
     assert grades(result) == {"运行时长": "ok", "处理条目": "ok", "首次过 gate": "ok", "跳过+合并占比": "ok",
-                              "概念审查": "ok", "通过率": "warn", "triage 漏判率": "warn"}
+                              "概念审查": "ok", "首审通过率": "warn", "重审通过率": "ok", "triage 漏判率": "warn"}
     assert result["grade"] == "warn"  # a replay grades only the day's work, never the queue as it is now
 
 
@@ -177,9 +180,11 @@ class Server:
             def do_GET(self) -> None:  # noqa: N802 - http.server API
                 server.requests.append(self.path)
                 ok = self.headers.get("Authorization") == f"Bearer {token}"
-                body = ({"triage": {"backlog": 71}, "audit": {"pending": 3, "oldest_finished": at(80)}}
+                body = ({"triage": {"backlog": 71}, "audit": {"pending": 3, "oldest_finished": at(80),
+                                                              "held": {"after": 2, "count": 75}}}
                         if self.path.startswith("/maint/status") else
-                        {"git_revision": revision, "by_trust": {"machine-confirmed": 70, "unverified": 30}})
+                        {"git_revision": revision, "by_trust": {"machine-confirmed": 70, "unverified": 30},
+                         "verified_current": 63})
                 data = json.dumps(body if ok else {"detail": "no"}).encode()
                 self.send_response(200 if ok else 401)
                 self.send_header("Content-Length", str(len(data)))
@@ -215,6 +220,9 @@ def test_the_writer_and_mirror_rows_and_a_lagging_mirror(bundle: Bundle) -> None
         by = {row["check"]: row for row in result["rows"]}
         assert by["triage 积压"]["grade"] == "warn" and by["审计 backlog"]["grade"] == "warn"
         assert by["镜像同步"]["grade"] == "ok" and by["未验证概念"]["grade"] == "warn"
+        # 11-08: 478 of 754 concepts verified in their current version; 75 held for an answer.
+        assert by["当前版本已验证"]["grade"] == "warn" and by["当前版本已验证"]["value"] == "63/100（63.0%）"
+        assert by["等维护者回应"]["grade"] == "warn" and by["等维护者回应"]["value"].startswith("75 个概念")
         assert token not in json.dumps(result)
 
         lagging = Server(token, "0" * 40)
@@ -264,3 +272,20 @@ def test_a_run_that_spends_its_item_budget_stopped_on_purpose(bundle: Bundle, mo
     by = {row["check"]: row for row in qc(bundle)[1]["rows"]}
     assert by["运行时长"]["grade"] == "ok" and "额度用完" in by["运行时长"]["value"], by["运行时长"]
     assert {row["check"]: row["grade"] for row in qc(bundle, "--run-items", "200")[1]["rows"]}["运行时长"] == "bad"
+
+
+def test_a_re_review_is_graded_apart_from_first_reviews(bundle: Bundle) -> None:
+    """11-07: 59% of reviews re-read a concept refused before, and 7% of those passed. The first
+    review grades the maintainer's writing; a re-review only shows how refusals get answered."""
+    full_day(bundle)
+    earlier = [f"m/old-{i}.md" for i in range(10)]
+    bundle.audit("p00000000000", 40, ["unverified"] * 10, earlier)  # the day before: all refused
+    bundle.audit("p00000000001", 3, ["unverified"] * 9 + ["verified"], earlier)
+    _code, result = qc(bundle, "--now", iso(NOW))
+    a = result["facts"]["auditor"]
+    assert a["first_reviews"] == {"verified": 35, "corrected": 40, "unverified": 25}
+    assert a["re_reviews"] == {"unverified": 9, "verified": 1}
+    by = {r["check"]: r for r in result["rows"]}
+    assert by["首审通过率"]["value"].startswith("35.0%（100 个首次审查")
+    assert by["重审通过率"]["value"] == "10.0%（10 次重审）"
+    assert grades(qc(bundle, "--now", iso(NOW), "--min-verified-pct", "30")[1])["首审通过率"] == "ok"

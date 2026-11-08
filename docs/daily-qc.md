@@ -16,12 +16,16 @@ It runs on the writer host at 10:30 CST, after the 02:00 maintainer (up to 4 h) 
 | 维护 | 处理条目 | Items the maintainer closed (curated, skipped, duplicate…), including closes a triage review reopened since | `--min-items` 60, or the queue is empty |
 | 维护 | 首次过 gate | The maintainer's changeset jobs, done vs rejected | `--min-gate-pct` 90 |
 | 维护 | 跳过+合并占比 | Closed as skipped or duplicate | `--max-skip-pct` 60 |
-| 审计 | 概念审查, 通过率 | The auditor's audit jobs and their review outcomes | `--min-audits` 60, `--min-verified-pct` 50 |
+| 审计 | 概念审查 | The auditor's audit jobs and their review outcomes | `--min-audits` 60 |
+| 审计 | 首审通过率 | Reviews of a concept no earlier audit reviewed, ended verified: the maintainer's writing | `--min-verified-pct` 50 |
+| 审计 | 重审通过率 | Reviews of a concept reviewed before, ended verified: how refusals get answered | shown, never graded |
 | 审计 | triage 漏判率 | `.okf/triage` receipts: missed vs upheld | `--max-miss-pct` 20; the historical backfill waits for this |
 | 队列 | ready 积压, 等待超 72h | Items ready now; the wait restarts on a return to ready, as the watchdog counts it | `--max-ready` 150; none over 72 h |
 | 队列 | 成员投递, needs_human | Member items waiting; items needing a person | ≤ 24 h; 0 (red) |
 | 队列 | triage 积压, 审计 backlog | `GET /maint/status` (`--writer-url`) | `--max-triage-backlog` 60; oldest ≤ 72 h |
+| 队列 | 等维护者回应 | `audit.held` of `GET /maint/status`: concepts refused `AIWIKI_AUDIT_HOLD_AFTER` (2) versions in a row, waiting for the maintainer's answer | `--max-held` 60 |
 | 读取 | 镜像同步, 未验证概念 | The mirror's `GET /health` (`--mirror-url`) against the writer's Git HEAD | Same revision (red otherwise); `--max-unverified-pct` 20 |
+| 读取 | 当前版本已验证 | `verified_current` of the mirror's `GET /health`: concepts whose verification confirms the version a reader gets | `--min-current-pct` 70 |
 
 A row is ✅ ok, ⚠️ warn or 🔴 bad. The card is green, yellow or red by its worst row.
 `运行` turns red when a role left no receipt that day; `运行中` warns when the auditor
