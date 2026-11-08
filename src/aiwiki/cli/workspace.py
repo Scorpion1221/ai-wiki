@@ -265,8 +265,8 @@ def _item_evidence(root: Path, bundle: str, item_id: str) -> tuple[list[changese
 
 
 def build(root: Path, state: dict, *, item: str | list[str] | None = None, upload: Path | None = None,
-          source_id: str | None = None, deprecate=(), allow_shrink=(), allow_retype=(), close: bool = True,
-          run: str | None = None) -> tuple[dict, list[changeset.EvidenceFile]]:
+          source_id: str | None = None, deprecate=(), allow_shrink=(), allow_retype=(), allow_grow=(),
+          close: bool = True, run: str | None = None) -> tuple[dict, list[changeset.EvidenceFile]]:
     """The changeset of the workspace's local changes and the frozen evidence it names.
 
     Without ``item`` or ``upload`` a placeholder packet stands in: good for judging the
@@ -321,7 +321,8 @@ def build(root: Path, state: dict, *, item: str | list[str] | None = None, uploa
             "filename": upload.name if upload else "placeholder.md", "content_b64": base64.b64encode(data).decode()}}
     request["files"] = files
     allow = {name: [{"path": path, "reason": reason} for path, reason in entries]
-             for name, entries in (("shrink", allow_shrink), ("retype", allow_retype)) if entries}
+             for name, entries in (("shrink", allow_shrink), ("retype", allow_retype), ("grow", allow_grow))
+             if entries}
     if allow:
         request["allow"] = allow
     if run:
@@ -613,7 +614,7 @@ def run(a, bundle: str | None) -> int:
 def _changeset_options(a) -> dict:
     return {"item": a.item, "upload": Path(a.upload).expanduser() if a.upload else None, "source_id": a.source_id,
             "deprecate": a.deprecate or (), "allow_shrink": a.allow_shrink or (),
-            "allow_retype": a.allow_retype or (), "run": a.run,
+            "allow_retype": a.allow_retype or (), "allow_grow": getattr(a, "allow_grow", None) or (), "run": a.run,
             "close": not getattr(a, "no_close", False)}
 
 

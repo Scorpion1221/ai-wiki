@@ -1045,6 +1045,8 @@ def main(argv=None) -> int:
                             help="let PATH's body shrink below 70%% of its base, for REASON")
         parser.add_argument("--allow-retype", action="append", type=_pair, metavar="PATH:REASON",
                             help="let PATH's type or title change, for REASON")
+        parser.add_argument("--allow-grow", action="append", type=_pair, metavar="PATH:REASON",
+                            help="let PATH's body grow past the size cap (20000 characters), for REASON")
         parser.add_argument("--run", type=_run, help="the maintenance run (X-AIWiki-Run), e.g. WAIO-612")
     for parser in (p_pull, p_status, p_diff, p_validate, p_propose):
         parser.add_argument("--json", action="store_true", help="emit JSON instead of TOON")

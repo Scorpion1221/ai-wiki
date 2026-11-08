@@ -1127,12 +1127,14 @@ def _attention(path: Path) -> list[dict]:
     backlog is: the content hashes are those of the workspace the maintainer pulls. A bundle
     without Git publishes its live tree."""
     if curate_runtime._repo_root(path) is None:
-        return attention.plan(path, today=attention.today(), held=_held(path, path))
+        return attention.plan(path, today=attention.today(), held=_held(path, path),
+                              body_chars=changeset.limits()["body_chars"])
     _root, revision, archive = _published(path)
     with tempfile.TemporaryDirectory(prefix="aiwiki-attention-") as scratch:
         tree = Path(scratch) / "bundle"
         _unpack(archive, tree)
-        return attention.plan(path, tree=tree, today=attention.today(), held=_held(path, tree, revision))
+        return attention.plan(path, tree=tree, today=attention.today(), held=_held(path, tree, revision),
+                              body_chars=changeset.limits()["body_chars"])
 
 
 def _held(path: Path, tree: Path, revision: str = "HEAD") -> list[dict]:
