@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on a correction your own run wrote.
 ---
-<!-- ai-wiki:version 0.3.22 -->
+<!-- ai-wiki:version 0.3.23 -->
 
 # AI Wiki Auditor
 
@@ -123,8 +123,8 @@ Hold each to the evidence boundary:
   (its definition and markers) and a hedged heading are hedges too (`D_CAVEAT_REMOVED`).
 - okf-knowledge-curator's Signals are claims too. An alias naming something else or stating a
   status, number or date: delete it (corrected). Unverified, the note naming the evidence part: a
-  `stale_after` later than that skill's date rule gives from the cited evidence, or one on
-  evidence with no date (a reading would read fresh too long); a `description` past the body's
+  `stale_after` on evidence with no date (a reading would read fresh too long; one later than that
+  skill's date rule gives is corrected to the earlier date); a `description` past the body's
   latest state or its evidence boundary; a stable concept the body or its evidence records as
   retired or superseded (the maintainer deprecates it). A missing alias or `stale_after` is no
   verdict.
@@ -139,9 +139,10 @@ Hold each to the evidence boundary:
   hold, grow the body or a text key by more than 20%, add a key or list item, raise
   `confidence`, touch `contested`/`contradictions` or remove a hedge (§3.3): the writer downgrades
   any such correction to unverified (`D_NOVEL_TOKEN`, `D_NEW_LINK`, `D_GROWTH`,
-  `D_CAVEAT_REMOVED`) and keeps the old text. `type`, `title`, `sources`, `stale_after`,
-  `generated`, `verified` and `status` are restored whatever you write; a correction of only those
-  ends unverified (`D_RESTORED`), so say in the note what is wrong. A correction is your new
+  `D_CAVEAT_REMOVED`) and keeps the old text. `type`, `title`, `sources`, `generated`, `verified`
+  and `status` are restored whatever you write, and `stale_after` unless you move it earlier (that
+  narrows: correct a too-late date that way); a correction of only those ends unverified
+  (`D_RESTORED`), so say in the note what is wrong. A correction is your new
   generation, applied unverified: it returns to the backlog as `correction`, and another run
   reviews it at least 12 h later.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is

@@ -32,7 +32,13 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
 - **No self-audit.** An auditor may review only the backlog the server derives and never a
   revision its own principal (or role) generated, except a `correction` entry: another run of
   the auditor may review it from `reviewable_at`, 12 h after the correction. A process's
-  verification of its own generation counts only 12 h after it. The server knows principals,
+  verification of its own generation counts only 12 h after it.
+- **A refused concept waits for an answer.** After `AIWIKI_AUDIT_HOLD_AFTER` (default 2; 0 turns
+  it off) reviewed versions in a row ended unverified, a newer version leaves the backlog
+  (`held` in `GET /audit/backlog` and `/maint/status`) until the maintainer closes its
+  `audit_held` attention item with a changeset; a push past the service is never held.
+- **A correction may bring `stale_after` forward.** A review restores `type`, `title`,
+  `sources` and `status`, and `stale_after` unless the correction moves it earlier. The server knows principals,
   not agents: a maintainer that reaches the auditor's token (or the reverse) audits its own
   work unnoticed.
   So neither may reach the other's token, which leaks two ways:

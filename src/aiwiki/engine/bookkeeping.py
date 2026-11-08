@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import yaml
@@ -284,9 +284,31 @@ def substantive_change(before_text: str | None, after_text: str, *, stage: str) 
         return True
     before_fm, before_body = _split(before_text)
     after_fm, after_body = _split(after_text)
+    if stage == "review" and _stale_narrowed(_blocks(before_fm), _blocks(after_fm)):
+        return True
     return _signature("".join(before_fm), before_body, stage) != _signature(
         "".join(after_fm), after_body, stage,
     )
+
+
+def _date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(value.strip()) if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+def _stale_narrowed(before_blocks: list[Block], after_blocks: list[Block]) -> bool:
+    """A review moved a declared ``stale_after`` earlier: the one change of a frozen key that
+    narrows (the concept reads stale sooner), so A5 keeps it. A later, new or removed date is
+    restored as before."""
+    old = _date(_value(_lines(before_blocks, "stale_after")))
+    new = _date(_value(_lines(after_blocks, "stale_after")))
+    return old is not None and new is not None and new < old
 
 
 def _distance(a: str, b: str, limit: int) -> int | None:
@@ -511,7 +533,10 @@ def apply_bookkeeping(
 
     repairs: list[str] = []
     restored = after_blocks
+    narrowed = stage == "review" and _stale_narrowed(before_blocks, after_blocks)
     for key in SERVICE_KEYS[stage]:
+        if narrowed and key == "stale_after":
+            continue  # the review brought freshness forward: kept, never pushed back
         before_lines = _lines(before_blocks, key)
         edited = _value(_lines(after_blocks, key))
         if key != "generated" and edited != _value(before_lines) and not (key == "status" and edited == status):
@@ -529,7 +554,7 @@ def apply_bookkeeping(
         for line in editor_spill.elements()
     )
 
-    substantive = before_text is None or (
+    substantive = before_text is None or narrowed or (
         _signature(_join(restored), after_body, stage) != _signature(_join(before_blocks), before_body, stage)
     )
     if substantive:

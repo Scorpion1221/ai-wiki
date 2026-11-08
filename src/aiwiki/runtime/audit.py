@@ -1025,6 +1025,83 @@ def backlog_settings(environ: Mapping[str, str] = os.environ) -> tuple[datetime 
     return epoch, int(per_day)
 
 
+HOLD_AFTER = 2  # unverified reviews in a row after which a concept's next version waits for an answer
+
+
+def hold_after(environ: Mapping[str, str] = os.environ) -> int:
+    """``AIWIKI_AUDIT_HOLD_AFTER`` (default ``HOLD_AFTER``; 0 turns the hold off); ValueError when unusable."""
+    raw = environ.get("AIWIKI_AUDIT_HOLD_AFTER", "").strip() or str(HOLD_AFTER)
+    if not raw.isdigit():
+        raise ValueError(f"AIWIKI_AUDIT_HOLD_AFTER must be a whole number; got {raw!r}")
+    return int(raw)
+
+
+def _audit_jobs(bundle: Path, jobs: list[dict] | None = None) -> list[dict]:
+    """The done audit changesets no admin reverted, oldest first, as ``review_records`` orders them."""
+    reverted = I.reverted_by(bundle)
+    return sorted((job for job in (I.changeset_jobs(bundle) if jobs is None else jobs) if job.get("kind") == "audit"
+                   and job.get("status") == "done" and job.get("id") not in reverted),
+                  key=lambda job: (str(job.get("finished") or ""), int(job.get("finished_ns") or 0),
+                                   str(job.get("started") or ""), str(job.get("id") or "")))
+
+
+def refusals(bundle: Path, *, after: int, jobs: list[dict] | None = None) -> dict[str, list[dict]]:
+    """Concepts whose last ``after`` or more reviewed versions all ended unverified: path -> those
+    reviews, oldest first, each ``{base, review, at, note}``. A repeated review of one version
+    counts once; a verified or corrected outcome ends the run of refusals."""
+    if after <= 0:
+        return {}
+    history: dict[str, list[dict]] = {}
+    for job in _audit_jobs(bundle, jobs):
+        for review in job.get("reviews") or []:
+            if not isinstance(review, dict) or not isinstance(review.get("path"), str) \
+                    or not isinstance(review.get("base"), str):
+                continue
+            rows = history.setdefault(review["path"], [])
+            row = {"base": review["base"], "outcome": review.get("outcome"), "review": str(job.get("id")),
+                   "at": job.get("finished"), "note": review.get("note")}
+            if rows and rows[-1]["base"] == row["base"]:
+                rows[-1] = row
+            else:
+                rows.append(row)
+    found = {}
+    for path, rows in history.items():
+        tail = []
+        for row in reversed(rows):
+            if row["outcome"] != "unverified":
+                break
+            tail.append({key: row[key] for key in ("base", "review", "at", "note")})
+        if len(tail) >= after:
+            found[path] = tail[::-1]
+    return found
+
+
+def answers(bundle: Path, paths: set[str], jobs: list[dict] | None = None) -> set[tuple[str, str]]:
+    """``(path, content hash)`` of each version a curate changeset wrote while closing that concept's
+    own attention item: the maintainer's answer to the auditor's notes, never an unrelated ingest
+    that only touched the page."""
+    found: set[tuple[str, str]] = set()
+    origins: dict[str, dict] = {}
+    for job in I.changeset_jobs(bundle) if jobs is None else jobs:
+        if job.get("kind") == "audit" or job.get("status") != "done":
+            continue
+        hashes = job.get("content_hashes") if isinstance(job.get("content_hashes"), dict) else {}
+        touched = paths & set(hashes)
+        for item in (job.get("work_items") or []) if touched else []:
+            if item not in origins:
+                try:
+                    stored = json.loads((bundle / ".okf" / "maint" / "items" / str(item) / "item.json")
+                                        .read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    stored = {}
+                origins[item] = stored.get("origin") if isinstance(stored, dict) \
+                    and isinstance(stored.get("origin"), dict) else {}
+            origin = origins[item]
+            if origin.get("kind") == changeset.NOTICE_KIND and origin.get("path") in touched:
+                found.add((origin["path"], str(hashes[origin["path"]])))
+    return found
+
+
 def _concepts(tree: Path) -> Iterator[tuple[str, str]]:
     for path in sorted(tree.rglob("*.md")):
         rel = path.relative_to(tree)
@@ -1081,16 +1158,11 @@ def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], 
     (§5.3, §5.4 A4). A correction is ``legacy`` when no receipt written under that rule (a
     record that names its ``run``) recorded it: a Codex audit's, or an external auditor's from
     before, which stamped itself verified."""
-    reverted = I.reverted_by(bundle)
     reviewed: dict[tuple[str, str], int] = {}
     seeded: set[str] = set()
     corrected: dict[tuple[str, str], dict] = {}
     receipted: set[tuple[str, str]] = set()
-    jobs = sorted((job for job in I.changeset_jobs(bundle) if job.get("kind") == "audit"
-                   and job.get("status") == "done" and job.get("id") not in reverted),
-                  key=lambda job: (str(job.get("finished") or ""), int(job.get("finished_ns") or 0),
-                                   str(job.get("started") or ""), str(job.get("id") or "")))
-    for order, job in enumerate(jobs):  # oldest first: the newest record of a version wins
+    for order, job in enumerate(_audit_jobs(bundle)):  # oldest first: the newest record of a version wins
         for review in job.get("reviews") or []:
             if not isinstance(review, dict) or not isinstance(review.get("path"), str):
                 continue
@@ -1170,13 +1242,22 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     receipt under A4's rule: the self-verified and Codex corrections from before it), then
     seeds, each part oldest first. ``tree`` is the checkout read (the bundle by default); the
     review receipts and the history are the bundle's.
+
+    A ``generation`` whose last ``AIWIKI_AUDIT_HOLD_AFTER`` reviewed versions all ended unverified
+    is ``held`` instead of due, unless the version is the maintainer's answer to that concept's
+    attention item (``answers``): an unrelated ingest that only appended to the page meets the
+    same refusal again (2026-11: 7% of such re-reviews passed). ``held`` counts them, with
+    their paths; an external change or a correction is never held.
     """
     epoch, per_day = settings or backlog_settings()
     tree = tree or bundle
     reviewed, seeded, corrected = review_records(bundle)
     latest = external_changes(bundle, epoch, revision) if epoch else {}
     frozen = _frozen(tree)
-    fresh, legacy, older = [], [], []
+    jobs = I.changeset_jobs(bundle)
+    refused = refusals(bundle, after=hold_after(), jobs=jobs)
+    answered = answers(bundle, set(refused), jobs) if refused else set()
+    fresh, legacy, older, held = [], [], [], []
     for rel, text in _concepts(tree):
         try:
             frontmatter = parse_document(text).frontmatter
@@ -1203,6 +1284,10 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
             reason, since = "correction", at or None
         elif epoch is None or (generated_at is not None and generated_at >= epoch):
             reason, since = "generation", at or None
+            if rel in refused and (rel, base) not in answered:
+                held.append({"path": rel, "base": base, "refusals": len(refused[rel]), "last": refused[rel][-1],
+                             "since": at or None})
+                continue
         else:
             reason, since = "seed", at or None
         entry = {
@@ -1230,7 +1315,8 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     return {"concepts": sorted(fresh, key=oldest) + sorted(legacy, key=oldest) + older[:released],
             "epoch": epoch.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if epoch else None,
             "seed": {"per_day": per_day, "waiting": len(older), "released": min(released, len(older)),
-                     "reviewed": len(seeded)}}
+                     "reviewed": len(seeded)},
+            "held": {"after": hold_after(), "count": len(held), "concepts": sorted(held, key=oldest)}}
 
 
 def _leaves(value: object) -> Iterator[str]:

@@ -20,6 +20,7 @@ gate leaves it out of a packet and refuses a packet of nothing else.
 from __future__ import annotations
 
 import base64
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -41,8 +42,18 @@ from . import ingest as I
 
 KIND = changeset.NOTICE_KIND  # origin.kind of the item and of its notice file: the evidence gate keys on it
 NOTICE = "notice.md"
-AUDIT_UNVERIFIED, STALE = "audit_unverified", "stale"
+AUDIT_UNVERIFIED, AUDIT_HELD, STALE = "audit_unverified", "audit_held", "stale"
 LEDGER = "sources/.hashes.yaml"
+# What an auditor's note names that only the maintainer can change (a review restores title and
+# status, and keeps stale_after unless it moves earlier): the brief's first words. 2026-11-05..07,
+# 145 of 532 unverified notes named only these, and the maintainer had changed none of them.
+FIXES = (
+    (re.compile(r"(?<![小节])标题|\btitle\b", re.IGNORECASE), "title (--allow-retype)"),
+    (re.compile(r"supersed|deprecat|退役|弃用|已被(?:取代|替代)|仍为?\s*stable|status:?\s*stable", re.IGNORECASE),
+     "superseded (--deprecate)"),
+    (re.compile(r"stale_after", re.IGNORECASE), "stale_after (only earlier)"),
+    (re.compile(r"\bdescription\b|摘要", re.IGNORECASE), "description (latest state)"),
+)
 
 
 def today() -> date:
@@ -105,7 +116,15 @@ def _notice(rel: str, base: str, origin: dict, sources: list[str]) -> bytes:
     """Facts only, in fixed lines: these bytes are the item key, so no guidance lives here."""
     lines = [f"# Attention: {rel}", "", f"- concept: `{rel}`", f"- content hash: `{base}`",
              f"- reason: {origin['reason']}"]
-    if origin["reason"] == AUDIT_UNVERIFIED:
+    if origin["reason"] == AUDIT_HELD:
+        # A newer version of a concept the auditor refused version after version: it waits off the
+        # audit backlog for the maintainer's answer, so the newest refusal's note says what to fix.
+        lines += [f"- unverified versions in a row: {origin['refusals']}",
+                  f"- last review: {origin['review']} at {origin.get('reviewed_at')}, of `{origin['reviewed_base']}`",
+                  "- note:", ""]
+        lines += [f"> {line}" if line.strip() else ">" for line in str(origin.get("note") or "(none)").splitlines()]
+        lines += [""]
+    elif origin["reason"] == AUDIT_UNVERIFIED:
         verdict, downgrade = origin.get("verdict"), origin.get("downgrade")
         lines += [f"- review: {origin['review']} at {origin.get('reviewed_at')}",
                   f"- requested verdict: {verdict}",
@@ -120,6 +139,11 @@ def _notice(rel: str, base: str, origin: dict, sources: list[str]) -> bytes:
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def fixes(note: object) -> list[str]:
+    """The maintainer-only changes an auditor's note names, in ``FIXES`` order."""
+    return [fix for pattern, fix in FIXES if isinstance(note, str) and pattern.search(note)]
+
+
 def _brief(origin: dict) -> str:
     """What to do, front-loaded (``maint next`` shows 300 characters); not part of the item key."""
     tail = "cite it, propose. Else skip insufficient_evidence."
@@ -130,9 +154,11 @@ def _brief(origin: dict) -> str:
                 f"generation (maint add-evidence: a Git file or an issue); fix what it contradicts, {tail}")
     downgrade = origin.get("downgrade")
     if not downgrade:
-        return ("The auditor judged this version unverified; notice.md quotes why. Add evidence (maint "
-                "add-evidence: a Git file, an issue or source:sources/<file>); fix or remove only what it "
-                f"shows wrong or unsupported, {tail}")
+        named = fixes(origin.get("note"))
+        lead = (f"Held off the audit until you answer ({origin.get('refusals')} versions unverified). "
+                if origin["reason"] == AUDIT_HELD else "Unverified by the auditor. ")
+        return (lead + (f"Fix first: {'; '.join(named)}. " if named else "notice.md quotes why. ")
+                + "Add evidence (maint add-evidence, source:sources/<file> too); fix only what it shows, " + tail)
     rejected = " The note describes that rejected edit: never apply it without new evidence." \
         if downgrade in REJECTED_EDITS else ""
     return (f"The gate refused the auditor's {_asked(origin.get('verdict'))} ({downgrade}: "
@@ -140,16 +166,19 @@ def _brief(origin: dict) -> str:
             f"fix only what it shows, {tail}")
 
 
-def plan(bundle: Path, *, today: date, tree: Path | None = None) -> list[dict]:
+def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict] | None = None) -> list[dict]:
     """The attention items due now as ``POST /maint/items`` specs, oldest first.
 
     ``tree`` is the checkout read (the bundle by default); the audit receipts are the bundle's.
-    A deprecated concept, or one that does not parse, is skipped. An unverified review outranks
-    elapsed freshness: one item per concept. Oldest is when the reason arose: the review's
-    time, or the day freshness elapsed.
+    ``held`` is the audit backlog's ``held.concepts`` for that tree: each such version is an
+    ``audit_held`` item carrying the newest refusal's note, so the maintainer answers what the
+    auditor no longer re-reviews. A deprecated concept, or one that does not parse, is skipped.
+    A review outranks elapsed freshness: one item per concept. Oldest is when the reason arose:
+    the review's time, or the day freshness elapsed.
     """
     tree = tree or bundle
     unverified = unverified_reviews(bundle)
+    held = {entry["path"]: entry for entry in held or ()}
     found = []
     for rel, text in _concepts(tree):
         try:
@@ -161,7 +190,16 @@ def plan(bundle: Path, *, today: date, tree: Path | None = None) -> list[dict]:
         base = changeset.content_hash(text)
         review = unverified.get((rel, base))
         deadline = stale_date(frontmatter)
-        if review is not None:
+        hold = held.get(rel)
+        if review is None and hold is not None and hold["base"] == base:
+            # The audit backlog holds this version (runtime.audit.backlog): it waits for an answer.
+            last = hold["last"]
+            since = _instant(last.get("at"))
+            origin = {"kind": KIND, "path": rel, "reason": AUDIT_HELD, "base": base, "refusals": hold["refusals"],
+                      "review": last["review"], "reviewed_at": last.get("at"), "reviewed_base": last["base"],
+                      "note": last.get("note")}
+            review = origin
+        elif review is not None:
             since = _instant(review.get("at"))
             # ``verdict`` is what the auditor asked for; with a ``downgrade`` the gate refused it.
             origin = {"kind": KIND, "path": rel, "reason": AUDIT_UNVERIFIED, "base": base,

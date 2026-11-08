@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.22 -->
+<!-- ai-wiki:version 0.3.23 -->
 
 # AI Wiki Curating Maintainer
 
@@ -112,7 +112,11 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
   `add-evidence`, fix or remove only what that evidence contradicts or does not support, cite it,
   propose. Nothing decides it: skip `insufficient_evidence` (a new version queues a new item).
   - `audit_unverified`, "the auditor's own verdict": the note says why this version is unsupported;
-    freeze the source it names (`source:sources/<file>`), a Git file or an issue.
+    freeze the source it names (`source:sources/<file>`), a Git file or an issue. `audit_held`: the
+    auditor refused several versions in a row and waits for this answer; only a changeset closing
+    this item returns the concept to its backlog. A review restores what only you may change, so
+    fix each the brief's "Fix first" names: retitle (`--allow-retype`), `--deprecate` a superseded
+    concept, move `stale_after` earlier by the curator's date rule, restate the `description`.
   - "the gate refused the requested …: D_…": after D_NOVEL_TOKEN, D_NEW_LINK, D_GROWTH or
     D_CAVEAT_REMOVED the note is a rejected edit: never apply it without new evidence proving it.
     D_NO_EVIDENCE: the concept cites no frozen source; add one, or skip.

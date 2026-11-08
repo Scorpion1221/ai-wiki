@@ -131,6 +131,7 @@ MODES = {
 }
 try:  # an unusable epoch or seed rate refuses to start, like an unknown mode
     _EPOCH = audit_runtime.backlog_settings()[0]
+    audit_runtime.hold_after()
     TRIAGE_EPOCH = triage.settings()
 except ValueError as exc:
     raise RuntimeError(str(exc)) from None
@@ -1126,12 +1127,20 @@ def _attention(path: Path) -> list[dict]:
     backlog is: the content hashes are those of the workspace the maintainer pulls. A bundle
     without Git publishes its live tree."""
     if curate_runtime._repo_root(path) is None:
-        return attention.plan(path, today=attention.today())
-    _root, _revision, archive = _published(path)
+        return attention.plan(path, today=attention.today(), held=_held(path, path))
+    _root, revision, archive = _published(path)
     with tempfile.TemporaryDirectory(prefix="aiwiki-attention-") as scratch:
         tree = Path(scratch) / "bundle"
         _unpack(archive, tree)
-        return attention.plan(path, tree=tree, today=attention.today())
+        return attention.plan(path, tree=tree, today=attention.today(), held=_held(path, tree, revision))
+
+
+def _held(path: Path, tree: Path, revision: str = "HEAD") -> list[dict]:
+    """The versions the audit backlog holds for the maintainer's answer; none without an external audit."""
+    if MODES["audit"] != "external":
+        return []
+    return audit_runtime.backlog(path, tree=tree, revision=revision, auditors=_auditors(),
+                                 now=datetime.now(UTC))["held"]["concepts"]
 
 
 def _frozen_sources(path: Path, files: object) -> None:
@@ -1278,7 +1287,8 @@ def maint_status(bundle: str | None = None, authorization: str | None = Header(d
             due = [entry["since"] for entry in found["concepts"] if entry["reason"] != "seed"
                    and not entry.get("legacy") and audit_runtime._instant(entry["since"])]
             status["audit"].update(pending=len(found["concepts"]), seed=found["seed"], epoch=found["epoch"],
-                                   oldest_finished=min(due, key=audit_runtime._instant, default=None))
+                                   oldest_finished=min(due, key=audit_runtime._instant, default=None),
+                                   held={key: found["held"][key] for key in ("after", "count")})
     return status
 
 
@@ -1310,7 +1320,8 @@ def audit_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | N
             raise HTTPException(status_code=503, detail=f"the audit backlog cannot be derived: {exc}") from None
     concepts = found["concepts"]
     return {"revision": revision, "mode": MODES["audit"], "epoch": found["epoch"], "seed": found["seed"],
-            "concepts": concepts[:limit], "shown": min(limit, len(concepts)), "total": len(concepts),
+            "held": {key: found["held"][key] for key in ("after", "count")}, "concepts": concepts[:limit],
+            "shown": min(limit, len(concepts)), "total": len(concepts),
             "truncated": len(concepts) > limit}
 
 

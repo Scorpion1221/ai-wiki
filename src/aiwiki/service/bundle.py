@@ -415,7 +415,7 @@ def health(root: Path) -> dict:
     trusts: Counter = Counter()
     freshness_counts: Counter = Counter()
     bases: Counter = Counter()  # declared stale_after, the 90-day default, or neither
-    total = 0
+    total = current = 0
     snapshot = _snapshot(root)
     for _path, _rel, fm, _body, _text in snapshot.records:
         meta = concept_metadata(fm)
@@ -425,6 +425,7 @@ def health(root: Path) -> dict:
         trusts[meta["trust"]] += 1
         freshness_counts[meta["freshness"]] += 1
         bases[meta["freshness_basis"]] += 1
+        current += bool(meta["verification_current"])
     return {
         "okf_version": snapshot.okf_version,
         "git_revision": git_revision(root),
@@ -434,6 +435,8 @@ def health(root: Path) -> dict:
         "by_trust": dict(trusts),
         "by_freshness": dict(freshness_counts),
         "by_freshness_basis": dict(bases),
+        # Concepts whose verification confirms the version a reader gets (by_trust counts history too).
+        "verified_current": current,
     }
 
 

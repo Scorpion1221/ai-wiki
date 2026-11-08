@@ -179,6 +179,21 @@ def auditor_facts(jobs: list[dict], triage: list[dict], start: datetime, end: da
               and within(parse_ts(job.get("created")), start, end)]
     verdicts = Counter(review.get("outcome") or review.get("verdict") for job in audits if job.get("status") == "done"
                        for review in job.get("reviews") or [] if isinstance(review, dict))
+    # A first review is one of a concept no done audit reviewed before: how well the maintainer
+    # writes. A re-review follows an earlier refusal, so its rate says how refusals get answered.
+    done = sorted((job for job in jobs if job.get("kind") == "audit" and job.get("status") == "done"),
+                  key=lambda job: (str(job.get("finished") or ""), int(job.get("finished_ns") or 0),
+                                   str(job.get("id") or "")))
+    seen: set[str] = set()
+    first, again = Counter(), Counter()
+    for job in done:
+        counted = job in audits
+        for review in job.get("reviews") or []:
+            if not isinstance(review, dict) or not isinstance(review.get("path"), str):
+                continue
+            if counted:
+                (again if review["path"] in seen else first)[review.get("outcome") or review.get("verdict")] += 1
+            seen.add(review["path"])
     reviews = [r for r in triage if r.get("principal") == AUDITOR and r.get("status") == "done"
                and within(parse_ts(r.get("at")), start, end)]
     triage_verdicts = Counter(r.get("verdict") for r in reviews)
@@ -186,6 +201,7 @@ def auditor_facts(jobs: list[dict], triage: list[dict], start: datetime, end: da
         "runs": sorted({job.get("run") for job in audits} | {r.get("run") for r in reviews} - {None}),
         "audit_changesets": len(audits), "audit_failed": sum(job.get("status") == "failed" for job in audits),
         "concepts": sum(verdicts.values()), "verdicts": dict(verdicts),
+        "first_reviews": dict(first), "re_reviews": dict(again),
         "triage": sum(triage_verdicts.values()), "triage_verdicts": dict(triage_verdicts),
         "triage_claims": sum(len(r.get("missed") or []) for r in reviews if r.get("verdict") == "missed"),
     }
@@ -259,9 +275,19 @@ def grade(facts: dict, args: argparse.Namespace) -> list[dict]:
         rows.append(row("审计", "概念审查", "ok" if concepts >= args.min_audits else "warn",
                         f"{concepts}（通过 {verified} · 修正 {a['verdicts'].get('corrected', 0)} · "
                         f"未验证 {a['verdicts'].get('unverified', 0)}）", f"≥ {args.min_audits}，或 backlog 已清空"))
-        rate = pct(verified, concepts)
-        rows.append(row("审计", "通过率", "ok" if rate is None or rate >= args.min_verified_pct else "warn",
-                        f"{rate}%" if rate is not None else "—", f"≥ {args.min_verified_pct:g}%"))
+        # The maintainer's writing, judged once: a re-review follows an earlier refusal, so it is
+        # shown apart (how refusals get answered) and never drags this rate down.
+        first = a["first_reviews"]
+        taken = sum(first.values())
+        rate = pct(first.get("verified", 0), taken)
+        rows.append(row("审计", "首审通过率", "ok" if rate is None or rate >= args.min_verified_pct else "warn",
+                        (f"{rate}%（{taken} 个首次审查：通过 {first.get('verified', 0)} · 修正 "
+                         f"{first.get('corrected', 0)} · 未验证 {first.get('unverified', 0)}）") if taken else "—",
+                        f"≥ {args.min_verified_pct:g}%"))
+        again = a["re_reviews"]
+        redone = sum(again.values())
+        rows.append(row("审计", "重审通过率", "ok", f"{pct(again.get('verified', 0), redone)}%（{redone} 次重审）"
+                        if redone else "—", "仅参考"))
         judged = a["triage"]
         missed = a["triage_verdicts"].get("missed", 0)
         miss = pct(missed, judged)
@@ -295,6 +321,12 @@ def grade(facts: dict, args: argparse.Namespace) -> list[dict]:
         rows.append(row("队列", "审计 backlog", "ok" if hours is None or hours <= 72 else "warn",
                         f"{audit.get('pending')} 待审" + (f"，最老 {hours}h" if hours is not None else ""),
                         "最老 ≤ 72h"))
+        held = audit.get("held") or {}
+        if held:
+            count = held.get("count") or 0
+            rows.append(row("队列", "等维护者回应", "ok" if count <= args.max_held else "warn",
+                            f"{count} 个概念（连续 {held.get('after')} 次未验证，暂停重审）",
+                            f"≤ {args.max_held}"))
     wiki = facts.get("wiki")
     if wiki:
         rows.append(row("读取", "镜像同步", "ok" if wiki["mirror_current"] else "bad",
@@ -307,6 +339,14 @@ def grade(facts: dict, args: argparse.Namespace) -> list[dict]:
         rows.append(row("读取", "未验证概念", "ok" if share is None or share <= args.max_unverified_pct else "warn",
                         f"{unverified}/{total}" + (f"（{share}%）" if share is not None else ""),
                         f"≤ {args.max_unverified_pct:g}%"))
+        current = wiki.get("verified_current")
+        if current is not None:
+            # What a reader may rely on now: verification that confirms the current version, not an older one.
+            share = pct(current, total)
+            good = share is None or share >= args.min_current_pct
+            rows.append(row("读取", "当前版本已验证", "ok" if good else "warn",
+                            f"{current}/{total}" + (f"（{share}%）" if share is not None else ""),
+                            f"≥ {args.min_current_pct:g}%"))
     return rows
 
 
@@ -367,11 +407,14 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--min-gate-pct", type=float, default=90, help="changesets accepted on first proposal")
     t.add_argument("--max-skip-pct", type=float, default=60, help="items closed as skipped or duplicate")
     t.add_argument("--min-audits", type=int, default=60, help="concepts the auditor reviews")
-    t.add_argument("--min-verified-pct", type=float, default=50, help="audited concepts verified")
+    t.add_argument("--min-verified-pct", type=float, default=50, help="first reviews of a concept that ended verified")
     t.add_argument("--max-miss-pct", type=float, default=20, help="triage reviews that found missed knowledge")
     t.add_argument("--max-ready", type=int, default=150, help="items ready at the end of the window")
     t.add_argument("--max-triage-backlog", type=int, default=60, help="skips and duplicates waiting for triage")
     t.add_argument("--max-unverified-pct", type=float, default=20, help="published concepts unverified")
+    t.add_argument("--min-current-pct", type=float, default=70,
+                   help="published concepts whose current version is verified")
+    t.add_argument("--max-held", type=int, default=60, help="concepts the audit holds for the maintainer's answer")
     p.add_argument("--label", default=socket.gethostname(), help="shown in the card's footer")
     return p
 
@@ -403,7 +446,7 @@ def report(args: argparse.Namespace) -> dict:
             head = git_head(bundle)
             facts["wiki"] = {"mirror_revision": (health.get("git_revision") or "")[:12] or None,
                              "writer_revision": head and head[:12], "by_trust": health.get("by_trust"),
-                             "concepts": health.get("concepts"),
+                             "concepts": health.get("concepts"), "verified_current": health.get("verified_current"),
                              "mirror_current": bool(head) and health.get("git_revision") == head}
         except SourceError as exc:
             errors.append({"source": "mirror", "error": str(exc)})

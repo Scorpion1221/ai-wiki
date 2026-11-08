@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from gate_fixture import AI_STUDY, AIO_AB, METRIC, Gate, clone, concept, git, wait_for
+from gate_fixture import AI_STUDY, AIO_AB, METRIC, Gate, cite, clone, concept, git, wait_for
 
 from aiwiki.cli import main as cli
 from aiwiki.cli import workspace
@@ -612,6 +612,42 @@ def test_a5_a_correction_it_restores_entirely_is_no_verification(gate, edit) -> 
     assert (after["title"], after["sources"]) == (parse_document(before).frontmatter["title"],
                                                   parse_document(before).frontmatter["sources"])
     assert "stale_after" not in after and after["verified"] == parse_document(before).frontmatter["verified"]
+
+
+def seed_stale_after(gate: Gate, day: str) -> None:
+    """A curator's new generation of AIO_AB declaring ``stale_after: day``."""
+    text = gate.read(AIO_AB).replace("confidence: medium\n", f"confidence: medium\nstale_after: {day}\n")
+    request = gate.request(gate.put(AIO_AB, cite(text, "seed-stale", claim="Seeded.")))
+    request["evidence"]["id"] = "seed-stale"
+    response = gate.post(request)
+    assert response.status_code == 201, response.text
+
+
+def test_a5_a_correction_may_bring_stale_after_forward_never_back(gate) -> None:
+    """2026-11-05..07: 69 unverified notes named a stale_after later than the date rule, which the
+    auditor could not change. Moving it earlier narrows (the concept reads stale sooner), so a
+    correction keeps it; a later or removed date is still restored."""
+    lease(gate)
+    seed_stale_after(gate, "2027-02-05")
+    before = git(gate.remote, "show", f"main:{AIO_AB}") + "\n"
+
+    job = submit(gate, review(gate, AIO_AB, "corrected", content=before.replace("2027-02-05", "2027-02-03"),
+                              note="the decision is dated 2026-11-05: +90 days is 2027-02-03")).json()
+
+    assert job["status"] == "done" and job["reviews"][0]["outcome"] == "corrected", job
+    assert str(published(gate, AIO_AB)["stale_after"]) == "2027-02-03"
+    assert "restored frozen stale_after" not in job["deterministic_repairs"].get(AIO_AB, [])
+
+
+def test_a5_a_later_stale_after_is_restored(gate) -> None:
+    lease(gate)
+    seed_stale_after(gate, "2027-02-05")
+    before = git(gate.remote, "show", f"main:{AIO_AB}") + "\n"
+
+    job = submit(gate, review(gate, AIO_AB, "corrected", content=before.replace("2027-02-05", "2027-03-01"))).json()
+
+    assert (job["reviews"][0]["outcome"], job["reviews"][0]["downgrade"]) == ("unverified", "D_RESTORED")
+    assert str(published(gate, AIO_AB)["stale_after"]) == "2027-02-05"
 
 
 def test_a6_whole_words_decide_what_a_correction_adds() -> None:

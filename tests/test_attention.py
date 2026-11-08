@@ -16,7 +16,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-from gate_fixture import AIO_AB, TODAY, Gate, cite, git
+from gate_fixture import AIO_AB, METRIC, TODAY, Gate, cite, git
 
 from aiwiki.cli import main as cli
 from aiwiki.cli import maint
@@ -109,7 +109,8 @@ def test_an_unverified_review_of_the_current_version_queues_one_attention_item(g
     assert cited and all(f"  - `{rel.lstrip('/')}`" in text for rel in cited)
     # The notice is facts; what to do is the brief, which no item key depends on.
     assert "add-evidence" not in text and "skip" not in text
-    assert item["brief"].startswith("The auditor judged this version unverified") and "add-evidence" in item["brief"]
+    assert item["brief"].startswith("Unverified by the auditor. notice.md quotes why.")
+    assert "add-evidence" in item["brief"]
 
 
 def test_a_repeated_run_start_is_a_duplicate_and_a_new_version_a_new_item(gate) -> None:
@@ -713,3 +714,99 @@ def test_notice_bytes_depend_only_on_path_version_reason_and_review(tmp_path) ->
     assert first[0]["origin"] | {"base": None} == {"kind": "attention", "path": "metrics/x.md", "reason": "stale",
                                                    "base": None, "stale_on": "2026-04-01", "basis": "default"}
     assert attention.plan(bundle, today=date(2026, 3, 31)) == []
+
+
+# --- the hold: a concept refused version after version waits for the maintainer's answer ---------------
+
+
+def audited(gate: Gate, rel: str) -> list[str]:
+    response = gate.client.get("/audit/backlog", params={"bundle": "kb-a"}, headers=gate.headers("auditor"))
+    assert response.status_code == 200, response.text
+    return [entry["path"] for entry in response.json()["concepts"]]
+
+
+def append(gate: Gate, rel: str, eid: str) -> None:
+    """An unrelated ingest appends a readout to ``rel``, citing a packet of its own."""
+    claim = f"Readout {eid} was appended."
+    request = gate.request(gate.put(rel, cite(gate.read(rel), eid, claim=claim)),
+                           evidence=f"# {eid}\n\n{claim}\n".encode())
+    request["evidence"]["id"] = eid
+    response = gate.post(request)
+    assert response.status_code == 201, response.text
+
+
+def refuse_twice(gate: Gate, rel: str) -> None:
+    """Two versions of ``rel`` in a row reviewed unverified, the second an unrelated ingest's append."""
+    unverify(gate, rel, note="the title states the lift as fact")
+    append(gate, rel, "readout-a")
+    unverify(gate, rel, note="标题仍把 agent 报告写成事实；stale_after 晚于证据日期 +30 天")
+
+
+def test_a_concept_refused_twice_is_held_until_its_attention_item_answers(gate) -> None:
+    """2026-11-05..07: after two refusals in a row 5% of re-reviews passed, mostly versions an
+    unrelated ingest had only appended to. Such a version waits off the audit backlog, and the
+    maintainer gets the newest refusal as an ``audit_held`` item."""
+    refuse_twice(gate, AIO_AB)
+    append(gate, AIO_AB, "readout-b")
+
+    assert AIO_AB not in audited(gate, AIO_AB)
+    status = gate.client.get("/maint/status", params={"bundle": "kb-a"}, headers=gate.headers("auditor")).json()
+    assert status["audit"]["held"] == {"after": 2, "count": 1}
+
+    begun = begin(gate, "WAIO-1")["attention"]
+    assert begun["by_reason"] == {"audit_held": 1}, begun
+    [item] = items(gate)
+    assert item["origin"]["reason"] == "audit_held" and item["origin"]["refusals"] == 2
+    assert item["origin"]["base"] == changeset.content_hash(gate.read(AIO_AB))
+    assert item["brief"].startswith("Held off the audit until you answer (2 versions unverified). Fix first: "
+                                    "title (--allow-retype); stale_after (only earlier). ")
+    assert len(item["brief"]) <= 300
+    text = notice(gate, item)
+    assert "- unverified versions in a row: 2\n" in text and "> 标题仍把 agent 报告写成事实" in text
+
+    # The maintainer's answer, a changeset that closes this item, is due for review again.
+    claimed = M.next_item(gate.writer, principal=CURATOR, run="WAIO-1")["item"]
+    added = gate.client.post(f"/maint/items/{claimed['id']}/files", params={"bundle": "kb-a"},
+                             headers=gate.headers(run="WAIO-1"), json={
+        "name": "S2-readout.md", "content_b64": base64.b64encode(b"# Readout\n\nLift: 3%.\n").decode(),
+        "origin": {"kind": "git-file", "remote": "https://code.example/web.git", "commit": "1a2b3c4d",
+                   "path": "docs/readout.md"}})
+    assert added.status_code == 200, added.text
+    answer = cite(gate.read(AIO_AB), "answer", claim="WAIO-1 reported a 3% lift.")
+    request = gate.request(gate.put(AIO_AB, answer), work_items=[claimed["id"]])
+    request["evidence"] = {"id": "answer", "item_files": [f"{claimed['id']}/S2-readout.md"]}
+    assert gate.post(request, run="WAIO-1").status_code == 201
+    end(gate, "WAIO-1")
+    assert AIO_AB in audited(gate, AIO_AB)
+
+
+def test_one_refusal_holds_nothing_and_the_hold_can_be_turned_off(gate) -> None:
+    unverify(gate, AIO_AB)
+    append(gate, AIO_AB, "readout-a")
+    assert AIO_AB in audited(gate, AIO_AB)
+
+    append(gate, METRIC, "readout-m")  # generated before the epoch: a new generation brings it into the backlog
+    refuse_twice(gate, METRIC)
+    append(gate, METRIC, "readout-b")
+    assert METRIC not in audited(gate, METRIC)
+    gate.monkeypatch.setenv("AIWIKI_AUDIT_HOLD_AFTER", "0")
+    assert METRIC in audited(gate, METRIC)
+
+
+def test_a_verified_review_ends_the_run_of_refusals(tmp_path) -> None:
+    """``refusals`` counts the newest unverified versions in a row; a repeated review of one version once."""
+    jobs = tmp_path / ".okf" / "jobs"
+    jobs.mkdir(parents=True)
+    rows = [("a", "ch1:1", "unverified"), ("a", "ch1:1", "unverified"), ("a", "ch1:2", "unverified"),
+            ("b", "ch1:1", "unverified"), ("b", "ch1:2", "verified"), ("b", "ch1:3", "unverified")]
+    for index, (path, base, outcome) in enumerate(rows):
+        (jobs / f"{index:012x}.json").write_text(json.dumps({
+            "id": f"{index:012x}", "kind": "audit", "mode": "changeset", "status": "done",
+            "finished": f"2026-11-0{index + 1}T00:00:00Z",
+            "reviews": [{"path": path, "base": base, "outcome": outcome, "note": f"n{index}"}]}), encoding="utf-8")
+    from aiwiki.runtime import audit
+
+    found = audit.refusals(tmp_path, after=2)
+    assert list(found) == ["a"] and [row["base"] for row in found["a"]] == ["ch1:1", "ch1:2"]
+    assert found["a"][0]["note"] == "n1"  # the newest review of a version stands for it
+    assert audit.refusals(tmp_path, after=0) == {}
