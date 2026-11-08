@@ -72,6 +72,10 @@ _LIMITS = {
     "packet_binary_bytes": ("AIWIKI_CHANGESET_MAX_PACKET_BINARY_BYTES", MAX_BYTES),
     "deprecates": ("AIWIKI_CHANGESET_MAX_DEPRECATES", 3),
     "reviews": ("AIWIKI_CHANGESET_MAX_REVIEWS", 5),
+    # A body past this many characters takes no more: a new reading gets a dated concept of its
+    # own that links back. 2026-11-05..07: concepts under 6k characters ended verified 60% of the
+    # time, those over 20k 3% (one unsupported sentence fails the page; a review has ~10 minutes).
+    "body_chars": ("AIWIKI_CONCEPT_BODY_CHARS", 20_000),
 }
 # Error code -> HTTP status. The failure class follows from the status (see _failure).
 CODES = {
@@ -80,7 +84,7 @@ CODES = {
     "yaml_parse": 422, "missing_key": 422, "invalid_value": 422, "legacy_key": 422,
     "invalid_status": 422, "uncited_change": 422, "unknown_evidence_ref": 422,
     "resource_unresolvable": 422, "broken_link": 422, "dangling_contradiction": 422,
-    "duplicate_title": 422, "body_shrink": 422, "identity_locked": 422, "path_forbidden": 422,
+    "duplicate_title": 422, "body_shrink": 422, "body_too_long": 422, "identity_locked": 422, "path_forbidden": 422,
     "service_owned_path": 422, "delete_forbidden": 422, "restructure_new_source": 422,
     "secret_detected": 422, "validation": 422, "audit_scope": 422, "self_verification": 422,
     "notice_not_evidence": 422, "stale_after_needs_new_evidence": 422,
@@ -97,6 +101,9 @@ HINTS = {
     "dangling_contradiction": "point contradictions at an existing concept",
     "duplicate_title": "update the existing concept instead of creating another",
     "body_shrink": "restore the removed content, or list the path in allow.shrink with a reason",
+    "body_too_long": "put the new reading in a dated concept of its own that links back (or move old readings "
+                     "out with allow.shrink); list the path in allow.grow with a reason only for a fix that "
+                     "must stay on this page",
     "identity_locked": "restore type and title, or list the path in allow.retype with a reason",
     "path_forbidden": "remove this file from the changeset",
     "service_owned_path": "remove this file; the service writes it",
@@ -367,8 +374,8 @@ def _nfc(value: object) -> object:
 def _allow_errors(allow: object) -> list[dict]:
     if allow is None:
         return []
-    if not isinstance(allow, Mapping) or set(allow) - {"shrink", "retype"}:
-        return [_error("input", "allow may only carry shrink and retype lists")]
+    if not isinstance(allow, Mapping) or set(allow) - {"shrink", "retype", "grow"}:
+        return [_error("input", "allow may only carry shrink, retype and grow lists")]
     errors = []
     for name, entries in allow.items():
         if not isinstance(entries, list) or not all(
@@ -843,7 +850,7 @@ def _evaluate_in(
 ) -> dict:
     evidence_id = request["evidence"]["id"]
     allow = request.get("allow") or {}
-    allowed = {name: {_nfc(entry["path"]) for entry in allow.get(name, [])} for name in ("shrink", "retype")}
+    allowed = {name: {_nfc(entry["path"]) for entry in allow.get(name, [])} for name in ("shrink", "retype", "grow")}
     before_errors = validate(workspace)
     before_concepts = policy._concept_snapshot(workspace)
     sources_before = policy._source_snapshot(workspace)
@@ -988,6 +995,13 @@ def _evaluate_in(
             if head_body and len(body) < SHRINK_RATIO * len(head_body) and rel not in allowed["shrink"]:
                 errors.append(_error("body_shrink", f"body shrank to {len(body)} of {len(head_body)} characters",
                                      rel))
+
+        if not deprecate:
+            # Past the cap a page may shrink or stay, never grow (a reword keeps its length); a new one starts under it.
+            head_body, body = _body(before) if before is not None else "", _body(final)
+            if len(body) > lim["body_chars"] and len(body) > len(head_body) and rel not in allowed["grow"]:
+                errors.append(_error("body_too_long", f"body grows to {len(body)} characters, past "
+                                     f"{lim['body_chars']}" + (f" (was {len(head_body)})" if before else ""), rel))
         if before is None:
             clashes = sorted(name for name in _names(after) if names.get(name, rel) not in (rel, *deprecating))
             if clashes:

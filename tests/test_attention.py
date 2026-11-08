@@ -810,3 +810,30 @@ def test_a_verified_review_ends_the_run_of_refusals(tmp_path) -> None:
     assert list(found) == ["a"] and [row["base"] for row in found["a"]] == ["ch1:1", "ch1:2"]
     assert found["a"][0]["note"] == "n1"  # the newest review of a version stands for it
     assert audit.refusals(tmp_path, after=0) == {}
+
+
+def test_a_run_start_queues_splits_for_the_largest_oversized_pages(gate, monkeypatch) -> None:
+    """The 140 pages past 20000 characters on 2026-11-08 shrink a few a day: each run start queues
+    split items for the SPLITS_PER_RUN largest ones that have no other attention reason."""
+    from aiwiki.runtime.audit import _concepts
+
+    sizes = {rel: len(parse_document(text).body.strip()) for rel, text in _concepts(gate.writer)
+             if not rel.endswith("index.md") and parse_document(text).frontmatter.get("type")}
+    largest = max(sizes, key=sizes.get)
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", str(sorted(sizes.values())[-2]))  # only the largest is past it
+    monkeypatch.setattr(attention, "SPLITS_PER_RUN", 1)
+
+    begun = begin(gate, "WAIO-1")["attention"]
+
+    assert begun["by_reason"] == {"oversized": 1}, begun
+    [item] = items(gate)
+    assert (item["origin"]["path"], item["origin"]["reason"], item["origin"]["chars"]) == (
+        largest, "oversized", sizes[largest])
+    assert item["brief"].startswith(f"Split: body {sizes[largest]} chars, cap ") and len(item["brief"]) <= 300
+    assert f"- body: {sizes[largest]} characters\n" in notice(gate, item)
+    end(gate, "WAIO-1")
+    assert begin(gate, "WAIO-2")["attention"]["duplicate"] == 1  # the same version asks once
+
+
+def test_no_cap_queues_no_split(tmp_path) -> None:
+    assert all(spec["origin"]["reason"] != "oversized" for spec in attention.plan(tmp_path, today=TODAY))

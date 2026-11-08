@@ -582,6 +582,36 @@ def test_identity_and_body_shrink_guards_honor_allow(bundle: Path) -> None:
     assert _evaluate(bundle, allowed)["status"] == "would_apply"
 
 
+def test_a_body_past_the_size_cap_never_grows(bundle: Path, monkeypatch) -> None:
+    """2026-11-05..07: concepts under 6k characters ended verified 60% of the time, those over 20k 3%.
+    Past the cap a page may shrink or keep its length; a new reading gets a dated concept of its own."""
+    head = _read(bundle, AI_STUDY)
+    grown = _cite(head)  # one more footnoted claim
+    size = len(parse_document(grown).body.strip())
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", str(size - 1))
+    result = _evaluate(bundle, _request(_put(bundle, AI_STUDY, grown)))
+    assert _codes(result) == ["body_too_long"] and f"grows to {size} characters" in result["errors"][0]["message"]
+    assert "dated concept of its own" in result["errors"][0]["hint"]
+    allowed = _request(_put(bundle, AI_STUDY, grown), allow={"grow": [{"path": AI_STUDY, "reason": "a fix"}]})
+    assert _evaluate(bundle, allowed)["status"] == "would_apply"
+
+    # Already past the cap: an edit that ends no longer than the page was is no growth.
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", "100")
+    document = parse_document(head)
+    last = document.body.rstrip().rsplit("\n", 1)[-1]
+    assert len(last) > len("New dated claim.[^]") + len(EVIDENCE_ID)
+    shrunk = _cite(head).replace(last, "", 1)
+    assert len(parse_document(shrunk).body.strip()) <= len(document.body.strip())
+    assert "body_too_long" not in _codes(_evaluate(bundle, _request(_put(bundle, AI_STUDY, shrunk))))
+
+    # A new concept starts under the cap.
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", "20")
+    assert _codes(_new(bundle, _new_concept(body="A reading that is longer than twenty characters."))) == [
+        "body_too_long"]
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", "20000")
+    assert _new(bundle, _new_concept())["status"] == "would_apply"
+
+
 def test_dropped_sources_are_restored_not_rejected(bundle: Path) -> None:
     head = _read(bundle, METRIC)
     start = head.index("- id: dated-first-payment")

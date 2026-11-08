@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.23 -->
+<!-- ai-wiki:version 0.3.24 -->
 
 # AI Wiki Curating Maintainer
 
@@ -113,15 +113,16 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
   propose. Nothing decides it: skip `insufficient_evidence` (a new version queues a new item).
   - `audit_unverified`, "the auditor's own verdict": the note says why this version is unsupported;
     freeze the source it names (`source:sources/<file>`), a Git file or an issue. `audit_held`: the
-    auditor refused several versions in a row and waits for this answer; only a changeset closing
-    this item returns the concept to its backlog. A review restores what only you may change, so
-    fix each the brief's "Fix first" names: retitle (`--allow-retype`), `--deprecate` a superseded
-    concept, move `stale_after` earlier by the curator's date rule, restate the `description`.
+    auditor waits for this answer (only a changeset closing it returns the concept to review). Fix
+    each "Fix first" names, which a review cannot: retitle (`--allow-retype`), `--deprecate` a
+    superseded concept, move `stale_after` earlier by the date rule, restate the `description`.
   - "the gate refused the requested …: D_…": after D_NOVEL_TOKEN, D_NEW_LINK, D_GROWTH or
     D_CAVEAT_REMOVED the note is a rejected edit: never apply it without new evidence proving it.
     D_NO_EVIDENCE: the concept cites no frozen source; add one, or skip.
   - `stale` (basis `declared`, or `default`: 90 days after generation): check the claims against
     evidence newer than the generation (a Git file or an issue, not a copy of a source it cites).
+  - `oversized`: split the page as its brief says. `body_too_long`: a body past 20000 characters
+    never grows; put a new reading in a dated concept of its own that links the page.
 - A brief opening `Triage tr_…`: the Auditor found knowledge your skip or duplicate dropped. Its
   `triage.md` quotes each missed claim, its lines and target concept: facts, never evidence (alone it
   is `notice_not_evidence`). Write each claim the item's own files support into its target, citing
@@ -180,6 +181,7 @@ Pass the same extra flags to both, and only when true:
   retitling always needs this flag and a reason.
 - `--allow-shrink <path>:<reason>`: the body shrank below 70% of its base because content moved
   to another concept or was wrong. Never to drop supported facts.
+- `--allow-grow <path>:<reason>`: a fix that must stay on a page past 20000 characters; a new reading never.
 - `--deprecate <path>:<superseded_by>:<reason>`: retire a concept in favour of an existing or
   same-changeset successor (at most 3 per changeset). Never delete or rename a file.
 

@@ -42,7 +42,8 @@ from . import ingest as I
 
 KIND = changeset.NOTICE_KIND  # origin.kind of the item and of its notice file: the evidence gate keys on it
 NOTICE = "notice.md"
-AUDIT_UNVERIFIED, AUDIT_HELD, STALE = "audit_unverified", "audit_held", "stale"
+AUDIT_UNVERIFIED, AUDIT_HELD, STALE, OVERSIZED = "audit_unverified", "audit_held", "stale", "oversized"
+SPLITS_PER_RUN = 5  # oversized pages one run start queues for a split, the largest first
 LEDGER = "sources/.hashes.yaml"
 # What an auditor's note names that only the maintainer can change (a review restores title and
 # status, and keeps stale_after unless it moves earlier): the brief's first words. 2026-11-05..07,
@@ -133,6 +134,8 @@ def _notice(rel: str, base: str, origin: dict, sources: list[str]) -> bytes:
                   "- note, describing the edit the gate rejected:" if downgrade in REJECTED_EDITS else "- note:", ""]
         lines += [f"> {line}" if line.strip() else ">" for line in str(origin.get("note") or "(none)").splitlines()]
         lines += [""]
+    elif origin["reason"] == OVERSIZED:
+        lines += [f"- body: {origin['chars']} characters", f"- cap: {origin['cap']} characters"]
     else:
         lines += [f"- stale on: {origin['stale_on']}", f"- basis: {origin['basis']}"]
     lines += ["- cited sources:"] + ([f"  - `{source}`" for source in sources] or ["  - none of the bundle's sources/"])
@@ -147,6 +150,10 @@ def fixes(note: object) -> list[str]:
 def _brief(origin: dict) -> str:
     """What to do, front-loaded (``maint next`` shows 300 characters); not part of the item key."""
     tail = "cite it, propose. Else skip insufficient_evidence."
+    if origin["reason"] == OVERSIZED:
+        return (f"Split: body {origin['chars']} chars, cap {origin['cap']}. Move dated readings to new concepts "
+                "(concept new, citing their sources) this page links; keep definition and latest state here "
+                "(--allow-shrink). add-evidence source: the cited files, propose. Nothing apart: skip out_of_scope.")
     if origin["reason"] == STALE:
         why = "its declared stale_after" if origin["basis"] == BASIS_DECLARED else \
             f"{DEFAULT_STALE_DAYS} days after generation, the default"
@@ -166,7 +173,8 @@ def _brief(origin: dict) -> str:
             f"fix only what it shows, {tail}")
 
 
-def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict] | None = None) -> list[dict]:
+def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict] | None = None,
+         body_chars: int | None = None) -> list[dict]:
     """The attention items due now as ``POST /maint/items`` specs, oldest first.
 
     ``tree`` is the checkout read (the bundle by default); the audit receipts are the bundle's.
@@ -174,12 +182,13 @@ def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict
     ``audit_held`` item carrying the newest refusal's note, so the maintainer answers what the
     auditor no longer re-reviews. A deprecated concept, or one that does not parse, is skipped.
     A review outranks elapsed freshness: one item per concept. Oldest is when the reason arose:
-    the review's time, or the day freshness elapsed.
+    the review's time, or the day freshness elapsed. Then, past ``body_chars`` (the gate's cap),
+    the ``SPLITS_PER_RUN`` largest pages with no other reason get an ``oversized`` split item.
     """
     tree = tree or bundle
     unverified = unverified_reviews(bundle)
     held = {entry["path"]: entry for entry in held or ()}
-    found = []
+    found, large = [], []
     for rel, text in _concepts(tree):
         try:
             frontmatter = parse_document(text).frontmatter
@@ -210,6 +219,9 @@ def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict
             origin = {"kind": KIND, "path": rel, "reason": STALE, "base": base, "stale_on": deadline.isoformat(),
                       "basis": freshness_basis(frontmatter)}
         else:
+            chars = len(parse_document(text).body.strip())
+            if body_chars and chars > body_chars:
+                large.append((-chars, rel, base, frontmatter, chars))
             continue
         notice = _notice(rel, base, origin, sorted(_cited(rel, frontmatter)))
         found.append((since or datetime.min.replace(tzinfo=UTC), rel, {
@@ -218,4 +230,12 @@ def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict
             "files": [{"name": NOTICE, "content_b64": base64.b64encode(notice).decode(),
                        "origin": {"kind": KIND, "path": rel, "reason": origin["reason"]}}]}))
     found.sort(key=lambda row: (row[0], row[1]))
-    return [spec for _since, _rel, spec in found]
+    splits = []
+    for _size, rel, base, frontmatter, chars in sorted(large)[:SPLITS_PER_RUN]:
+        origin = {"kind": KIND, "path": rel, "reason": OVERSIZED, "base": base, "chars": chars, "cap": body_chars}
+        notice = _notice(rel, base, origin, sorted(_cited(rel, frontmatter)))
+        splits.append({"origin": origin, "topic_key": f"{KIND}:{rel}", "brief": _brief(origin),
+                       "priority": planner.PRIORITY["refresh"],
+                       "files": [{"name": NOTICE, "content_b64": base64.b64encode(notice).decode(),
+                                  "origin": {"kind": KIND, "path": rel, "reason": OVERSIZED}}]})
+    return [spec for _since, _rel, spec in found] + splits

@@ -37,6 +37,11 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   it off) reviewed versions in a row ended unverified, a newer version leaves the backlog
   (`held` in `GET /audit/backlog` and `/maint/status`) until the maintainer closes its
   `audit_held` attention item with a changeset; a push past the service is never held.
+- **A page past the size cap never grows.** A changeset whose concept body would pass
+  `AIWIKI_CONCEPT_BODY_CHARS` (20000) characters and is longer than before is refused
+  (`body_too_long`); a new reading gets a dated concept of its own that links the page, and
+  `allow.grow` (`--allow-grow PATH:REASON`) lets a fix through. Each maintainer run start queues
+  `oversized` split items for the 5 largest such pages that have no other attention reason.
 - **A correction may bring `stale_after` forward.** A review restores `type`, `title`,
   `sources` and `status`, and `stale_after` unless the correction moves it earlier. The server knows principals,
   not agents: a maintainer that reaches the auditor's token (or the reverse) audits its own
