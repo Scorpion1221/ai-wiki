@@ -835,5 +835,32 @@ def test_a_run_start_queues_splits_for_the_largest_oversized_pages(gate, monkeyp
     assert begin(gate, "WAIO-2")["attention"]["duplicate"] == 1  # the same version asks once
 
 
+def test_split_items_take_no_slot_of_the_attention_cap(gate, monkeypatch) -> None:
+    """2026-11-08/09: 215-230 audit/stale items were due at each run start and the splits, planned
+    after them, came back deferred every time. A full cap still leaves the split items their place."""
+    from aiwiki.runtime.audit import _concepts
+
+    # The fixture's metrics go stale by 2026-12-16 and its experiments on 2026-12-22: on 12-20 the
+    # four stale metrics overflow a cap of 2 and an experiment, with no other reason, is the split.
+    monkeypatch.setattr(attention, "today", lambda: date(2026, 12, 20))
+    stale = {spec["origin"]["path"] for spec in attention.plan(gate.writer, today=attention.today())}
+    monkeypatch.setattr(M, "ATTENTION_CAP", 2)
+    assert len(stale) > M.ATTENTION_CAP
+    sizes = {rel: len(parse_document(text).body.strip()) for rel, text in _concepts(gate.writer)
+             if parse_document(text).frontmatter.get("type") and rel not in stale}
+    page = max(sizes, key=sizes.get)
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", str(max(v for k, v in sizes.items() if k != page)))
+
+    first = begin(gate, "WAIO-1")["attention"]
+
+    assert first["by_reason"] == {"stale": 2, "oversized": 1}, first
+    assert (first["due"], first["created"], first["cap"], first["deferred"]) == (
+        len(stale) + 1, 3, 2, len(stale) - 2), first
+    assert sorted(item["origin"]["path"] for item in items(gate) if item["origin"]["reason"] == "oversized") == [page]
+    end(gate, "WAIO-1")
+    second = begin(gate, "WAIO-2")["attention"]  # the capped backlog moves on; the split asks once
+    assert (second["by_reason"], second["duplicate"]) == ({"stale": 2}, 3), second
+
+
 def test_no_cap_queues_no_split(tmp_path) -> None:
     assert all(spec["origin"]["reason"] != "oversized" for spec in attention.plan(tmp_path, today=TODAY))
