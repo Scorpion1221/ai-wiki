@@ -70,6 +70,10 @@ REOPENABLE = frozenset({"needs_human", "skipped", "duplicate", "needs_access", "
 MAX_FILES = 64
 MAX_CHILDREN = 20
 ATTENTION_CAP = 20  # new attention items one run start creates; the oldest go first, the rest wait
+# Attention reasons whose items service.attention.plan bounds itself, so they skip ATTENTION_CAP:
+# the SPLITS_PER_RUN largest oversized pages. Planned after every capped item, they reached the
+# queue on no run start while 215-230 audit/stale items were due (2026-11-08/09).
+UNCAPPED_REASONS = frozenset({"oversized"})  # attention.OVERSIZED
 MEMBER = "member"  # origin.kind of a member submission: POST /ingest or an inbox drop
 REQUEUEABLE = frozenset({"ready", "parked", "needs_human"})  # member items the inbox rollback hands to Codex
 TRIAGE_MISSED = "triage_missed"  # the reopen reason of a triage review's ``missed`` verdict (service.triage)
@@ -428,8 +432,9 @@ def _attention(bundle: Path, collect: Callable[[], list[dict]]) -> dict:
     A duplicate (a notice already queued or closed for that version) or a merge into a waiting
     item costs nothing and still happens past the cap, so a backlog of skipped notices never
     starves the rest and a waiting item always takes the newer notice; only the new items past
-    the cap are ``deferred`` to the next run. Nothing here may stop the run: a failure is
-    reported in the answer instead.
+    the cap are ``deferred`` to the next run. A reason in ``UNCAPPED_REASONS`` is bounded where
+    it is planned, so its items take none of the cap's slots and are never deferred. Nothing
+    here may stop the run: a failure is reported in the answer instead.
     """
     try:
         specs, invalid = [], 0
@@ -443,12 +448,15 @@ def _attention(bundle: Path, collect: Callable[[], list[dict]]) -> dict:
         with _LOCK:
             now = _now()
             current = _items(bundle)
+            capped = 0  # new items that took one of ATTENTION_CAP's slots
             for spec, files in specs:
+                reason = str(spec["origin"].get("reason"))
+                uncapped = reason in UNCAPPED_REASONS
                 outcome = _enqueue(bundle, spec, files, "service", current, now,
-                                   create=result["created"] < ATTENTION_CAP)["result"]
+                                   create=uncapped or capped < ATTENTION_CAP)["result"]
                 result[outcome] += 1
                 if outcome == "created":
-                    reason = str(spec["origin"].get("reason"))
+                    capped += not uncapped
                     result["by_reason"][reason] = result["by_reason"].get(reason, 0) + 1
         return result
     except Exception as exc:  # noqa: BLE001 — attention never blocks the maintainer lease
