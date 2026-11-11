@@ -1337,7 +1337,10 @@ describe that day.
 
 - **Attention items.** Each maintainer run start (`maint begin`) queues at most 20 new
   `attention:<path>` items, oldest first: a concept the Auditor left `unverified` in its current
-  version (priority 25 since 2026-11-01, behind every new increment), or one past its stale date (priority 20). An item holds only
+  version (priority 25 since 2026-11-01, behind every new increment), or one past its stale date (priority 20).
+  On top of those 20 come `oversized` split items (priority 20) for the 5 largest pages past
+  `AIWIKI_CONCEPT_BODY_CHARS`; since 0.3.26 such a page gets the split even when it was due for one of
+  the reasons above, whose facts its `notice.md` then quotes under `also due`. An item holds only
   `notice.md` (facts, never evidence; the writer refuses a changeset citing nothing else) and its
   `brief` says what to do; the maintainer skill §3.2 has the rules. Freshness now defaults to
   stale 90 days after `generated.at` for a concept with no `stale_after` (it reads `unspecified`
@@ -1424,7 +1427,7 @@ changeset only with a 40+ character note, and that answer is not reviewed again.
 - An Auditor's `unverified` conclusion leaves the concept stable, unverified in its current
   version and off the backlog until a new generation or a push changes it; the next maintainer
   run start queues an `attention:<path>` item (priority 25; at most 20 new a run start, oldest
-  first); no separate alert counts them, but `maint_ready_stale` fires after 72 h. Legacy
+  first; a split item instead when the page is among the 5 largest past the size cap); no separate alert counts them, but `maint_ready_stale` fires after 72 h. Legacy
   corrections (Codex, and auditor corrections that stamped themselves verified: up to 216, §15)
   are due as `legacy` corrections after new work and before seeds. Any auditor run may review
   them; the 72 h alert ignores them.

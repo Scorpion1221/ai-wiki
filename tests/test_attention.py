@@ -864,3 +864,100 @@ def test_split_items_take_no_slot_of_the_attention_cap(gate, monkeypatch) -> Non
 
 def test_no_cap_queues_no_split(tmp_path) -> None:
     assert all(spec["origin"]["reason"] != "oversized" for spec in attention.plan(tmp_path, today=TODAY))
+
+
+def body_size(gate: Gate, rel: str) -> int:
+    return len(parse_document(gate.read(rel)).body.strip())
+
+
+def _concepts(bundle: Path):
+    from aiwiki.runtime.audit import _concepts as walk
+
+    return [(rel, text) for rel, text in walk(bundle) if parse_document(text).frontmatter.get("type")]
+
+
+def split_item(gate: Gate, rel: str) -> dict:
+    [item] = [item for item in items(gate) if item["origin"]["path"] == rel]
+    return item
+
+
+def test_an_audited_page_past_the_cap_gets_the_split_with_its_review_quoted(gate, monkeypatch) -> None:
+    """2026-11-10/11: 37 of the 38 pages past 20000 characters were queued as audit items, never
+    as splits; they passed 1 of 16 reviews and grew with every fix. The split comes first and
+    carries the review, so the maintainer answers it where each claim lands."""
+    append(gate, AIO_AB, "readout-a")  # longer than every metric, whatever the review restamps
+    job = unverify(gate, AIO_AB, note="S1 says the lift was 3%, not 12%")
+    cap = body_size(gate, AIO_AB) - 1
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", str(cap))
+    past = sorted(rel for rel, _text in _concepts(gate.writer) if body_size(gate, rel) > cap)
+    assert AIO_AB in past and len(past) <= attention.SPLITS_PER_RUN, past
+
+    begun = begin(gate, "WAIO-1")["attention"]
+
+    assert begun["by_reason"] == {"oversized": len(past)}, begun  # no audit_unverified item for AIO_AB
+    item = split_item(gate, AIO_AB)
+    origin = item["origin"]
+    assert (origin["reason"], origin["chars"], origin["cap"]) == ("oversized", cap + 1, cap)
+    assert origin["also"]["reason"] == "audit_unverified" and origin["also"]["review"] == job["id"]
+    assert origin["also"]["note"] == "S1 says the lift was 3%, not 12%"
+    assert item["priority"] == planner.PRIORITY["refresh"]
+    assert item["brief"][:300].startswith(f"Split: body {cap + 1} chars, cap {cap}; notice.md also quotes a "
+                                          "audit_unverified notice: answer it where each claim lands.")
+    text = notice(gate, item)
+    assert text.index("- reason: oversized\n") < text.index(f"- body: {cap + 1} characters\n") \
+        < text.index("- also due: audit_unverified\n") < text.index(f"- review: {job['id']} at ") \
+        < text.index("> S1 says the lift was 3%, not 12%\n") < text.index("- cited sources:\n")
+    end(gate, "WAIO-1")
+    assert begin(gate, "WAIO-2")["attention"]["duplicate"] == len(past)  # facts only: the same version asks once
+
+
+def test_a_held_page_past_the_cap_gets_the_split_with_its_refusals_quoted(gate, monkeypatch) -> None:
+    refuse_twice(gate, AIO_AB)
+    append(gate, AIO_AB, "readout-b")
+    cap = body_size(gate, AIO_AB) - 1
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", str(cap))
+    past = [rel for rel, _text in _concepts(gate.writer) if body_size(gate, rel) > cap]
+    assert AIO_AB in past and len(past) <= attention.SPLITS_PER_RUN
+
+    assert begin(gate, "WAIO-1")["attention"]["by_reason"] == {"oversized": len(past)}
+    item = split_item(gate, AIO_AB)
+    assert item["origin"]["also"]["reason"] == "audit_held" and item["origin"]["also"]["refusals"] == 2
+    text = notice(gate, item)
+    assert "- also due: audit_held\n- unverified versions in a row: 2\n" in text
+    assert "> 标题仍把 agent 报告写成事实" in text
+
+
+def test_a_stale_page_past_the_cap_gets_the_split_and_the_rest_keep_their_reason(gate, monkeypatch) -> None:
+    """Only the split pages change: every other due concept keeps its reason, notice and brief."""
+    monkeypatch.setattr(attention, "today", lambda: date(2026, 12, 23))  # the whole fixture is stale by now
+    before = {spec["origin"]["path"]: spec for spec in attention.plan(gate.writer, today=attention.today())}
+    assert before[AIO_AB]["origin"]["reason"] == "stale"
+    cap = body_size(gate, AIO_AB) - 1
+    past = {rel for rel in before if body_size(gate, rel) > cap}
+    assert AIO_AB in past and len(past) <= attention.SPLITS_PER_RUN < len(before)
+
+    after = {spec["origin"]["path"]: spec for spec in attention.plan(gate.writer, today=attention.today(),
+                                                                       body_chars=cap)}
+
+    assert set(after) == set(before)
+    assert {rel for rel, spec in after.items() if spec["origin"]["reason"] == "oversized"} == past
+    split = after[AIO_AB]["origin"]
+    assert {key: split["also"][key] for key in ("reason", "stale_on", "basis")} == {
+        key: before[AIO_AB]["origin"][key] for key in ("reason", "stale_on", "basis")}
+    assert "- also due: stale\n- stale on: " in base64.b64decode(after[AIO_AB]["files"][0]["content_b64"]).decode()
+    for rel in set(before) - past:
+        assert after[rel] == before[rel], rel
+
+
+def test_a_run_start_splits_at_most_splits_per_run_pages_the_largest_first(gate, monkeypatch) -> None:
+    """The 5-item bound rests on plan()'s own slice (review R1-1 of 0.3.25): pin it."""
+    sizes = sorted(((len(parse_document(text).body.strip()), rel) for rel, text in _concepts(gate.writer)),
+                   key=lambda row: (-row[0], row[1]))
+    monkeypatch.setattr(attention, "SPLITS_PER_RUN", 2)
+    cap = min(size for size, _rel in sizes) - 1  # every page is past it: more than the bound
+    assert len(sizes) > attention.SPLITS_PER_RUN
+
+    splits = [spec["origin"]["path"] for spec in attention.plan(gate.writer, today=TODAY, body_chars=cap)
+              if spec["origin"]["reason"] == "oversized"]
+
+    assert splits == [rel for _size, rel in sizes[:2]]
