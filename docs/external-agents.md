@@ -41,8 +41,10 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   `AIWIKI_CONCEPT_BODY_CHARS` (20000) characters and is longer than before is refused
   (`body_too_long`); a new reading gets a dated concept of its own that links the page, and
   `allow.grow` (`--allow-grow PATH:REASON`) lets a fix through. Each maintainer run start queues
-  `oversized` split items for the 5 largest such pages that have no other attention reason; they
-  take none of the 20 attention items a run start creates for audit and freshness notices.
+  `oversized` split items for the 5 largest such pages, whatever other attention reason they have:
+  an unverified review, a held refusal or a stale date rides in the split's `notice.md` (`also due`)
+  instead of an item of its own. They take none of the 20 attention items a run start creates for
+  audit and freshness notices.
 - **A correction may bring `stale_after` forward.** A review restores `type`, `title`,
   `sources` and `status`, and `stale_after` unless the correction moves it earlier. The server knows principals,
   not agents: a maintainer that reaches the auditor's token (or the reverse) audits its own

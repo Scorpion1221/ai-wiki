@@ -113,31 +113,37 @@ def _asked(verdict: object) -> str:
     return {"corrected": "correction", "verified": "verification"}.get(str(verdict), "verdict")
 
 
-def _notice(rel: str, base: str, origin: dict, sources: list[str]) -> bytes:
-    """Facts only, in fixed lines: these bytes are the item key, so no guidance lives here."""
-    lines = [f"# Attention: {rel}", "", f"- concept: `{rel}`", f"- content hash: `{base}`",
-             f"- reason: {origin['reason']}"]
+def _reason_lines(origin: dict) -> list[str]:
+    """The fixed fact lines of one reason (``_notice``)."""
     if origin["reason"] == AUDIT_HELD:
         # A newer version of a concept the auditor refused version after version: it waits off the
         # audit backlog for the maintainer's answer, so the newest refusal's note says what to fix.
-        lines += [f"- unverified versions in a row: {origin['refusals']}",
-                  f"- last review: {origin['review']} at {origin.get('reviewed_at')}, of `{origin['reviewed_base']}`",
-                  "- note:", ""]
+        lines = [f"- unverified versions in a row: {origin['refusals']}",
+                 f"- last review: {origin['review']} at {origin.get('reviewed_at')}, of `{origin['reviewed_base']}`",
+                 "- note:", ""]
         lines += [f"> {line}" if line.strip() else ">" for line in str(origin.get("note") or "(none)").splitlines()]
-        lines += [""]
-    elif origin["reason"] == AUDIT_UNVERIFIED:
+        return lines + [""]
+    if origin["reason"] == AUDIT_UNVERIFIED:
         verdict, downgrade = origin.get("verdict"), origin.get("downgrade")
-        lines += [f"- review: {origin['review']} at {origin.get('reviewed_at')}",
-                  f"- requested verdict: {verdict}",
-                  f"- outcome: unverified (the gate refused the requested {_asked(verdict)}: {downgrade})"
-                  if downgrade else "- outcome: unverified (the auditor's own verdict)",
-                  "- note, describing the edit the gate rejected:" if downgrade in REJECTED_EDITS else "- note:", ""]
+        lines = [f"- review: {origin['review']} at {origin.get('reviewed_at')}",
+                 f"- requested verdict: {verdict}",
+                 f"- outcome: unverified (the gate refused the requested {_asked(verdict)}: {downgrade})"
+                 if downgrade else "- outcome: unverified (the auditor's own verdict)",
+                 "- note, describing the edit the gate rejected:" if downgrade in REJECTED_EDITS else "- note:", ""]
         lines += [f"> {line}" if line.strip() else ">" for line in str(origin.get("note") or "(none)").splitlines()]
-        lines += [""]
-    elif origin["reason"] == OVERSIZED:
-        lines += [f"- body: {origin['chars']} characters", f"- cap: {origin['cap']} characters"]
-    else:
-        lines += [f"- stale on: {origin['stale_on']}", f"- basis: {origin['basis']}"]
+        return lines + [""]
+    if origin["reason"] == OVERSIZED:
+        return [f"- body: {origin['chars']} characters", f"- cap: {origin['cap']} characters"]
+    return [f"- stale on: {origin['stale_on']}", f"- basis: {origin['basis']}"]
+
+
+def _notice(rel: str, base: str, origin: dict, sources: list[str]) -> bytes:
+    """Facts only, in fixed lines: these bytes are the item key, so no guidance lives here.
+    A split that took the place of another reason (``also``) carries that reason's facts too."""
+    lines = [f"# Attention: {rel}", "", f"- concept: `{rel}`", f"- content hash: `{base}`",
+             f"- reason: {origin['reason']}"] + _reason_lines(origin)
+    if origin.get("also"):
+        lines += [f"- also due: {origin['also']['reason']}"] + _reason_lines(origin["also"])
     lines += ["- cited sources:"] + ([f"  - `{source}`" for source in sources] or ["  - none of the bundle's sources/"])
     return ("\n".join(lines) + "\n").encode("utf-8")
 
@@ -150,6 +156,12 @@ def fixes(note: object) -> list[str]:
 def _brief(origin: dict) -> str:
     """What to do, front-loaded (``maint next`` shows 300 characters); not part of the item key."""
     tail = "cite it, propose. Else skip insufficient_evidence."
+    if origin["reason"] == OVERSIZED and origin.get("also"):
+        # Past 300 characters only after the split and the pointer to the earlier notice.
+        return (f"Split: body {origin['chars']} chars, cap {origin['cap']}; notice.md also quotes a "
+                f"{origin['also']['reason']} notice: answer it where each claim lands. Move dated readings to new "
+                "concepts (concept new, citing sources) this page links; keep definition and latest state here "
+                "(--allow-shrink). add-evidence: the cited files, propose. Nothing apart: answer in place.")
     if origin["reason"] == OVERSIZED:
         return (f"Split: body {origin['chars']} chars, cap {origin['cap']}. Move dated readings to new concepts "
                 "(concept new, citing their sources) this page links; keep definition and latest state here "
@@ -183,19 +195,26 @@ def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict
     auditor no longer re-reviews. A deprecated concept, or one that does not parse, is skipped.
     A review outranks elapsed freshness: one item per concept. Oldest is when the reason arose:
     the review's time, or the day freshness elapsed. Then, past ``body_chars`` (the gate's cap),
-    the ``SPLITS_PER_RUN`` largest pages with no other reason get an ``oversized`` split item.
+    the ``SPLITS_PER_RUN`` largest pages get an ``oversized`` split item instead, whatever other
+    reason they have: its notice carries that reason's facts under ``also``. A page past the cap
+    meets the same refusal on every review (2026-11-10: 1 of 16 passed, against 72% of the pages
+    split since 0.3.25), and a fix that may not grow it never ends that loop.
     """
     tree = tree or bundle
     unverified = unverified_reviews(bundle)
     held = {entry["path"]: entry for entry in held or ()}
-    found, large = [], []
+    due, large = {}, []  # path -> (since, base, frontmatter, body chars, origin or None, reviewed)
     for rel, text in _concepts(tree):
         try:
-            frontmatter = parse_document(text).frontmatter
+            document = parse_document(text)
         except OKFDocumentError:
             continue  # its curator fixes the YAML first
+        frontmatter = document.frontmatter
         if frontmatter.get("status") == "deprecated":
             continue
+        chars = len(document.body.strip())
+        if body_chars and chars > body_chars:
+            large.append((-chars, rel))
         base = changeset.content_hash(text)
         review = unverified.get((rel, base))
         deadline = stale_date(frontmatter)
@@ -219,23 +238,26 @@ def plan(bundle: Path, *, today: date, tree: Path | None = None, held: list[dict
             origin = {"kind": KIND, "path": rel, "reason": STALE, "base": base, "stale_on": deadline.isoformat(),
                       "basis": freshness_basis(frontmatter)}
         else:
-            chars = len(parse_document(text).body.strip())
-            if body_chars and chars > body_chars:
-                large.append((-chars, rel, base, frontmatter, chars))
+            since, origin = None, None
+        due[rel] = (since, base, frontmatter, chars, origin, review is not None)
+    split = {rel for _size, rel in sorted(large)[:SPLITS_PER_RUN]}
+    found, splits = [], []
+    for rel, (since, base, frontmatter, chars, origin, reviewed) in due.items():
+        if rel in split:
+            other = origin
+            origin = {"kind": KIND, "path": rel, "reason": OVERSIZED, "base": base, "chars": chars, "cap": body_chars}
+            if other is not None:
+                origin["also"] = {key: value for key, value in other.items() if key not in ("kind", "path", "base")}
+        elif origin is None:
             continue
         notice = _notice(rel, base, origin, sorted(_cited(rel, frontmatter)))
-        found.append((since or datetime.min.replace(tzinfo=UTC), rel, {
-            "origin": origin, "topic_key": f"{KIND}:{rel}", "brief": _brief(origin),
-            "priority": planner.PRIORITY[KIND if review is not None else "refresh"],
-            "files": [{"name": NOTICE, "content_b64": base64.b64encode(notice).decode(),
-                       "origin": {"kind": KIND, "path": rel, "reason": origin["reason"]}}]}))
+        spec = {"origin": origin, "topic_key": f"{KIND}:{rel}", "brief": _brief(origin),
+                "priority": planner.PRIORITY[KIND if reviewed and rel not in split else "refresh"],
+                "files": [{"name": NOTICE, "content_b64": base64.b64encode(notice).decode(),
+                           "origin": {"kind": KIND, "path": rel, "reason": origin["reason"]}}]}
+        if rel in split:
+            splits.append((-chars, rel, spec))
+        else:
+            found.append((since or datetime.min.replace(tzinfo=UTC), rel, spec))
     found.sort(key=lambda row: (row[0], row[1]))
-    splits = []
-    for _size, rel, base, frontmatter, chars in sorted(large)[:SPLITS_PER_RUN]:
-        origin = {"kind": KIND, "path": rel, "reason": OVERSIZED, "base": base, "chars": chars, "cap": body_chars}
-        notice = _notice(rel, base, origin, sorted(_cited(rel, frontmatter)))
-        splits.append({"origin": origin, "topic_key": f"{KIND}:{rel}", "brief": _brief(origin),
-                       "priority": planner.PRIORITY["refresh"],
-                       "files": [{"name": NOTICE, "content_b64": base64.b64encode(notice).decode(),
-                                  "origin": {"kind": KIND, "path": rel, "reason": OVERSIZED}}]})
-    return [spec for _since, _rel, spec in found] + splits
+    return [spec for _since, _rel, spec in found] + [spec for _size, _rel, spec in sorted(splits)]
