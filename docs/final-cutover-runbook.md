@@ -1335,10 +1335,10 @@ Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` show
 they use the `ai-wiki-maintainer` skill (step 1's archive, R2, step 5's rollback block) they
 describe that day.
 
-- **Attention items.** Each maintainer run start (`maint begin`) queues at most 20 new
+- **Attention items.** Each maintainer run start (`maint begin`) queues at most 40 new (20 before 0.3.27)
   `attention:<path>` items, oldest first: a concept the Auditor left `unverified` in its current
   version (priority 25 since 2026-11-01, behind every new increment), or one past its stale date (priority 20).
-  On top of those 20 come `oversized` split items (priority 20) for the 5 largest pages past
+  On top of those 40 come `oversized` split items (priority 20) for the 5 largest pages past
   `AIWIKI_CONCEPT_BODY_CHARS`; since 0.3.26 such a page gets the split even when it was due for one of
   the reasons above, whose facts its `notice.md` then quotes under `also due`. An item holds only
   `notice.md` (facts, never evidence; the writer refuses a changeset citing nothing else) and its

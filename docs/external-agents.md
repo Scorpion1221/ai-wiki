@@ -43,7 +43,7 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   `allow.grow` (`--allow-grow PATH:REASON`) lets a fix through. Each maintainer run start queues
   `oversized` split items for the 5 largest such pages, whatever other attention reason they have:
   an unverified review, a held refusal or a stale date rides in the split's `notice.md` (`also due`)
-  instead of an item of its own. They take none of the 20 attention items a run start creates for
+  instead of an item of its own. They take none of the 40 attention items a run start creates for
   audit and freshness notices.
 - **A correction may bring `stale_after` forward.** A review restores `type`, `title`,
   `sources` and `status`, and `stale_after` unless the correction moves it earlier. The server knows principals,

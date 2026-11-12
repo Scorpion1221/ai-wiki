@@ -69,7 +69,10 @@ ADMIN_OUTCOMES = frozenset({"skipped", "duplicate", "needs_access", "needs_conve
 REOPENABLE = frozenset({"needs_human", "skipped", "duplicate", "needs_access", "needs_conversion", "parked"})
 MAX_FILES = 64
 MAX_CHILDREN = 20
-ATTENTION_CAP = 20  # new attention items one run start creates; the oldest go first, the rest wait
+# New attention items one run start creates; the oldest go first, the rest wait. 40 since 0.3.27: at 20,
+# 21 of 26 run starts 2026-11-08..12 hit the cap, the auditor refused 124-158 versions a day against
+# 98-125 items queued, and a refusal waited 27.8 h (median) for its item; an item takes ~1.8 minutes.
+ATTENTION_CAP = 40
 # Attention reasons whose items service.attention.plan bounds itself, so they skip ATTENTION_CAP:
 # the SPLITS_PER_RUN largest oversized pages. Planned after every capped item, they reached the
 # queue on no run start while 215-230 audit/stale items were due (2026-11-08/09).

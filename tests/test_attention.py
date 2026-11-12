@@ -226,7 +226,7 @@ def test_an_unverified_review_outranks_elapsed_freshness(gate, monkeypatch) -> N
 
 
 def test_the_cap_creates_the_oldest_first_and_reports_the_rest(gate, monkeypatch) -> None:
-    assert M.ATTENTION_CAP == 20
+    assert M.ATTENTION_CAP == 40
     monkeypatch.setattr(attention, "today", lambda: TODAY + timedelta(days=400))
     monkeypatch.setattr(M, "ATTENTION_CAP", 2)
 
