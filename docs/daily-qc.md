@@ -17,8 +17,8 @@ It runs on the writer host at 10:30 CST, after the 02:00 maintainer (up to 4 h) 
 | 维护 | 首次过 gate | The maintainer's changeset jobs, done vs rejected | `--min-gate-pct` 90 |
 | 维护 | 跳过+合并占比 | Closed as skipped or duplicate | `--max-skip-pct` 60 |
 | 审计 | 概念审查 | The auditor's audit jobs and their review outcomes | `--min-audits` 60 |
-| 审计 | 首审通过率 | Reviews of a concept no earlier audit reviewed, ended verified: the maintainer's writing | `--min-verified-pct` 50 |
-| 审计 | 重审通过率 | Reviews of a concept reviewed before, ended verified: how refusals get answered | shown, never graded |
+| 审计 | 首审通过率 | Reviews of a concept no earlier audit reviewed, ended verified or corrected: the maintainer's writing (a correction only narrows, and readers get the corrected text) | `--min-first-pass-pct` 50 (`--min-verified-pct` still accepted) |
+| 审计 | 重审通过率 | Reviews of a concept reviewed before, ended verified or corrected: how refusals get answered | shown, never graded |
 | 审计 | triage 漏判率 | `.okf/triage` receipts: missed vs upheld | `--max-miss-pct` 20; the historical backfill waits for this |
 | 队列 | ready 积压, 等待超 72h | Items ready now; the wait restarts on a return to ready, as the watchdog counts it | `--max-ready` 150; none over 72 h |
 | 队列 | 成员投递, needs_human | Member items waiting; items needing a person | ≤ 24 h; 0 (red) |
