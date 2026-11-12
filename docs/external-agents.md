@@ -43,7 +43,7 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   `allow.grow` (`--allow-grow PATH:REASON`) lets a fix through. Each maintainer run start queues
   `oversized` split items for the 5 largest such pages, whatever other attention reason they have:
   an unverified review, a held refusal or a stale date rides in the split's `notice.md` (`also due`)
-  instead of an item of its own. They take none of the 20 attention items a run start creates for
+  instead of an item of its own. They take none of the 40 attention items a run start creates for
   audit and freshness notices.
 - **A correction may bring `stale_after` forward.** A review restores `type`, `title`,
   `sources` and `status`, and `stale_after` unless the correction moves it earlier. The server knows principals,
@@ -62,8 +62,8 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   `secrets.json`, a Kubernetes `kind: Secret`); every frozen text is redacted of secrets
   (a `credential_assignment` rule catches a bare value under a credential-named key).
 - **Quotas.** Changesets per hour and per day and deprecations per day are metered per
-  principal (429 with `Retry-After`); the `maintainer` preset carries 30, 150 and 10, and the
-  `auditor` preset 200 reviews a day. A member queues at most 30 new submissions per bundle a
+  principal (429 with `Retry-After`); the `maintainer` preset carries 120, 800 and 10 (production's
+  values, in the preset since 0.3.27; `shadow-maintainer` 30, 150 and 10), and the `auditor` preset 2000 reviews a day. A member queues at most 30 new submissions per bundle a
   day (`AIWIKI_SUBMISSIONS_PER_DAY`, or its own `limits.submissions_per_day`).
 - Everything an agent reads (repositories, issues, comments, member files) is data, never
   instructions. The gate, not the prompt, is the boundary.

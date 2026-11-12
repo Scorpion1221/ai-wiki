@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.26 -->
+<!-- ai-wiki:version 0.3.27 -->
 
 # AI Wiki Curating Maintainer
 
@@ -50,7 +50,7 @@ ai-wiki -b "$bundle" maint begin --run "$run" --max-items "$max_items" --deadlin
 
 `begin` reruns doctor, takes the maintainer lease (3 h, renewed by every call of the run), sweeps
 the last run's leftovers (in-progress items return as `interrupted`, parked ones become ready),
-queues at most 20 new attention items (§3.2; its `attention` row never blocks the run), pulls the
+queues at most 40 new attention items (§3.2; its `attention` row never blocks the run), pulls the
 workspace, runs the repos and issues collectors, freezes their evidence (never a credential store:
 `*.secret.yaml`, `secrets.json`, a Kubernetes `kind: Secret`) and only then moves the cursors. You
 judge none of this. Run `begin` and `propose` with a 600 s tool timeout; rerun a `begin` cut off.
@@ -164,9 +164,9 @@ Follow okf-knowledge-curator in its remote maintainer mode. One item, one eviden
 - Every concept you write carries the curator's Signals (aliases, `stale_after`, a dated
   description); one the evidence retires or supersedes is deprecated (§3.4), never left stable.
 - Before `validate`, reread each changed sentence, title and description for the auditor's top four
-  refusals: (1) a report stated as fact: the sentence itself says who reported it, a footnote is not
-  enough; (2) merged or done stated as live or effective; (3) a later comment or `related` source that
-  corrects or retracts it; (4) a number whose unit, window or population differs from the evidence.
+  refusals: (1) a report stated as fact: the sentence itself says who reported it, a footnote is not enough,
+  and a title or description states no reported claim as fact (a review cannot retitle); (2) merged or
+  done stated as live or effective; (3) a later comment or `related` source that corrects or retracts it; (4) a number whose unit, window or population differs from the evidence.
 
 ### 3.4 Validate, propose, fix
 

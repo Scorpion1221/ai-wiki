@@ -36,9 +36,10 @@ service's own, since a bare `check` cannot see what they are given:
 Presets (the id is also the actor stamped into generated.by / verified[].by; a member never is):
   owner              human:guobaoqi                     aiw_h_  every scope, every bundle
   maintainer         process:ai-wiki-maintainer         aiw_c_  read, submit, curate
-                     solvely-wiki and solvely-wiki-shadow; 30/h, 150/day, 10 deprecations/day
-  shadow-maintainer  process:ai-wiki-maintainer-shadow  aiw_c_  as maintainer, solvely-wiki-shadow only
-  auditor            process:ai-wiki-auditor            aiw_a_  read, audit; both bundles; 200 reviews/day
+                     solvely-wiki and solvely-wiki-shadow; 120/h, 800/day, 10 deprecations/day
+  shadow-maintainer  process:ai-wiki-maintainer-shadow  aiw_c_  as maintainer, solvely-wiki-shadow only;
+                     30/h, 150/day, 10 deprecations/day
+  auditor            process:ai-wiki-auditor            aiw_a_  read, audit; both bundles; 2000 reviews/day
                      phase 4a: not before the Auditor agent runs as its own OS user (D2)
   watchdog           process:ai-wiki-watchdog           aiw_r_  read
   member             member:<name> (--id required)      aiw_m_  read, submit
@@ -79,7 +80,11 @@ from pathlib import Path
 from aiwiki.service import auth
 
 DEFAULT_FILE = "/etc/ai-wiki/principals.json"
-_MAINTAINER_LIMITS = {"changesets_per_hour": 30, "changesets_per_day": 150, "deprecations_per_day": 10}
+# Production's limits (/etc/ai-wiki/principals.json, read 2026-11-13), so a rotation (`remove` then `add`) keeps
+# them: the maintainer was raised to 120/h and 800/day by hand (peak 42 an hour, 558 a day since 11-06), the
+# auditor to 2000 reviews a day on 2026-11-02 (its 400 ran out at 06:10Z). The shadow keeps the old bound.
+_MAINTAINER_LIMITS = {"changesets_per_hour": 120, "changesets_per_day": 800, "deprecations_per_day": 10}
+_SHADOW_LIMITS = {"changesets_per_hour": 30, "changesets_per_day": 150, "deprecations_per_day": 10}
 # Scopes come from auth.ROLES, so `ai-wiki doctor --role` finds exactly the role's scopes.
 PRESETS: dict[str, dict] = {
     "owner": {"id": "human:guobaoqi", "prefix": "aiw_h_", "scopes": sorted(auth.SCOPES)},
@@ -87,9 +92,9 @@ PRESETS: dict[str, dict] = {
                    "bundles": ["solvely-wiki", "solvely-wiki-shadow"], "limits": _MAINTAINER_LIMITS},
     "shadow-maintainer": {"id": "process:ai-wiki-maintainer-shadow", "prefix": "aiw_c_",
                           "scopes": sorted(auth.ROLES["curator"]), "bundles": ["solvely-wiki-shadow"],
-                          "limits": _MAINTAINER_LIMITS},
+                          "limits": _SHADOW_LIMITS},
     "auditor": {"id": "process:ai-wiki-auditor", "prefix": "aiw_a_", "scopes": sorted(auth.ROLES["auditor"]),
-                "bundles": ["solvely-wiki", "solvely-wiki-shadow"], "limits": {"reviews_per_day": 200}},
+                "bundles": ["solvely-wiki", "solvely-wiki-shadow"], "limits": {"reviews_per_day": 2000}},
     "watchdog": {"id": "process:ai-wiki-watchdog", "prefix": "aiw_r_", "scopes": sorted(auth.ROLES["reader"])},
     "member": {"id": None, "prefix": "aiw_m_", "scopes": sorted(auth.ROLES["member"])},
 }
