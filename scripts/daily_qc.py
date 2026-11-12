@@ -304,17 +304,21 @@ def grade(facts: dict, args: argparse.Namespace) -> list[dict]:
                         f"未验证 {a['verdicts'].get('unverified', 0)}）", f"≥ {args.min_audits}，或 backlog 已清空"))
         # The maintainer's writing, judged once: a re-review follows an earlier refusal, so it is
         # shown apart (how refusals get answered) and never drags this rate down.
+        # Passed = verified or corrected: a correction only narrows (deletes, weakens, attributes) and the
+        # reader gets the corrected text. Verified alone sat at 9-20% 11-04..11 while verified + corrected
+        # read 33-56%: a bar on verified alone asked for text the auditor never touches.
         first = a["first_reviews"]
         taken = sum(first.values())
-        rate = pct(first.get("verified", 0), taken)
-        rows.append(row("审计", "首审通过率", "ok" if rate is None or rate >= args.min_verified_pct else "warn",
+        rate = pct(first.get("verified", 0) + first.get("corrected", 0), taken)
+        rows.append(row("审计", "首审通过率", "ok" if rate is None or rate >= args.min_first_pass_pct else "warn",
                         (f"{rate}%（{taken} 个首次审查：通过 {first.get('verified', 0)} · 修正 "
                          f"{first.get('corrected', 0)} · 未验证 {first.get('unverified', 0)}）") if taken else "—",
-                        f"≥ {args.min_verified_pct:g}%"))
+                        f"≥ {args.min_first_pass_pct:g}%（通过 + 修正）"))
         again = a["re_reviews"]
         redone = sum(again.values())
-        rows.append(row("审计", "重审通过率", "ok", f"{pct(again.get('verified', 0), redone)}%（{redone} 次重审）"
-                        if redone else "—", "仅参考"))
+        rows.append(row("审计", "重审通过率", "ok",
+                        f"{pct(again.get('verified', 0) + again.get('corrected', 0), redone)}%（{redone} 次重审）"
+                        if redone else "—", "仅参考（通过 + 修正）"))
         judged = a["triage"]
         missed = a["triage_verdicts"].get("missed", 0)
         miss = pct(missed, judged)
@@ -438,7 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--min-gate-pct", type=float, default=90, help="changesets accepted on first proposal")
     t.add_argument("--max-skip-pct", type=float, default=60, help="items closed as skipped or duplicate")
     t.add_argument("--min-audits", type=int, default=60, help="concepts the auditor reviews")
-    t.add_argument("--min-verified-pct", type=float, default=50, help="first reviews of a concept that ended verified")
+    t.add_argument("--min-first-pass-pct", "--min-verified-pct", dest="min_first_pass_pct", type=float, default=50,
+                   help="first reviews of a concept that ended verified or corrected")
     t.add_argument("--max-miss-pct", type=float, default=20, help="triage reviews that found missed knowledge")
     t.add_argument("--max-ready", type=int, default=150, help="items ready at the end of the window")
     t.add_argument("--max-triage-backlog", type=int, default=60, help="skips and duplicates waiting for triage")

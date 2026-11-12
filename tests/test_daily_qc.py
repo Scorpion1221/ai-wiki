@@ -121,7 +121,7 @@ def test_a_full_run_meets_the_bar_and_the_misses_are_flagged(bundle: Bundle) -> 
                                                                                                 "upheld": 10}
     assert a["first_reviews"] == {"verified": 35, "corrected": 40, "unverified": 25} and a["re_reviews"] == {}
     assert grades(result) == {"运行时长": "ok", "处理条目": "ok", "首次过 gate": "ok", "跳过+合并占比": "ok",
-                              "概念审查": "ok", "首审通过率": "warn", "重审通过率": "ok", "triage 漏判率": "warn"}
+                              "概念审查": "ok", "首审通过率": "ok", "重审通过率": "ok", "triage 漏判率": "warn"}
     assert result["grade"] == "warn"  # a replay grades only the day's work, never the queue as it is now
 
 
@@ -165,8 +165,10 @@ def test_members_waiting_and_needs_human_are_bad(bundle: Bundle) -> None:
 
 def test_thresholds_are_flags(bundle: Bundle) -> None:
     full_day(bundle)
-    _code, result = qc(bundle, "--now", iso(NOW), "--min-verified-pct", "30", "--max-miss-pct", "60")
+    _code, result = qc(bundle, "--now", iso(NOW), "--max-miss-pct", "60")
     assert result["grade"] == "ok"
+    _code, result = qc(bundle, "--now", iso(NOW), "--max-miss-pct", "60", "--min-first-pass-pct", "80")
+    assert result["grade"] == "warn" and grades(result)["首审通过率"] == "warn"
 
 
 class Server:
@@ -371,12 +373,15 @@ def test_a_re_review_is_graded_apart_from_first_reviews(bundle: Bundle) -> None:
     full_day(bundle)
     earlier = [f"m/old-{i}.md" for i in range(10)]
     bundle.audit("p00000000000", 40, ["unverified"] * 10, earlier)  # the day before: all refused
-    bundle.audit("p00000000001", 3, ["unverified"] * 9 + ["verified"], earlier)
+    bundle.audit("p00000000001", 3, ["unverified"] * 8 + ["verified", "corrected"], earlier)
     _code, result = qc(bundle, "--now", iso(NOW))
     a = result["facts"]["auditor"]
     assert a["first_reviews"] == {"verified": 35, "corrected": 40, "unverified": 25}
-    assert a["re_reviews"] == {"unverified": 9, "verified": 1}
+    assert a["re_reviews"] == {"unverified": 8, "verified": 1, "corrected": 1}
     by = {r["check"]: r for r in result["rows"]}
-    assert by["首审通过率"]["value"].startswith("35.0%（100 个首次审查")
-    assert by["重审通过率"]["value"] == "10.0%（10 次重审）"
-    assert grades(qc(bundle, "--now", iso(NOW), "--min-verified-pct", "30")[1])["首审通过率"] == "ok"
+    # Passed = verified + corrected (11-12: verified alone read 12.5%, with corrections 50%).
+    assert by["首审通过率"]["value"].startswith("75.0%（100 个首次审查：通过 35 · 修正 40 · 未验证 25")
+    assert by["首审通过率"]["expect"] == "≥ 50%（通过 + 修正）"
+    assert by["重审通过率"]["value"] == "20.0%（10 次重审）"  # verified + corrected, as first reviews
+    assert grades(qc(bundle, "--now", iso(NOW), "--min-first-pass-pct", "80")[1])["首审通过率"] == "warn"
+    assert grades(qc(bundle, "--now", iso(NOW), "--min-verified-pct", "80")[1])["首审通过率"] == "warn"  # old name
