@@ -23,15 +23,16 @@ prov = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(prov)
 
 LEGACY = "legacy-shared-token"
-MAINTAINER_LIMITS = {"changesets_per_hour": 30, "changesets_per_day": 150, "deprecations_per_day": 10}
+MAINTAINER_LIMITS = {"changesets_per_hour": 120, "changesets_per_day": 800, "deprecations_per_day": 10}  # production
+SHADOW_LIMITS = {"changesets_per_hour": 30, "changesets_per_day": 150, "deprecations_per_day": 10}
 BOTH = frozenset({"solvely-wiki", "solvely-wiki-shadow"})
 # preset: (id, token prefix, role as /whoami and `doctor --role` see it, bundles, limits)
 EXPECTED = {
     "owner": ("human:guobaoqi", "aiw_h_", "admin", None, {}),
     "maintainer": ("process:ai-wiki-maintainer", "aiw_c_", "curator", BOTH, MAINTAINER_LIMITS),
     "shadow-maintainer": ("process:ai-wiki-maintainer-shadow", "aiw_c_", "curator",
-                          frozenset({"solvely-wiki-shadow"}), MAINTAINER_LIMITS),
-    "auditor": ("process:ai-wiki-auditor", "aiw_a_", "auditor", BOTH, {"reviews_per_day": 200}),
+                          frozenset({"solvely-wiki-shadow"}), SHADOW_LIMITS),
+    "auditor": ("process:ai-wiki-auditor", "aiw_a_", "auditor", BOTH, {"reviews_per_day": 2000}),  # production
     "watchdog": ("process:ai-wiki-watchdog", "aiw_r_", "reader", None, {}),
     "member": ("member:alice", "aiw_m_", "member", None, {}),
 }
