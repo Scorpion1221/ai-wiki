@@ -24,7 +24,7 @@ It runs on the writer host at 10:30 CST, after the 02:00 maintainer (up to 4 h) 
 | 队列 | 成员投递, needs_human | Member items waiting; items needing a person | ≤ 24 h; 0 (red) |
 | 队列 | triage 积压, 审计 backlog | `GET /maint/status` (`--writer-url`) | `--max-triage-backlog` 60; oldest ≤ 72 h |
 | 队列 | 等维护者回应 | `audit.held` of `GET /maint/status`: concepts refused `AIWIKI_AUDIT_HOLD_AFTER` (2) versions in a row, waiting for the maintainer's answer | `--max-held` 60 |
-| 读取 | 镜像同步, 未验证概念 | The mirror's `GET /health` (`--mirror-url`) against the writer's Git HEAD | Same revision (red otherwise); `--max-unverified-pct` 20 |
+| 读取 | 镜像同步, 未验证概念 | The mirror's `GET /health` (`--mirror-url`) against the writer's Git HEAD: how old the oldest writer commit the mirror lacks is (it pulls every 5 minutes) | `--max-mirror-lag-minutes` 15, red past it or when the mirror serves a revision outside the writer's history; `--max-unverified-pct` 20 |
 | 读取 | 当前版本已验证 | `verified_current` of the mirror's `GET /health`: concepts whose verification confirms the version a reader gets | `--min-current-pct` 70 |
 
 A row is ✅ ok, ⚠️ warn or 🔴 bad. The card is green, yellow or red by its worst row.
