@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -127,13 +128,39 @@ def writer_get(url: str, token: str, route: str, bundle: str) -> dict:
     return value
 
 
-def git_head(bundle: Path) -> str | None:
+def git(bundle: Path, *args: str) -> str | None:
     try:
-        proc = subprocess.run(["git", "-C", str(bundle), "rev-parse", "HEAD"], capture_output=True, text=True,
+        proc = subprocess.run(["git", "-C", str(bundle), *args], capture_output=True, text=True,
                               timeout=30, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return proc.stdout.strip() or None if proc.returncode == 0 else None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def git_head(bundle: Path) -> str | None:
+    return git(bundle, "rev-parse", "HEAD") or None
+
+
+def mirror_lag(bundle: Path, served: str | None, head: str | None, now: datetime) -> tuple[float | None, str]:
+    """(minutes since the oldest writer commit the mirror does not serve yet, why there is no number).
+    0 when it serves HEAD. The mirror pulls every 5 minutes, so a commit made since its last pull is
+    lag, not drift (2026-11-12 10:10Z: the card went red on a 2-minute-old commit; the next pull
+    matched). Commits are walked along first parents, so a merge counts from its own date."""
+    if not head:
+        return None, "读不到 writer HEAD"
+    if not served:
+        return None, "镜像没报版本"
+    if served == head:
+        return 0.0, ""
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", served):
+        return None, "镜像版本不是完整 commit"
+    if git(bundle, "merge-base", "--is-ancestor", served, head) is None:
+        return None, "不在 writer 历史上"
+    stamps = git(bundle, "log", "--first-parent", "--format=%cI", f"{served}..{head}")
+    oldest = min((ts for ts in map(parse_ts, (stamps or "").split()) if ts), default=None)
+    if oldest is None:
+        return None, "读不到落后的提交"
+    return round(max((now - oldest).total_seconds(), 0) / 60, 1), ""
 
 
 # --- the day's facts ------------------------------------------------------------------------
@@ -329,9 +356,13 @@ def grade(facts: dict, args: argparse.Namespace) -> list[dict]:
                             f"≤ {args.max_held}"))
     wiki = facts.get("wiki")
     if wiki:
-        rows.append(row("读取", "镜像同步", "ok" if wiki["mirror_current"] else "bad",
-                        f"镜像 {wiki['mirror_revision'] or '—'}，writer {wiki['writer_revision'] or '—'}",
-                        "镜像 = writer HEAD"))
+        lag = wiki.get("mirror_lag_minutes")
+        behind = "" if wiki["mirror_current"] else (
+            f"，{wiki.get('mirror_lag_unknown') or '落后时长未知'}" if lag is None else f"，落后 {lag:g} 分钟")
+        rows.append(row("读取", "镜像同步",
+                        "ok" if lag is not None and lag <= args.max_mirror_lag_minutes else "bad",
+                        f"镜像 {wiki['mirror_revision'] or '—'}，writer {wiki['writer_revision'] or '—'}{behind}",
+                        f"镜像 = writer HEAD，或只差最近 {args.max_mirror_lag_minutes:g} 分钟的提交"))
         trust = wiki.get("by_trust") or {}
         total = sum(trust.values())
         unverified = trust.get("unverified", 0)
@@ -415,6 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--min-current-pct", type=float, default=70,
                    help="published concepts whose current version is verified")
     t.add_argument("--max-held", type=int, default=60, help="concepts the audit holds for the maintainer's answer")
+    t.add_argument("--max-mirror-lag-minutes", type=float, default=15,
+                   help="age of the oldest writer commit the mirror lacks (it pulls every 5 minutes)")
     p.add_argument("--label", default=socket.gethostname(), help="shown in the card's footer")
     return p
 
@@ -444,10 +477,13 @@ def report(args: argparse.Namespace) -> dict:
         try:
             health = writer_get(args.mirror_url, token or "", "/health", bundle.name)
             head = git_head(bundle)
-            facts["wiki"] = {"mirror_revision": (health.get("git_revision") or "")[:12] or None,
+            served = health.get("git_revision") or None
+            lag, why = mirror_lag(bundle, served, head, now)
+            facts["wiki"] = {"mirror_revision": (served or "")[:12] or None,
                              "writer_revision": head and head[:12], "by_trust": health.get("by_trust"),
                              "concepts": health.get("concepts"), "verified_current": health.get("verified_current"),
-                             "mirror_current": bool(head) and health.get("git_revision") == head}
+                             "mirror_current": bool(head) and served == head,
+                             "mirror_lag_minutes": lag, "mirror_lag_unknown": why or None}
         except SourceError as exc:
             errors.append({"source": "mirror", "error": str(exc)})
     rows = grade(facts, args)
