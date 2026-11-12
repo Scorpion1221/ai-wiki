@@ -234,6 +234,54 @@ def test_the_writer_and_mirror_rows_and_a_lagging_mirror(bundle: Bundle) -> None
         server.http.shutdown()
 
 
+def commit_minutes_ago(bundle: Bundle, minutes: float) -> str:
+    stamp = iso(datetime.now(UTC) - timedelta(minutes=minutes))
+    env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+    page = bundle.root / "log.md"
+    page.write_text(page.read_text() + "x\n" if page.exists() else "x\n")
+    for args in (["add", "log.md"], ["-c", "user.name=t", "-c", "user.email=t@l", "commit", "-qm", "y"]):
+        subprocess.run(["git", "-C", str(bundle.root), *args], check=True, env=env)
+    return subprocess.run(["git", "-C", str(bundle.root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def test_a_mirror_one_pull_behind_is_lag_not_drift(bundle: Bundle) -> None:
+    # 2026-11-12 10:10Z: the mirror served 18:06's commit, the writer had 18:08's and 18:10's; the card
+    # went red, and the next pull (5 minutes) matched. Lag is the age of the oldest commit not served.
+    served = git_bundle(bundle)
+    token = "reader-" + "token"
+    mirror = Server(token, served)
+    try:
+        commit_minutes_ago(bundle, 4)
+        commit_minutes_ago(bundle, 2)
+        _code, result = qc(bundle, "--mirror-url", mirror.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        row = next(r for r in result["rows"] if r["check"] == "镜像同步")
+        assert row["grade"] == "ok" and "落后 4" in row["value"]
+        assert 3.5 < result["facts"]["wiki"]["mirror_lag_minutes"] < 6
+
+        _code, result = qc(bundle, "--mirror-url", mirror.url, "--max-mirror-lag-minutes", "3",
+                           env={"AIWIKI_WATCHDOG_TOKEN": token})
+        assert grades(result)["镜像同步"] == "bad"
+
+        caught_up = Server(token, commit_minutes_ago(bundle, 40))
+        _code, result = qc(bundle, "--mirror-url", caught_up.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        assert grades(result)["镜像同步"] == "ok" and result["facts"]["wiki"]["mirror_lag_minutes"] == 0
+        caught_up.http.shutdown()
+
+        # The old mirror still serves an ancestor, but now a missing commit is 40 minutes old: stuck.
+        _code, result = qc(bundle, "--mirror-url", mirror.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        assert grades(result)["镜像同步"] == "bad" and result["facts"]["wiki"]["mirror_lag_minutes"] > 35
+
+        # A revision outside the writer's history is drift whatever its age.
+        foreign = Server(token, "0" * 40)
+        _code, result = qc(bundle, "--mirror-url", foreign.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        row = next(r for r in result["rows"] if r["check"] == "镜像同步")
+        assert row["grade"] == "bad" and "不在 writer 历史上" in row["value"]
+        foreign.http.shutdown()
+    finally:
+        mirror.http.shutdown()
+
+
 def test_the_card_is_one_message_coloured_by_the_worst_row(bundle: Bundle) -> None:
     spec = importlib.util.spec_from_file_location("daily_qc", SCRIPT)
     module = importlib.util.module_from_spec(spec)
