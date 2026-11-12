@@ -1345,7 +1345,7 @@ describe that day.
   `brief` says what to do; the maintainer skill §3.2 has the rules. Freshness now defaults to
   stale 90 days after `generated.at` for a concept with no `stale_after` (it reads `unspecified`
   until then, never `fresh`). On the 2026-10-26 clone, 60 concepts reach that date in November,
-  208 in December and 256 in January, so expect `stale` items at up to 20 a run from November;
+  208 in December and 256 in January, so expect `stale` items at up to 40 a run (20 before 0.3.27) from November;
   `maint_ready_stale` pages if they wait over 72 h. A `maint export-v4` leaves notices out.
 - **Self-verification.** A `process:` actor's `verified` event on its own generation counts for
   `verification_current` only from 12 h after that generation, and an auditor's correction adds
@@ -1426,7 +1426,7 @@ changeset only with a 40+ character note, and that answer is not reviewed again.
   corrections out of its measure, so it pages only on new work waiting.
 - An Auditor's `unverified` conclusion leaves the concept stable, unverified in its current
   version and off the backlog until a new generation or a push changes it; the next maintainer
-  run start queues an `attention:<path>` item (priority 25; at most 20 new a run start, oldest
+  run start queues an `attention:<path>` item (priority 25; at most 40 new a run start since 0.3.27, oldest
   first; a split item instead when the page is among the 5 largest past the size cap); no separate alert counts them, but `maint_ready_stale` fires after 72 h. Legacy
   corrections (Codex, and auditor corrections that stamped themselves verified: up to 216, §15)
   are due as `legacy` corrections after new work and before seeds. Any auditor run may review
