@@ -268,16 +268,59 @@ def test_a_mirror_one_pull_behind_is_lag_not_drift(bundle: Bundle) -> None:
         assert grades(result)["镜像同步"] == "ok" and result["facts"]["wiki"]["mirror_lag_minutes"] == 0
         caught_up.http.shutdown()
 
-        # The old mirror still serves an ancestor, but now a missing commit is 40 minutes old: stuck.
+        # The lag is the oldest missing commit, not the one right after the served revision: the
+        # first mirror now also lacks a commit dated 40 minutes back, so it reads stuck.
         _code, result = qc(bundle, "--mirror-url", mirror.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
         assert grades(result)["镜像同步"] == "bad" and result["facts"]["wiki"]["mirror_lag_minutes"] > 35
 
-        # A revision outside the writer's history is drift whatever its age.
-        foreign = Server(token, "0" * 40)
-        _code, result = qc(bundle, "--mirror-url", foreign.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
-        row = next(r for r in result["rows"] if r["check"] == "镜像同步")
-        assert row["grade"] == "bad" and "不在 writer 历史上" in row["value"]
-        foreign.http.shutdown()
+        # A revision outside the writer's history is drift whatever its age; so is an abbreviated one.
+        for revision, why in (("0" * 40, "不在 writer 历史上"), (served[:12], "镜像版本不是完整 commit")):
+            other = Server(token, revision)
+            _code, result = qc(bundle, "--mirror-url", other.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
+            row = next(r for r in result["rows"] if r["check"] == "镜像同步")
+            assert row["grade"] == "bad" and why in row["value"], row
+            other.http.shutdown()
+    finally:
+        mirror.http.shutdown()
+
+
+def test_a_merged_branch_counts_from_the_merge_not_its_old_commits(bundle: Bundle) -> None:
+    spec = importlib.util.spec_from_file_location("daily_qc", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    served = git_bundle(bundle)
+    root = str(bundle.root)
+
+    def run(*args: str, minutes: float) -> None:
+        stamp = iso(datetime.now(UTC) - timedelta(minutes=minutes))
+        env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+        subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@l", *args], check=True, env=env)
+
+    run("checkout", "-qb", "side", minutes=0)
+    (bundle.root / "side.md").write_text("s\n")
+    run("add", "side.md", minutes=0)
+    run("commit", "-qm", "side", minutes=2 * 24 * 60)
+    run("checkout", "-q", "-", minutes=0)
+    run("merge", "-q", "--no-ff", "-m", "merge", "side", minutes=2)
+    head = module.git_head(bundle.root)
+    lag, why = module.mirror_lag(bundle.root, served, head, datetime.now(UTC))
+    assert why == "" and 1.5 < lag < 4
+
+
+def test_a_mirror_that_cannot_be_compared_says_why(bundle: Bundle) -> None:
+    spec = importlib.util.spec_from_file_location("daily_qc", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    head = git_bundle(bundle)
+    now = datetime.now(UTC)
+    assert module.mirror_lag(bundle.root, head, head, now) == (0.0, "")
+    assert module.mirror_lag(bundle.root, None, head, now) == (None, "镜像没报版本")
+    assert module.mirror_lag(bundle.root, head, None, now) == (None, "读不到 writer HEAD")
+    token = "reader-" + "token"
+    mirror = Server(token, head)
+    try:
+        _code, result = qc(bundle, "--mirror-url", mirror.url, env={"AIWIKI_WATCHDOG_TOKEN": token})
+        assert result["facts"]["wiki"]["mirror_lag_unknown"] is None
     finally:
         mirror.http.shutdown()
 
