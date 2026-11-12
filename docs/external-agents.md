@@ -63,7 +63,7 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   (a `credential_assignment` rule catches a bare value under a credential-named key).
 - **Quotas.** Changesets per hour and per day and deprecations per day are metered per
   principal (429 with `Retry-After`); the `maintainer` preset carries 120, 800 and 10 (production's
-  since 0.3.27; `shadow-maintainer` 30, 150 and 10), and the `auditor` preset 2000 reviews a day. A member queues at most 30 new submissions per bundle a
+  values, in the preset since 0.3.27; `shadow-maintainer` 30, 150 and 10), and the `auditor` preset 2000 reviews a day. A member queues at most 30 new submissions per bundle a
   day (`AIWIKI_SUBMISSIONS_PER_DAY`, or its own `limits.submissions_per_day`).
 - Everything an agent reads (repositories, issues, comments, member files) is data, never
   instructions. The gate, not the prompt, is the boundary.
