@@ -192,7 +192,7 @@ def issue_candidates(
     # Redact before packing, so packing measures what is frozen and a longer marker never clips.
     blocks = [(*secrets.redact(text), comment_id) for text, comment_id
               in evidence_blocks(issue, identifier, delta["cursor"]["updated_at"], kept, changes, edits,
-                                 description_author(issue, past, until))]
+                                 description_author(issue, past))]
     groups = planner.pack(blocks, planner.FILE_TEXT_LIMIT, size=lambda block: planner.utf8_size(block[0]))
     stem = f"{identifier}-{stamp(after)}"
     files = [
@@ -267,20 +267,27 @@ def timeline(issue_id: str, in_window: Callable[[Any], bool], cache_dir: Path) -
     return [event for event in history(issue_id, cache_dir) if in_window(event.get("created_at"))]
 
 
-def description_author(issue: dict[str, Any], events: Iterable[dict[str, Any]], until: datetime | None = None) -> str:
+def description_author(issue: dict[str, Any], events: Iterable[dict[str, Any]]) -> str:
     """Who wrote the description as it stands, and when: ``edited by <type> <id> · <time>`` for its
-    latest ``description_updated`` (up to ``until``), else ``created by <type> <id> · <time>``.
-    An issue a member opened and an agent rewrote is the agent's text: 10 of 40 recent issues had
-    their description edited (2026-11-13). Empty when the issue says neither."""
-    edits = [event for event in events if event.get("action") == "description_updated" and event.get("created_at")
-             and (until is None or parse_time(event["created_at"], "created_at") <= until)]
+    latest ``description_updated``, else ``created by <type> <id> · <time>``. An issue a member
+    opened and an agent rewrote is the agent's text: 10 of 40 recent issues had their description
+    edited (2026-11-13). Empty when the issue says neither.
+
+    Every edit counts, the ones past the window's end too: the text frozen is the listing's current
+    description, and the timeline is read after the listing, so an edit made inside the settle
+    margin wrote the very text this signs (the window bounds comments and the Edits list, not this).
+    """
+    edits = [event for event in events if event.get("action") == "description_updated" and event.get("created_at")]
     if edits:
         last = max(edits, key=lambda event: parse_time(event["created_at"], "created_at"))
-        who, verb, when = (last.get("actor_type"), last.get("actor_id")), "edited by", last["created_at"]
+        who, verb, when = (last.get("actor_type"), last.get("actor_id")), "edited", last["created_at"]
     else:
-        who, verb, when = (issue.get("creator_type"), issue.get("creator_id")), "created by", issue.get("created_at")
+        who, verb, when = (issue.get("creator_type"), issue.get("creator_id")), "created", issue.get("created_at")
     by = " ".join(str(part) for part in who if part)
-    return " · ".join(part for part in (f"{verb} {by}" if by else "", str(when or "")) if part)
+    if not (by or when):
+        return ""
+    # An edit with no actor on record still says it was edited: never a bare time that reads as the creation.
+    return " · ".join(part for part in (f"{verb} by {by}" if by else verb, str(when or "")) if part)
 
 
 def stamp(moment: datetime) -> str:

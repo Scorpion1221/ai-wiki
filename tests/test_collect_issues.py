@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -237,6 +238,42 @@ def test_collect_redacts_secrets_before_freezing(multica: Path, tmp_path: Path) 
     assert "Refresh token:\nrotate every 30 days" in text
 
 
+def test_an_edit_inside_the_settle_margin_signs_the_text_it_wrote(multica: Path, tmp_path: Path) -> None:
+    """The listing serves the current description while the window ends 120 s before the run: an
+    agent's rewrite 20 s ago is the text frozen, so it signs it, though the Edits list (the window)
+    leaves it to the next run."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    recent = (now - timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rewrite = {**edit(recent, "description_updated"), "actor_type": "agent", "actor_id": ANALYST}
+    save(multica, {
+        "issues": [issue(950, "2026-09-01T00:00:00Z", recent, description="REWRITTEN by the agent",
+                         creator_type="member", creator_id=MEMBER, assignee_type="member", assignee_id=MEMBER)],
+        "comments": {"issue-950": [comment("c-old", "2026-09-20T00:00:00Z", "Decision: keep the weekly plan.")]},
+        "timelines": {"issue-950": [rewrite]},
+    })
+
+    [candidate] = run(tmp_path)["candidates"]
+
+    text = candidate["files"][0]["data"].decode()
+    assert f"## Description · edited by agent {ANALYST} · {recent}\n\nREWRITTEN by the agent" in text
+    assert "created by member" not in text and "## Edits" not in text  # the edit itself is the next window's
+
+
+def test_added_issue_evidence_signs_its_description_too(multica: Path, tmp_path: Path) -> None:
+    """`maint add-evidence issue:<id>` freezes the same header: signed from the issue's whole timeline."""
+    rewrite = {**edit("2026-09-12T00:00:00Z", "description_updated"), "actor_type": "agent", "actor_id": ANALYST}
+    save(multica, {
+        "issues": [issue(960, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z", creator_type="member",
+                         creator_id=MEMBER, assignee_type="member", assignee_id=MEMBER)],
+        "comments": {"issue-960": [comment("c1", "2026-09-20T00:00:00Z", "Decision: ship it.")]},
+        "timelines": {"issue-960": [rewrite]},
+    })
+    file = collect_issues.issue_evidence("WAIO-960", None, cache_dir=tmp_path / "add", autopilot=AUTOPILOT,
+                                         exclude_agents=[MAINTAINER, AUDITOR])
+    assert f"## Description · edited by agent {ANALYST} · 2026-09-12T00:00:00Z\n\ndescription 960" in file[
+        "data"].decode()
+
+
 def test_the_description_is_signed_by_whoever_wrote_it_last() -> None:
     """2026-11-13: 10 of 40 recent issues had their description edited. A member's issue an agent
     rewrote is the agent's text; an unsigned or creator-signed Description read as the member's."""
@@ -247,13 +284,13 @@ def test_the_description_is_signed_by_whoever_wrote_it_last() -> None:
     later = {**edit("2026-09-25T00:00:00Z", "description_updated"), "actor_type": "member", "actor_id": MEMBER}
     events = [edit("2026-09-03T00:00:00Z", "description_updated"), by_agent,
               edit("2026-09-06T00:00:00Z", "title_changed", **{"from": "a", "to": "b"}), later]
-    # The latest description edit wins, whatever the order and even before the collected window ...
+    # The latest description edit wins, whatever the order and even before the collected window.
     assert sign(row, list(reversed(events[:3]))) == f"edited by agent {ANALYST} · 2026-09-05T00:00:00Z"
-    # ... and one after the window's end is not this evidence's text yet.
-    until = collect_issues.parse_time("2026-09-22T00:00:00Z")
-    assert sign(row, events, until) == f"edited by agent {ANALYST} · 2026-09-05T00:00:00Z"
     assert sign(row, events) == f"edited by member {MEMBER} · 2026-09-25T00:00:00Z"
     assert sign({"description": "x"}, []) == ""  # an old row with neither: the title stays bare
+    # An edit with no actor on record is still an edit, never a bare time that reads as the creation.
+    anonymous = {"action": "description_updated", "created_at": "2026-09-07T00:00:00Z"}
+    assert sign(row, [by_agent, anonymous]) == "edited · 2026-09-07T00:00:00Z"
     blocks = collect_issues.evidence_blocks(row, "WAIO-900", "2026-09-01T00:00:00Z", [], [], [], sign(row, [by_agent]))
     assert f"\n## Description · edited by agent {ANALYST} · 2026-09-05T00:00:00Z\n\ndescription 900" in blocks[0][0]
     assert "\n## Description\n\ndescription 900" in collect_issues.evidence_blocks(

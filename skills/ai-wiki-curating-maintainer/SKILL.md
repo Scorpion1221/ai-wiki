@@ -181,7 +181,7 @@ Pass the same extra flags to both, and only when true:
   retitling always needs this flag and a reason.
 - `--allow-shrink <path>:<reason>`: the body shrank below 70% of its base because content moved
   to another concept or was wrong. Never to drop supported facts.
-- `--allow-grow <path>:<reason>`: a fix that must stay on a page past 20000 characters or 8 sources; a new reading never.
+- `--allow-grow <path>:<reason>`: a fix that must stay on a page past 20000 characters or 8 sources, or a split moving readings into another page at the source cap; a new reading never.
 - `--deprecate <path>:<superseded_by>:<reason>`: retire a concept in favour of an existing or
   same-changeset successor (at most 3 per changeset). Never delete or rename a file.
 

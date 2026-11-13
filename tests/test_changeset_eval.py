@@ -615,8 +615,15 @@ def test_a_concept_citing_the_cap_of_sources_takes_no_new_reading(bundle: Path, 
     refused = _evaluate(bundle, batch, answers=[AI_STUDY])
     assert [(error["code"], error["path"]) for error in refused["errors"]] == [("too_many_sources", AIO_AB)]
     monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
-    # The dated concept the hint asks for goes through with the capped page left as it is.
-    assert _new(bundle, _new_concept())["status"] == "would_apply"
+    # NFC as every path of a changeset: an origin path in another normal form names the same page.
+
+    accented = "experiments/caf\u00e9-ab.md"
+    (bundle / accented).write_text(head, encoding="utf-8")
+    decomposed = unicodedata.normalize("NFD", accented)
+    assert decomposed != accented
+    request = _request(_put(bundle, accented, _cite(head)))
+    assert _codes(_evaluate(bundle, request)) == ["too_many_sources"]
+    assert _evaluate(bundle, request, answers=[decomposed])["status"] == "would_apply"
     # A deprecation cites the packet too, and retiring a page is never an increment.
     retire = {"path": AI_STUDY, "op": "deprecate", "base": changeset.content_hash(head),
               "superseded_by": "risks/new.md", "reason": "superseded by the dated reading"}

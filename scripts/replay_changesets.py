@@ -127,20 +127,23 @@ def build_request(repo: Path, commit: str, parent: str) -> dict:
         before, after = None if old is None else old.decode("utf-8"), _show(repo, commit, rel).decode("utf-8")
         files.append({"path": rel, "op": "put", "content": after,
                       "base": None if before is None else changeset.content_hash(before)})
+        # An ingest older than the size and source caps (0.3.24, 0.3.28) may have grown a page past
+        # one of them, or created one past the size cap; a compliant agent would have had to say why.
+        limits = changeset.limits()
+        grew = {"path": rel, "reason": f"ingest {commit[:12]} predates the size and source caps"}
         if before is None:
+            if len(_identity_and_body(after)[1]) > limits["body_chars"]:
+                allow["grow"].append(grew)
             continue
         (identity, body), (new_identity, new_body) = _identity_and_body(before), _identity_and_body(after)
         if new_identity != identity:
             allow["retype"].append({"path": rel, "reason": f"ingest {commit[:12]} changed its type or title"})
         if body and len(new_body) < SHRINK_RATIO * len(body):
             allow["shrink"].append({"path": rel, "reason": f"ingest {commit[:12]} shortened its body"})
-        # An ingest older than the size and source caps (0.3.24, 0.3.28) may have grown a page past
-        # one of them; a compliant agent would have had to say why.
-        limits = changeset.limits()
         cited = _sources(before)
         if (len(new_body) > max(limits["body_chars"], len(body))
                 or (len(cited) >= limits["concept_sources"] and _sources(after) - cited)):
-            allow["grow"].append({"path": rel, "reason": f"ingest {commit[:12]} predates the size and source caps"})
+            allow["grow"].append(grew)
     request = {
         "schema": changeset.SCHEMA, "kind": "curate", "intent": "evidence", "base_revision": parent,
         "work_items": [],

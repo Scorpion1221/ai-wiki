@@ -150,6 +150,27 @@ def test_an_undeclared_retitle_fails_a_verbatim_replay(tmp_path, capsys):
     assert (rejected["allow"], rejected["allow_declared"]) == ({"retype": [RETITLED]}, False)
 
 
+def test_an_ingest_that_crossed_a_cap_replays_only_with_allow_grow(tmp_path, capsys, monkeypatch):
+    """History older than the size and source caps appended where the gate now refuses. The replay
+    reports the allowance each such page needs; under the caps it declares none."""
+    history = _history(tmp_path / "bundle", retitle=False)
+    code, report = _replay(history, capsys)
+    assert code == 0 and "allow" not in report["ingests"][0]  # 20000 characters, 8 sources: no page is near
+
+    cited = len(set(re.findall(r"resource: (/sources/\S+)", _git(history, "show", f"HEAD~2:{SPILLED}"))))
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))  # the ingest added a source to a page at the cap
+    code, report = _replay(history, capsys)
+    result = report["ingests"][0]
+    assert code == 1 and result["accepted"] is False and result["allow"] == {"grow": [SPILLED]}, result
+    code, report = _replay(history, capsys, "--declare-allow")
+    assert code == 0 and report["ingests"][0]["allow_declared"] is True, report["ingests"][0]
+
+    monkeypatch.delenv("AIWIKI_CONCEPT_SOURCES")
+    monkeypatch.setenv("AIWIKI_CONCEPT_BODY_CHARS", "40")  # every changed body, the new concept's too, is past it
+    code, report = _replay(history, capsys, "--declare-allow")
+    assert code == 0 and sorted(report["ingests"][0]["allow"]["grow"]) == sorted([NEW, RETITLED, SPILLED])
+
+
 def test_a_non_ascii_concept_path_replays_verbatim(tmp_path, capsys):
     new = "metrics/延迟登录.md"
     history = _history(tmp_path / "bundle", new=new, retitle=False)
