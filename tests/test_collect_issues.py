@@ -90,7 +90,8 @@ def test_collect_excludes_maintenance_issues_and_agent_output(multica: Path, tmp
             issue(603, "2026-09-20T00:00:00Z", "2026-09-20T01:00:00Z", assignee_id=AUDITOR),
             issue(604, "2026-09-20T00:00:00Z", "2026-09-20T01:00:00Z", assignee_type="member", assignee_id=MEMBER,
                   creator_type="agent", creator_id=MAINTAINER),  # its description is the Maintainer's text
-            issue(610, "2026-09-10T00:00:00Z", "2026-09-22T00:00:00Z", assignee_type="member", assignee_id=MEMBER),
+            issue(610, "2026-09-10T00:00:00Z", "2026-09-22T00:00:00Z", assignee_type="member", assignee_id=MEMBER,
+                  creator_type="agent", creator_id=ANALYST),  # an agent drafted its description
             issue(611, "2026-09-10T00:00:00Z", "2026-09-22T00:00:00Z"),  # only a system comment in the window
             issue(612, "2026-09-21T00:00:00Z", "2026-09-21T00:00:00Z"),  # new, nothing else yet
             issue(613, "2026-09-01T00:00:00Z", "2026-09-10T00:00:00Z"),  # unchanged since the cursor
@@ -134,7 +135,8 @@ def test_collect_excludes_maintenance_issues_and_agent_output(multica: Path, tmp
     assert file["name"] == "WAIO-610-20260919T164004Z.md"
     assert file["origin"] == {"kind": "issue", "issue_id": "issue-610", "identifier": "WAIO-610",
                               "comments": ["c-member", "c-analyst"], "truncated": False, "redactions": 0}
-    assert "## Description\n\ndescription 610" in text
+    # The description is signed like a comment: who wrote it (an agent's draft is no member's word) and when.
+    assert f"## Description · agent {ANALYST} · 2026-09-10T00:00:00Z\n\ndescription 610" in text
     assert "- 2026-09-21T00:00:00Z in_review → done (member)" in text and "todo → in_progress" not in text
     assert "Decision: pin the release to master." in text and "结论：已按 master 发布。" in text
     assert "reply to c-member" in text
@@ -205,7 +207,8 @@ def test_collect_keeps_title_and_description_edits(multica: Path, tmp_path: Path
     description, title = result["candidates"]
     assert description["brief"] == "WAIO-701 [in_review] title 701; 0 comments (0 by members); edited description"
     text = description["files"][0]["data"].decode()
-    assert f"## Description\n\n{rewritten}" in text
+    # No creator on this issue: the title carries the time alone; the edit's actor is under Edits.
+    assert f"## Description · 2026-09-01T00:00:00Z\n\n{rewritten}" in text
     assert "## Edits\n\n- 2026-09-20T01:00:00Z description_updated (member)\n" in text
     assert "title_changed" not in text, "the edit before the cursor is out of the window"
     assert title["brief"].endswith("; edited title")

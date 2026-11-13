@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.27 -->
+<!-- ai-wiki:version 0.3.28 -->
 
 # AI Wiki Curating Maintainer
 
@@ -132,7 +132,7 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
 **Evidence boundary.** Task logs are signals, not pages to mirror: prefer a task root's current
 README, status, PRD, report or diagnosis, durable docs, shared memory and solution docs.
 Requirements prove intent; a merge or a finished task proves only the merge or the work; neither
-proves a release, production verification, an experiment win or business impact. An issue comment
+proves a release, production verification, an experiment win or business impact. An issue comment, or its Description (signed `agent`/`member` and dated in its title),
 proves only that its author said it then: write "a member (an agent) reported in WAIO-722 on
 <comment date>: …" with its numbers and window verbatim, as the latest comment in your evidence
 states it (a member's for a decision), never as a bare fact and never in a title or description.
@@ -153,7 +153,7 @@ Follow okf-knowledge-curator in its remote maintainer mode. One item, one eviden
 (else `invalid_value`).
 
 - Deduplicate first with `grep -ril --include='*.md' --exclude-dir=.ai-wiki '<term>' "$WS"`;
-  update an existing concept rather than create a near-duplicate (`duplicate_title`).
+  update an existing concept rather than create a near-duplicate (`duplicate_title`), unless it cites 8 or more sources: then the reading is a dated concept of its own (`<topic>-<reading>-<date>`) that links it, one per topic and day, and the page keeps its definition and current state (`too_many_sources`).
 - New concept: `ai-wiki -b "$bundle" concept new <dir>/<name>.md --dir "$WS" --type <Type> --title "<Title>" --description "<one sentence>" --tags <a>,<b> --source-id <eid>`,
   then write the body. Types come from `SCHEMA.md`.
 - Existing concept: append `{id: <eid>, resource: evidence:packet}` to its `sources`, keep every
@@ -181,7 +181,7 @@ Pass the same extra flags to both, and only when true:
   retitling always needs this flag and a reason.
 - `--allow-shrink <path>:<reason>`: the body shrank below 70% of its base because content moved
   to another concept or was wrong. Never to drop supported facts.
-- `--allow-grow <path>:<reason>`: a fix that must stay on a page past 20000 characters; a new reading never.
+- `--allow-grow <path>:<reason>`: a fix that must stay on a page past 20000 characters or 8 sources; a new reading never.
 - `--deprecate <path>:<superseded_by>:<reason>`: retire a concept in favour of an existing or
   same-changeset successor (at most 3 per changeset). Never delete or rename a file.
 
@@ -200,7 +200,7 @@ Pass the same extra flags to both, and only when true:
 Fixes by code: `yaml_parse`, `missing_key`, `invalid_value`, `legacy_key`, `invalid_status` fix the
 frontmatter; `uncited_change`, `unknown_evidence_ref`, `resource_unresolvable` cite `evidence:packet`
 or revert the file; `broken_link`, `dangling_contradiction`, `duplicate_title` fix the link or update
-the existing concept; `body_shrink`, `identity_locked` restore the content or pass the allow flag
+the existing concept; `too_many_sources` write a dated concept instead; `body_shrink`, `identity_locked` restore the content or pass the allow flag
 with a true reason; `path_forbidden`, `service_owned_path`, `delete_forbidden` drop that file or
 change; `too_large` shorten the concept or split the item; `notice_not_evidence` add evidence
 (§3.2) and cite it; `stale_after_needs_new_evidence` keep `stale_after` as it was, or add a Git file

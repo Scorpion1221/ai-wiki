@@ -239,6 +239,16 @@ def _cited(files: list[dict]) -> list[str]:
     return sorted(ids)
 
 
+class _Evidence(list):
+    """The frozen files a changeset cites, plus the origin kinds of its work items as far as
+    this client can tell (``attention`` when an item carries a notice): the writer reads the
+    items' own origin, and the local verdict must not differ from its."""
+
+    def __init__(self, *args) -> None:
+        super().__init__(*args)
+        self.item_kinds: list[str] = []
+
+
 def _item_evidence(root: Path, bundle: str, item_id: str) -> tuple[list[changeset.EvidenceFile], str | None]:
     """The work item's frozen files, fetched once into ``.ai-wiki/items/<id>/`` and checked by
     sha, and the run that claimed it."""
@@ -268,6 +278,9 @@ def build(root: Path, state: dict, *, item: str | list[str] | None = None, uploa
           source_id: str | None = None, deprecate=(), allow_shrink=(), allow_retype=(), allow_grow=(),
           close: bool = True, run: str | None = None) -> tuple[dict, list[changeset.EvidenceFile]]:
     """The changeset of the workspace's local changes and the frozen evidence it names.
+
+    The evidence list also says what kind of items these are (``item_kinds``): an item with an
+    attention notice answers that notice, which the local gate must know as the writer does.
 
     Without ``item`` or ``upload`` a placeholder packet stands in: good for judging the
     concepts locally, never sent. An item's changeset runs under the run that claimed it
@@ -300,11 +313,13 @@ def build(root: Path, state: dict, *, item: str | list[str] | None = None, uploa
         source_id = cited[0] if cited else (items[0] if len(items) == 1 else "local-check")
     request: dict = {"schema": changeset.SCHEMA, "kind": "curate", "intent": "evidence",
                      "base_revision": state["base_revision"]}
-    evidence: list[changeset.EvidenceFile] = []
+    evidence: list[changeset.EvidenceFile] = _Evidence()
     if items:
         claimed = None
         for item_id in items:
             frozen, holder = _item_evidence(root, state["bundle"], item_id)
+            if any(file.origin.get("kind") == changeset.NOTICE_KIND for file in frozen):
+                evidence.item_kinds.append(changeset.NOTICE_KIND)
             # An attention notice or a triage record is no evidence (the gate refuses it): cite the
             # files beside it. One alone stays in, so the gate's answer tells the maintainer to add evidence.
             evidence += [file for file in frozen if file.origin.get("kind") not in changeset.NON_EVIDENCE] or frozen
@@ -336,7 +351,7 @@ def judge(root: Path, state: dict, request: dict, evidence) -> dict:
         raise WorkspaceError("this token has no actor to stamp as generated.by, so the writer refuses its "
                              "changesets; use a process: or human: token", PREFLIGHT)
     return changeset.evaluate(root / META / "base", request, actor=state["actor"], now=datetime.now(UTC),
-                              evidence_files=evidence)
+                              evidence_files=evidence, item_kinds=getattr(evidence, "item_kinds", ()))
 
 
 def verdict_code(result: dict) -> int:

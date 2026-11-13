@@ -279,7 +279,13 @@ def evidence_blocks(
               f"- status: {issue.get('status')}", f"- created_at: {issue.get('created_at')}",
               f"- activity since: {since}"]
     if issue.get("description"):
-        header += ["", "## Description", "", issue["description"]]
+        # Who wrote it and when, as each comment's title says: the description is the issue's first
+        # comment, often an agent's draft, and an unsigned one read as fact (the auditor refuses a
+        # claim that only "an unsigned Description" holds). A later edit in the window is listed
+        # under Edits with its actor; an older one is not known here, so this names the creator.
+        by = " ".join(str(part) for part in (issue.get("creator_type"), issue.get("creator_id")) if part)
+        written = " · ".join(part for part in (by, str(issue.get("created_at") or "")) if part)
+        header += ["", f"## Description · {written}" if written else "## Description", "", issue["description"]]
     if changes:
         header += ["", "## Status changes", ""]
         header += [f"- {event['created_at']} {transition(event)[0]} → {transition(event)[1]} "

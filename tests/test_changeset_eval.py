@@ -582,6 +582,40 @@ def test_identity_and_body_shrink_guards_honor_allow(bundle: Path) -> None:
     assert _evaluate(bundle, allowed)["status"] == "would_apply"
 
 
+def test_a_concept_citing_the_cap_of_sources_takes_no_new_reading(bundle: Path, monkeypatch) -> None:
+    """2026-11-06..12: 719 increments went onto a concept that already cited 8 or more sources and 24%
+    of those versions passed their review, against 46% onto a concept citing 7 or fewer and 57% of new
+    concepts. Past the cap an issue, repository or member item writes a dated concept of its own."""
+    head = _read(bundle, AI_STUDY)
+    cited = len({source["resource"] for source in parse_document(head).frontmatter["sources"]})
+    appended = _cite(head)
+
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited + 1))  # one below the cap: it still takes one
+    assert _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)))["status"] == "would_apply"
+
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
+    result = _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)))
+    assert _codes(result) == ["too_many_sources"], result["errors"]
+    assert f"already cites {cited} sources (cap {cited})" in result["errors"][0]["message"]
+    assert "dated concept of its own" in result["errors"][0]["hint"] and result["errors"][0]["path"] == AI_STUDY
+
+    # A fix that must stay on the page: the same allowance as a page past the size cap.
+    allowed = _request(_put(bundle, AI_STUDY, appended), allow={"grow": [{"path": AI_STUDY, "reason": "a fix"}]})
+    assert _evaluate(bundle, allowed)["status"] == "would_apply"
+    # An answer to an attention item (a refusal, a split, a stale date) changes the page it names.
+    assert _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), item_kinds=["attention"])[
+        "status"] == "would_apply"
+    assert _codes(_evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), item_kinds=["issue", "repo"])) == [
+        "too_many_sources"]
+    # The dated concept the hint asks for is a new file: the cap never refuses it.
+    assert _new(bundle, _new_concept())["status"] == "would_apply"
+    # A deprecation cites the packet too, and retiring a page is never an increment.
+    retire = {"path": AI_STUDY, "op": "deprecate", "base": changeset.content_hash(head),
+              "superseded_by": "risks/new.md", "reason": "superseded by the dated reading"}
+    result = _evaluate(bundle, _request(_put(bundle, "risks/new.md", _new_concept(), base=None), retire))
+    assert "too_many_sources" not in _codes(result), result["errors"]
+
+
 def test_a_body_past_the_size_cap_never_grows(bundle: Path, monkeypatch) -> None:
     """2026-11-05..07: concepts under 6k characters ended verified 60% of the time, those over 20k 3%.
     Past the cap a page may shrink or keep its length; a new reading gets a dated concept of its own."""
