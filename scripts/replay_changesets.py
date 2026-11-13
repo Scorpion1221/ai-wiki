@@ -92,6 +92,16 @@ def _sources(text: str) -> set[str]:
     return {str(source.get("resource")) for source in listed or () if isinstance(source, dict)}
 
 
+def _grows(before: str, after: str) -> bool:
+    """Whether the gate would want ``allow.grow`` for this edit of an existing concept: its body ends
+    past the size cap and longer than it was, or it adds a source to a concept at the source cap."""
+    limits = changeset.limits()
+    body, new_body = _identity_and_body(before)[1], _identity_and_body(after)[1]
+    cited = _sources(before)
+    return (len(new_body) > max(limits["body_chars"], len(body))
+            or (len(cited) >= limits["concept_sources"] and bool(_sources(after) - cited)))
+
+
 def _identity_and_body(text: str) -> tuple[tuple[object, object], str]:
     document = parse_document(text)
     return (document.frontmatter.get("type"), document.frontmatter.get("title")), document.body.strip()
@@ -140,9 +150,7 @@ def build_request(repo: Path, commit: str, parent: str) -> dict:
             allow["retype"].append({"path": rel, "reason": f"ingest {commit[:12]} changed its type or title"})
         if body and len(new_body) < SHRINK_RATIO * len(body):
             allow["shrink"].append({"path": rel, "reason": f"ingest {commit[:12]} shortened its body"})
-        cited = _sources(before)
-        if (len(new_body) > max(limits["body_chars"], len(body))
-                or (len(cited) >= limits["concept_sources"] and _sources(after) - cited)):
+        if _grows(before, after):
             allow["grow"].append(grew)
     request = {
         "schema": changeset.SCHEMA, "kind": "curate", "intent": "evidence", "base_revision": parent,

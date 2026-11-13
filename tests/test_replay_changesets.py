@@ -170,6 +170,11 @@ def test_an_ingest_that_crossed_a_cap_replays_only_with_allow_grow(tmp_path, cap
     code, report = _replay(history, capsys, "--declare-allow")
     assert code == 0 and sorted(report["ingests"][0]["allow"]["grow"]) == sorted([NEW, RETITLED, SPILLED])
 
+    # Past the cap already and no longer than before: the gate lets it through, so nothing is declared.
+    before = "---\ntype: Risk\ntitle: T\n---\n" + "x" * 60 + "\n"
+    after = "---\ntype: Risk\ntitle: T\n---\n" + "y" * 60 + "\n"
+    assert replay._grows(before, after) is False and replay._grows(before, after + "z" * 5 + "\n") is True
+
 
 def test_a_non_ascii_concept_path_replays_verbatim(tmp_path, capsys):
     new = "metrics/延迟登录.md"

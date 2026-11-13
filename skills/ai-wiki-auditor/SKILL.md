@@ -106,7 +106,7 @@ Hold each to the evidence boundary:
 - a merge or a finished task proves the merge or the work, not a release;
 - a release proves availability, not measured impact; a preliminary result is not a mature one;
 - a number must appear in the evidence as stated, with its unit, window and population;
-- an issue comment proves only that its author said it then, not that it is true; so does an issue's Description, signed in its title (`## Description · created by|edited by agent|member <id> · <time>`; one without a signature predates 0.3.28: treat it as unsigned). A claim
+- an issue comment proves only that its author said it then, not that it is true; so does an issue's Description, signed in its title (`## Description · created by|edited by agent|member <id> · <time>`; `edited · <time>` or no signature names no author: treat it as unsigned). A claim
   is attributed only when its sentence names the issue as the reporter ("WAIO-722 reported…",
   "据 WAIO-722 报告…"); a footnote or a date alone is not attribution. An attributed claim is
   supported when a comment states it with the same number, unit, window and population, no

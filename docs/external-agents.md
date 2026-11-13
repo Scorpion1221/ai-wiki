@@ -54,7 +54,8 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   8 or more passed 24% of their reviews, new concepts 57%.
 - **An issue's Description is signed.** The collector titles it `## Description · edited by
   <actor_type> <actor_id> · <time>` for its latest edit, else `created by <creator_type>
-  <creator_id> · <created_at>`, as it titles each comment, so an agent's draft is not read as a
+  <creator_id> · <created_at>` (`edited · <time>` when the edit has no actor on record: no author,
+  read as unsigned), as it titles each comment, so an agent's draft is not read as a
   member's word or as an unsigned fact.
 - **A correction may bring `stale_after` forward.** A review restores `type`, `title`,
   `sources` and `status`, and `stale_after` unless the correction moves it earlier. The server knows principals,
