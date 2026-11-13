@@ -158,8 +158,13 @@ _COUNTED = {"deprecations_per_day": "deprecations", "reviews_per_day": "reviews_
 
 # How often a pull is prepared for reads on its own: otherwise the first search after each pull starts
 # the embedding and is answered lexically (2026-11-05; A2 never waits for it), and builds the search
-# index itself (~2 s, 2026-11-06). A pass with nothing changed costs one stat walk (~10 ms).
+# index itself (~2 s, 2026-11-06). Reads keep the previous snapshot until the pass has prepared the
+# pull (bundle.warm): on 0.3.27 they waited for it, 4.8-8.3 s after each production pull
+# (2026-11-13). A pass with nothing changed costs one stat walk (~10 ms).
 EMBED_WARM_S = 5.0
+# While a pass has left a pull to hand over (its chunks are being embedded), the next one comes this
+# soon, so a pull reaches reads about when its preparation ends, not up to EMBED_WARM_S after it.
+PREPARE_POLL_S = 0.5
 
 
 _log = logging.getLogger(__name__)
@@ -167,13 +172,16 @@ _log = logging.getLogger(__name__)
 
 def _warm_embeddings(stop: threading.Event) -> None:
     """Every EMBED_WARM_S, prepare each bundle already being embedded for its next read: start
-    embedding what a pull changed and build the new snapshot's search index and link graph. A builder
-    that gave up on a failing endpoint is left to the next search, as before; the indexes are still built."""
-    while not stop.wait(EMBED_WARM_S):
+    embedding what a pull changed, build the new snapshot's search index, link graph and listing, and
+    hand it to reads once its chunks are embedded (bundle.warm). A builder that gave up on a failing
+    endpoint is left to the next search, as before; the snapshot is then handed over without it."""
+    pending = False
+    while not stop.wait(PREPARE_POLL_S if pending else EMBED_WARM_S):
+        pending = False
         for path in vectors.stores():
             try:
                 with worker.serialized_read():
-                    B.warm(path)
+                    pending |= B.warm(path)
             except worker.ReadBusy:
                 pass  # a writer mutation: the next pass
             except Exception:  # noqa: BLE001 - the warmer must outlive a bad bundle; say why
@@ -402,7 +410,7 @@ def cat(path: str = Query(...), bundle: str | None = None, authorization: str | 
             raise HTTPException(status_code=404, detail=f"not found: {path}")
         content = p.read_text(encoding="utf-8")
         result = {"path": path, "content": content}
-        metadata = B.metadata_for_path(BUNDLE, p)
+        metadata = B.metadata_for_path(BUNDLE, p, content)
         if metadata is not None:
             result["metadata"] = metadata
         return result
