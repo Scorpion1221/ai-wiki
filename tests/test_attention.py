@@ -451,6 +451,51 @@ def test_an_old_cli_that_lists_the_notice_still_proposes_once_evidence_is_added(
     assert M.get_item(gate.writer, item["id"])["status"] == "curated"
 
 
+def test_the_source_cap_refuses_an_increment_and_lets_an_answer_through(gate, monkeypatch) -> None:
+    """The writer reads each work item's origin: a repository (or issue, member) item may not add
+    its packet to a concept at the cap, dry-run or commit; an attention item's answer may, since it
+    must change the page its notice names. The CLI drops the notice from evidence.item_files, so the
+    gate cannot tell by the files it is sent."""
+    cited = len(set(re.findall(r"resource: (/sources/\S+)", gate.read(AIO_AB))))
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
+    increment = gate.item(run="WAIO-1")
+    request = gate.item_request(increment, gate.put(AIO_AB, cite(gate.read(AIO_AB))))
+    for dry_run in (True, False):
+        refused = gate.post(request, run="WAIO-1", dry_run=dry_run)
+        assert refused.status_code == 422, refused.text
+        assert [error["code"] for error in refused.json()["errors"]] == ["too_many_sources"], refused.text
+    assert M.get_item(gate.writer, increment)["status"] == "in_progress"  # nothing closed, nothing written
+    M.resolve(gate.writer, increment, {"outcome": "skipped", "reason": "insufficient_evidence"},
+              principal=CURATOR, run="WAIO-1")
+    end(gate, "WAIO-1")
+
+    unverify(gate, AIO_AB)
+    begin(gate, "WAIO-2")
+    answer = M.next_item(gate.writer, principal=CURATOR, run="WAIO-2")["item"]
+    assert answer["origin"]["kind"] == "attention" and answer["origin"]["path"] == AIO_AB
+    added = gate.client.post(f"/maint/items/{answer['id']}/files", params={"bundle": "kb-a"},
+                             headers=gate.headers(run="WAIO-2"), json={
+        "name": "S2-readout.md", "content_b64": base64.b64encode(b"# October readout\n\nLift: 3%.\n").decode(),
+        "origin": {"kind": "git-file", "remote": "https://code.example/web.git", "commit": "1a2b3c4d",
+                   "path": "docs/readout.md"}})
+    assert added.status_code == 200, added.text
+    fix = gate.request(gate.put(AIO_AB, cite(gate.read(AIO_AB), "attention-fix",
+                                             claim="The October readout puts the lift at 3%.")),
+                       work_items=[answer["id"]])
+    fix["evidence"] = {"id": "attention-fix", "item_files": [f"{answer['id']}/S2-readout.md"]}  # no notice, as the CLI
+    # The answer may touch the page its notice names, never another capped page beside it.
+    stray = gate.request(gate.put(METRIC, cite(gate.read(METRIC), "attention-fix")), work_items=[answer["id"]])
+    stray["evidence"] = fix["evidence"]
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", "1")
+    refused = gate.post(stray, run="WAIO-2", dry_run=True)
+    assert [error["code"] for error in refused.json()["errors"]] == ["too_many_sources"], refused.text
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
+    for dry_run, status in ((True, 200), (False, 201)):  # the dry run reads the item's origin as the commit does
+        done = gate.post(fix, run="WAIO-2", dry_run=dry_run)
+        assert done.status_code == status, done.text
+    assert done.json()["status"] == "done", done.text
+
+
 def bundle_source_item(gate: Gate, rel: str, run: str = "WAIO-1") -> tuple[str, str]:
     """A claimed item holding, beside a notice, a copy of the source ``rel`` cites: (item, file)."""
     cited = re.findall(r"resource: /(sources/\S+)", gate.read(rel))[0]
@@ -551,7 +596,7 @@ def loop(gate, tmp_path, monkeypatch):
     return {"gate": gate, "st": tmp_path / "st", "config": config}
 
 
-def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, capsys) -> None:
+def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, capsys, monkeypatch) -> None:
     gate, st = loop["gate"], loop["st"]
     unverify(gate, AIO_AB)
     gate.connect()  # back to the curator after the auditor's review
@@ -582,7 +627,10 @@ def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, 
                 "source:sources/_rejected/README.md.source", "source:sources/absent.md"):
         assert wiki(capsys, "maint", "add-evidence", item_id, ref, "--state-dir", st)[0] == 2, ref
 
-    # The proposal cites the source, never the notice, and the gate takes it.
+    # The proposal cites the source, never the notice, and the gate takes it. The page is at the
+    # source cap: the CLI's local verdict exempts it as the writer does, from the item's own origin.
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(len(set(re.findall(r"resource: (/sources/\S+)",
+                                                                       gate.read(AIO_AB))))))
     ws = Path(begun["workspace"])
     (ws / AIO_AB).write_text(cite((ws / AIO_AB).read_text(encoding="utf-8"), "attention-fix",
                                   claim="The cited readout puts the lift at 3%."), encoding="utf-8")
