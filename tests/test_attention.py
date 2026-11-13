@@ -483,8 +483,17 @@ def test_the_source_cap_refuses_an_increment_and_lets_an_answer_through(gate, mo
                                              claim="The October readout puts the lift at 3%.")),
                        work_items=[answer["id"]])
     fix["evidence"] = {"id": "attention-fix", "item_files": [f"{answer['id']}/S2-readout.md"]}  # no notice, as the CLI
-    done = gate.post(fix, run="WAIO-2")
-    assert done.status_code == 201 and done.json()["status"] == "done", done.text
+    # The answer may touch the page its notice names, never another capped page beside it.
+    stray = gate.request(gate.put(METRIC, cite(gate.read(METRIC), "attention-fix")), work_items=[answer["id"]])
+    stray["evidence"] = fix["evidence"]
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", "1")
+    refused = gate.post(stray, run="WAIO-2", dry_run=True)
+    assert [error["code"] for error in refused.json()["errors"]] == ["too_many_sources"], refused.text
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
+    for dry_run, status in ((True, 200), (False, 201)):  # the dry run reads the item's origin as the commit does
+        done = gate.post(fix, run="WAIO-2", dry_run=dry_run)
+        assert done.status_code == status, done.text
+    assert done.json()["status"] == "done", done.text
 
 
 def bundle_source_item(gate: Gate, rel: str, run: str = "WAIO-1") -> tuple[str, str]:
@@ -587,7 +596,7 @@ def loop(gate, tmp_path, monkeypatch):
     return {"gate": gate, "st": tmp_path / "st", "config": config}
 
 
-def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, capsys) -> None:
+def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, capsys, monkeypatch) -> None:
     gate, st = loop["gate"], loop["st"]
     unverify(gate, AIO_AB)
     gate.connect()  # back to the curator after the auditor's review
@@ -618,7 +627,10 @@ def test_begin_reports_attention_and_add_evidence_freezes_a_bundle_source(loop, 
                 "source:sources/_rejected/README.md.source", "source:sources/absent.md"):
         assert wiki(capsys, "maint", "add-evidence", item_id, ref, "--state-dir", st)[0] == 2, ref
 
-    # The proposal cites the source, never the notice, and the gate takes it.
+    # The proposal cites the source, never the notice, and the gate takes it. The page is at the
+    # source cap: the CLI's local verdict exempts it as the writer does, from the item's own origin.
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(len(set(re.findall(r"resource: (/sources/\S+)",
+                                                                       gate.read(AIO_AB))))))
     ws = Path(begun["workspace"])
     (ws / AIO_AB).write_text(cite((ws / AIO_AB).read_text(encoding="utf-8"), "attention-fix",
                                   claim="The cited readout puts the lift at 3%."), encoding="utf-8")

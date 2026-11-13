@@ -1342,7 +1342,7 @@ describe that day.
   `AIWIKI_CONCEPT_BODY_CHARS`; since 0.3.26 such a page gets the split even when it was due for one of
   the reasons above, whose facts its `notice.md` then quotes under `also due`. Since 0.3.28 an increment may not add a
   source to a concept citing `AIWIKI_CONCEPT_SOURCES` (8) or more (`too_many_sources`): it writes a dated
-  concept that links the page; an attention item's answer is exempt. An item holds only
+  concept that links the page; the page an attention item's notice names is exempt. An item holds only
   `notice.md` (facts, never evidence; the writer refuses a changeset citing nothing else) and its
   `brief` says what to do; the maintainer skill §3.2 has the rules. Freshness now defaults to
   stale 90 days after `generated.at` for a concept with no `stale_after` (it reads `unspecified`

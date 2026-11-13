@@ -933,16 +933,16 @@ def _scope(path: Path, actor: str, **backlog) -> dict | None:
     return {entry["path"]: entry for entry in found["concepts"]}
 
 
-def _item_kinds(path: Path, request: dict) -> list[str]:
-    """The ``origin.kind`` of each work item a curate changeset names (an unknown item: none; G3b
-    refuses it on a commit). The gate exempts an answer to an attention item from the source cap."""
-    kinds = []
+def _answers(path: Path, request: dict) -> list[str]:
+    """The concept paths the changeset's attention items name (an unknown item: none; G3b refuses
+    it on a commit). The gate exempts those pages from the source cap."""
+    items = []
     for item_id in request.get("work_items") or []:
         try:
-            kinds.append(str((M.get_item(path, item_id).get("origin") or {}).get("kind") or ""))
+            items.append(M.get_item(path, item_id))
         except M.MaintError:
             continue
-    return kinds
+    return changeset.answered_paths(items)
 
 
 def _dry_run(path: Path, request: dict, actor: str, evidence: list[changeset.EvidenceFile]) -> JSONResponse:
@@ -961,7 +961,7 @@ def _dry_run(path: Path, request: dict, actor: str, evidence: list[changeset.Evi
                                                    scope=_scope(path, actor, tree=tree, revision=revision))
         else:
             result = changeset.evaluate(tree, request, actor=actor, now=now, evidence_files=evidence,
-                                        item_kinds=_item_kinds(path, request))
+                                        answers=_answers(path, request))
         diffs = {}
         for rel, after in (result.pop("files", None) or {}).items():
             before = (tree / rel).read_text(encoding="utf-8") if (tree / rel).is_file() else ""

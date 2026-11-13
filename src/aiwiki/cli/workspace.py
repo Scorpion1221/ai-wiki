@@ -239,25 +239,28 @@ def _cited(files: list[dict]) -> list[str]:
     return sorted(ids)
 
 
-class _Evidence(list):
-    """The frozen files a changeset cites, plus the origin kinds of its work items as far as
-    this client can tell (``attention`` when an item carries a notice): the writer reads the
-    items' own origin, and the local verdict must not differ from its."""
+class Evidence(list):
+    """The frozen files a changeset cites. ``answers`` lists the concept paths its attention
+    items name (``changeset.answered_paths`` of the items as the writer serves them), so the
+    local gate exempts from the source cap exactly the pages the writer will."""
 
-    def __init__(self, *args) -> None:
-        super().__init__(*args)
-        self.item_kinds: list[str] = []
+    def __init__(self, files=(), answers=()) -> None:
+        super().__init__(files)
+        self.answers: list[str] = list(answers)
 
 
-def _item_evidence(root: Path, bundle: str, item_id: str) -> tuple[list[changeset.EvidenceFile], str | None]:
+def _item_evidence(root: Path, bundle: str, item_id: str, *,
+                   item_out: dict | None = None) -> tuple[list[changeset.EvidenceFile], str | None]:
     """The work item's frozen files, fetched once into ``.ai-wiki/items/<id>/`` and checked by
-    sha, and the run that claimed it."""
+    sha, and the run that claimed it. ``item_out`` receives the item as the writer serves it."""
     if not changeset._WORK_ITEM.fullmatch(item_id):
         raise WorkspaceError(f"{item_id!r} is not a work item id (it_<id>)")
     status, _headers, body = cli._http("GET", f"/maint/items/{item_id}", bundle=bundle)
     if status != 200:
         raise _failed(f"GET /maint/items/{item_id}", status, body)
     item, files = _json(body), []
+    if item_out is not None:
+        item_out.update(item)
     for entry in item.get("files") or []:
         name, sha = entry.get("name"), entry.get("sha256")
         if not isinstance(name, str) or not changeset._ITEM_FILE.fullmatch(f"{item_id}/{name}"):
@@ -276,11 +279,8 @@ def _item_evidence(root: Path, bundle: str, item_id: str) -> tuple[list[changese
 
 def build(root: Path, state: dict, *, item: str | list[str] | None = None, upload: Path | None = None,
           source_id: str | None = None, deprecate=(), allow_shrink=(), allow_retype=(), allow_grow=(),
-          close: bool = True, run: str | None = None) -> tuple[dict, list[changeset.EvidenceFile]]:
+          close: bool = True, run: str | None = None) -> tuple[dict, Evidence]:
     """The changeset of the workspace's local changes and the frozen evidence it names.
-
-    The evidence list also says what kind of items these are (``item_kinds``): an item with an
-    attention notice answers that notice, which the local gate must know as the writer does.
 
     Without ``item`` or ``upload`` a placeholder packet stands in: good for judging the
     concepts locally, never sent. An item's changeset runs under the run that claimed it
@@ -313,13 +313,13 @@ def build(root: Path, state: dict, *, item: str | list[str] | None = None, uploa
         source_id = cited[0] if cited else (items[0] if len(items) == 1 else "local-check")
     request: dict = {"schema": changeset.SCHEMA, "kind": "curate", "intent": "evidence",
                      "base_revision": state["base_revision"]}
-    evidence: list[changeset.EvidenceFile] = _Evidence()
+    evidence = Evidence()
     if items:
         claimed = None
         for item_id in items:
-            frozen, holder = _item_evidence(root, state["bundle"], item_id)
-            if any(file.origin.get("kind") == changeset.NOTICE_KIND for file in frozen):
-                evidence.item_kinds.append(changeset.NOTICE_KIND)
+            served: dict = {}
+            frozen, holder = _item_evidence(root, state["bundle"], item_id, item_out=served)
+            evidence.answers += changeset.answered_paths([served])  # the item's own origin, as the writer reads it
             # An attention notice or a triage record is no evidence (the gate refuses it): cite the
             # files beside it. One alone stays in, so the gate's answer tells the maintainer to add evidence.
             evidence += [file for file in frozen if file.origin.get("kind") not in changeset.NON_EVIDENCE] or frozen
@@ -345,13 +345,13 @@ def build(root: Path, state: dict, *, item: str | list[str] | None = None, uploa
     return request, evidence
 
 
-def judge(root: Path, state: dict, request: dict, evidence) -> dict:
+def judge(root: Path, state: dict, request: dict, evidence: Evidence) -> dict:
     """The gate's verdict on ``request`` against the pulled base: G1, G6 and G8–G12, locally."""
     if not state["actor"]:  # the writer answers 403: it has no generated.by to stamp
         raise WorkspaceError("this token has no actor to stamp as generated.by, so the writer refuses its "
                              "changesets; use a process: or human: token", PREFLIGHT)
     return changeset.evaluate(root / META / "base", request, actor=state["actor"], now=datetime.now(UTC),
-                              evidence_files=evidence, item_kinds=getattr(evidence, "item_kinds", ()))
+                              evidence_files=evidence, answers=evidence.answers)
 
 
 def verdict_code(result: dict) -> int:
@@ -466,7 +466,8 @@ def _revert(root: Path, files: list[dict]) -> list[str]:
     return reverted
 
 
-def propose(root: Path, request: dict, evidence, *, dry_run: bool = False, wait: float = 1800) -> tuple[int, dict]:
+def propose(root: Path, request: dict, evidence: Evidence, *, dry_run: bool = False,
+            wait: float = 1800) -> tuple[int, dict]:
     """Judge locally, send, and on success pull the committed result into the workspace.
 
     ``submit`` resends the same bytes while no answer settles the changeset (design §2.7). A

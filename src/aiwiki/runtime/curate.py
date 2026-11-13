@@ -1862,7 +1862,7 @@ def _changeset_produce(
     *,
     actor: str,
     evidence_files: Sequence[changeset.EvidenceFile],
-    item_kinds: Sequence[str] = (),
+    answers: Sequence[str] = (),
     job_id: str,
     bases: list[tuple[str, str | None]],
     on_done: Callable[[dict], None] | None = None,
@@ -1884,7 +1884,7 @@ def _changeset_produce(
         tx.rollback()
         return
     verdict = changeset.evaluate(tx.bundle, request, actor=actor, now=tx.trusted_now, evidence_files=evidence_files,
-                                 item_kinds=item_kinds)
+                                 answers=answers)
     _record_verdict(job, verdict)
     if verdict["status"] == "rejected":
         job.update(status="rejected", http_status=verdict["http_status"])
@@ -1917,7 +1917,7 @@ def run_changeset(
     *,
     actor: str,
     evidence_files: Sequence[changeset.EvidenceFile] = (),
-    item_kinds: Sequence[str] = (),
+    answers: Sequence[str] = (),
     on_done: Callable[[dict], None] | None = None,
 ) -> None:
     """Commit one curate changeset through the writer transaction (design §2.5 G5–G14).
@@ -1941,7 +1941,7 @@ def run_changeset(
         # G1 rejects before anything is written; evaluate() words the rejection.
         verdict = changeset.evaluate(
             bundle, request, actor=actor, now=datetime.now(UTC), evidence_files=evidence_files,
-            item_kinds=item_kinds,
+            answers=answers,
         )
         _record_verdict(job, verdict)
         job.update(status="rejected", http_status=verdict["http_status"], finished=_now())
@@ -1957,7 +1957,7 @@ def run_changeset(
     _transaction(
         bundle, source_rel, job_path,
         lambda tx: _changeset_produce(tx, request, actor=actor, evidence_files=evidence_files,
-                                      item_kinds=item_kinds, job_id=job_id,
+                                      answers=answers, job_id=job_id,
                                       bases=bases, on_done=on_done),
         actor=actor, strict=True,
     )

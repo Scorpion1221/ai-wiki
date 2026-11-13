@@ -136,7 +136,7 @@ def test_collect_excludes_maintenance_issues_and_agent_output(multica: Path, tmp
     assert file["origin"] == {"kind": "issue", "issue_id": "issue-610", "identifier": "WAIO-610",
                               "comments": ["c-member", "c-analyst"], "truncated": False, "redactions": 0}
     # The description is signed like a comment: who wrote it (an agent's draft is no member's word) and when.
-    assert f"## Description · agent {ANALYST} · 2026-09-10T00:00:00Z\n\ndescription 610" in text
+    assert f"## Description · created by agent {ANALYST} · 2026-09-10T00:00:00Z\n\ndescription 610" in text
     assert "- 2026-09-21T00:00:00Z in_review → done (member)" in text and "todo → in_progress" not in text
     assert "Decision: pin the release to master." in text and "结论：已按 master 发布。" in text
     assert "reply to c-member" in text
@@ -207,8 +207,8 @@ def test_collect_keeps_title_and_description_edits(multica: Path, tmp_path: Path
     description, title = result["candidates"]
     assert description["brief"] == "WAIO-701 [in_review] title 701; 0 comments (0 by members); edited description"
     text = description["files"][0]["data"].decode()
-    # No creator on this issue: the title carries the time alone; the edit's actor is under Edits.
-    assert f"## Description · 2026-09-01T00:00:00Z\n\n{rewritten}" in text
+    # The text as it stands is the editor's, not the creator's: signed with the latest edit.
+    assert f"## Description · edited by member · 2026-09-20T01:00:00Z\n\n{rewritten}" in text
     assert "## Edits\n\n- 2026-09-20T01:00:00Z description_updated (member)\n" in text
     assert "title_changed" not in text, "the edit before the cursor is out of the window"
     assert title["brief"].endswith("; edited title")
@@ -235,6 +235,29 @@ def test_collect_redacts_secrets_before_freezing(multica: Path, tmp_path: Path) 
         assert secret not in text and secret not in planner.plan([candidate])[0]["brief"]
     assert file["origin"]["redactions"] == 3  # title, description, and the URL credential in the comment
     assert "Refresh token:\nrotate every 30 days" in text
+
+
+def test_the_description_is_signed_by_whoever_wrote_it_last() -> None:
+    """2026-11-13: 10 of 40 recent issues had their description edited. A member's issue an agent
+    rewrote is the agent's text; an unsigned or creator-signed Description read as the member's."""
+    row = issue(900, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z", creator_type="member", creator_id=MEMBER)
+    sign = collect_issues.description_author
+    assert sign(row, []) == f"created by member {MEMBER} · 2026-09-01T00:00:00Z"
+    by_agent = {**edit("2026-09-05T00:00:00Z", "description_updated"), "actor_type": "agent", "actor_id": ANALYST}
+    later = {**edit("2026-09-25T00:00:00Z", "description_updated"), "actor_type": "member", "actor_id": MEMBER}
+    events = [edit("2026-09-03T00:00:00Z", "description_updated"), by_agent,
+              edit("2026-09-06T00:00:00Z", "title_changed", **{"from": "a", "to": "b"}), later]
+    # The latest description edit wins, whatever the order and even before the collected window ...
+    assert sign(row, list(reversed(events[:3]))) == f"edited by agent {ANALYST} · 2026-09-05T00:00:00Z"
+    # ... and one after the window's end is not this evidence's text yet.
+    until = collect_issues.parse_time("2026-09-22T00:00:00Z")
+    assert sign(row, events, until) == f"edited by agent {ANALYST} · 2026-09-05T00:00:00Z"
+    assert sign(row, events) == f"edited by member {MEMBER} · 2026-09-25T00:00:00Z"
+    assert sign({"description": "x"}, []) == ""  # an old row with neither: the title stays bare
+    blocks = collect_issues.evidence_blocks(row, "WAIO-900", "2026-09-01T00:00:00Z", [], [], [], sign(row, [by_agent]))
+    assert f"\n## Description · edited by agent {ANALYST} · 2026-09-05T00:00:00Z\n\ndescription 900" in blocks[0][0]
+    assert "\n## Description\n\ndescription 900" in collect_issues.evidence_blocks(
+        row, "WAIO-900", "2026-09-01T00:00:00Z", [], [], [])[0][0]
 
 
 def test_collect_packs_redacted_text_so_a_longer_marker_never_clips(multica: Path, tmp_path: Path) -> None:

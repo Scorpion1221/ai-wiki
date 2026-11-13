@@ -80,7 +80,8 @@ _LIMITS = {
     # member item): the reading gets a dated concept of its own that links back. 2026-11-06..12, 719
     # increments went onto a concept that already cited 8 or more; 24% of those versions passed their
     # review, against 46% onto a concept citing 7 or fewer and 57% of new concepts. An answer to an
-    # attention item (a refusal, a split, a stale date) is exempt: it must change the page it names.
+    # attention item (a refusal, a split, a stale date) must change the page its notice names: that
+    # page alone is exempt, never the other files of the changeset.
     "concept_sources": ("AIWIKI_CONCEPT_SOURCES", 8),
 }
 # Error code -> HTTP status. The failure class follows from the status (see _failure).
@@ -568,6 +569,17 @@ def _label(part: Mapping) -> str:
     return f"{part['item']}/{part['file']}" if part.get("item") else str(part.get("file"))
 
 
+def answered_paths(items: Sequence[Mapping]) -> list[str]:
+    """The concept path each attention work item names: what its answer must change. A split's
+    child keeps its parent's origin, so it answers the same page."""
+    paths = []
+    for item in items:
+        origin = item.get("origin") if isinstance(item, Mapping) else None
+        if isinstance(origin, Mapping) and origin.get("kind") == NOTICE_KIND and isinstance(origin.get("path"), str):
+            paths.append(origin["path"])
+    return paths
+
+
 def build_packet(
     evidence: Mapping,
     evidence_files: Sequence[EvidenceFile] = (),
@@ -804,14 +816,14 @@ def evaluate(
     actor: str,
     now: datetime,
     evidence_files: Sequence[EvidenceFile] = (),
-    item_kinds: Sequence[str] = (),
+    answers: Sequence[str] = (),
 ) -> dict:
     """Judge one curate changeset against ``base_dir`` without changing it (G1, G6, G8–G12).
 
     ``actor`` is the token's actor stamped as ``generated.by``; ``now`` is the trusted
     service time. ``evidence_files`` carries the frozen bytes of ``evidence.item_files``.
-    ``item_kinds`` is the ``origin.kind`` of each work item the changeset names: with an
-    ``attention`` item among them it answers a notice and is exempt from the source cap.
+    ``answers`` lists the concept paths the changeset's attention items name (``origin.path``
+    of each work item whose ``origin.kind`` is ``attention``): the source cap exempts those pages.
     The result's ``status`` is ``would_apply``, ``noop`` or ``rejected``; ``files`` holds
     the stamped bytes of every file the changeset writes and ``source`` the packet path.
     """
@@ -853,14 +865,14 @@ def evaluate(
     temporary, workspace = policy._isolated_agent_bundle(base)
     try:
         return _evaluate_in(workspace, files, request, packet, result, actor=actor, now=now, lim=lim,
-                            answers_notice=NOTICE_KIND in item_kinds)
+                            answers=frozenset(_nfc(path) for path in answers))
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _evaluate_in(
     workspace: Path, files: list[dict], request: Mapping, packet: Packet, result: dict, *, actor: str, now: datetime,
-    lim: dict[str, int], answers_notice: bool = False,
+    lim: dict[str, int], answers: frozenset[str] = frozenset(),
 ) -> dict:
     evidence_id = request["evidence"]["id"]
     allow = request.get("allow") or {}
@@ -1016,7 +1028,7 @@ def _evaluate_in(
             if len(body) > lim["body_chars"] and len(body) > len(head_body) and rel not in allowed["grow"]:
                 errors.append(_error("body_too_long", f"body grows to {len(body)} characters, past "
                                      f"{lim['body_chars']}" + (f" (was {len(head_body)})" if before else ""), rel))
-        if before is not None and not deprecate and not answers_notice and rel not in allowed["grow"]:
+        if before is not None and not deprecate and rel not in answers and rel not in allowed["grow"]:
             # An increment adds its packet to a concept that already cites the cap's worth of sources.
             cited = {_source_key(source) for source in head_sources}
             if len(cited) >= lim["concept_sources"] and packet_resource not in cited:

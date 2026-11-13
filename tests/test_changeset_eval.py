@@ -602,18 +602,37 @@ def test_a_concept_citing_the_cap_of_sources_takes_no_new_reading(bundle: Path, 
     # A fix that must stay on the page: the same allowance as a page past the size cap.
     allowed = _request(_put(bundle, AI_STUDY, appended), allow={"grow": [{"path": AI_STUDY, "reason": "a fix"}]})
     assert _evaluate(bundle, allowed)["status"] == "would_apply"
-    # An answer to an attention item (a refusal, a split, a stale date) changes the page it names.
-    assert _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), item_kinds=["attention"])[
+    # An answer to an attention item (a refusal, a split, a stale date) changes the page its notice
+    # names: that page is exempt, and only that page.
+    assert _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), answers=[AI_STUDY])[
         "status"] == "would_apply"
-    assert _codes(_evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), item_kinds=["issue", "repo"])) == [
-        "too_many_sources"]
-    # The dated concept the hint asks for is a new file: the cap never refuses it.
+    assert _codes(_evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), answers=[AIO_AB])) == [
+        "too_many_sources"], "an answer about another page is an increment here"
+    # A batch of an attention item and an increment: the increment's page is still capped.
+    other = _read(bundle, AIO_AB)
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", "1")
+    batch = _request(_put(bundle, AI_STUDY, appended), _put(bundle, AIO_AB, _cite(other)))
+    refused = _evaluate(bundle, batch, answers=[AI_STUDY])
+    assert [(error["code"], error["path"]) for error in refused["errors"]] == [("too_many_sources", AIO_AB)]
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
+    # The dated concept the hint asks for goes through with the capped page left as it is.
     assert _new(bundle, _new_concept())["status"] == "would_apply"
     # A deprecation cites the packet too, and retiring a page is never an increment.
     retire = {"path": AI_STUDY, "op": "deprecate", "base": changeset.content_hash(head),
               "superseded_by": "risks/new.md", "reason": "superseded by the dated reading"}
     result = _evaluate(bundle, _request(_put(bundle, "risks/new.md", _new_concept(), base=None), retire))
     assert "too_many_sources" not in _codes(result), result["errors"]
+
+
+def test_the_pages_an_answer_may_change_come_from_the_items_origin() -> None:
+    """The writer and the CLI both read the item's own origin, never its files: the CLI leaves the
+    notice out of evidence.item_files, and a split's child of an attention item has no notice at all."""
+    attention = {"origin": {"kind": "attention", "path": AI_STUDY, "reason": "audit_unverified"}}
+    child = {"origin": {"kind": "attention", "path": AIO_AB, "reason": "oversized"}, "files": []}
+    others = [{"origin": {"kind": "issue", "identifier": "WAIO-1"}}, {"origin": {"kind": "repo", "path": "tasks/x"}},
+              {"origin": {"kind": "attention"}}, {"origin": None}, {}, "it_x"]
+    assert changeset.answered_paths([attention, *others, child]) == [AI_STUDY, AIO_AB]
+    assert changeset.answered_paths([]) == []
 
 
 def test_a_body_past_the_size_cap_never_grows(bundle: Path, monkeypatch) -> None:
