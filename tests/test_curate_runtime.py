@@ -1847,7 +1847,7 @@ def test_validation_pass_refreshes_visualization_before_commit(tmp_path: Path, m
     assert job["changed_files"] == ["concepts/new.md", "viz.html"]
 
 
-def test_refresh_visualization_is_opt_in_and_preserves_display_name(tmp_path: Path) -> None:
+def test_refresh_visualization_is_opt_in_hourly_and_preserves_display_name(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "repo"
     bundle = root / "knowledge"
     bundle.mkdir(parents=True)
@@ -1890,6 +1890,17 @@ sources: [{id: fixture, resource: https://example.com/source}]
         encoding="utf-8",
     )
 
+    # Committed seconds ago: within the hour the commit leaves the graph as it is.
+    drawn = (root / "viz.html").read_text(encoding="utf-8")
+    assert curate._refresh_visualization(root, bundle) is None
+    assert (root / "viz.html").read_text(encoding="utf-8") == drawn and '"label": "Second"' not in drawn
+    committed = int(subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%ct", "--", "viz.html"],
+                                   capture_output=True, text=True, check=True).stdout)
+    at = lambda seconds: datetime.fromtimestamp(committed + seconds, UTC)  # noqa: E731
+    assert not curate._viz_due(root, at(3599)) and curate._viz_due(root, at(3600))
+    assert curate._viz_due(root, at(-5)), "a commit stamped ahead of this clock must not freeze the graph"
+
+    monkeypatch.setenv("AIWIKI_VIZ_MIN_INTERVAL_S", "0")  # as before: every commit
     result = curate._refresh_visualization(root, bundle)
     html = (root / "viz.html").read_text(encoding="utf-8")
 
@@ -1897,6 +1908,8 @@ sources: [{id: fixture, resource: https://example.com/source}]
     assert result["path"] == "viz.html"
     assert 'window.BUNDLE_NAME = "Custom Wiki Name";' in html
     assert '"label": "Second"' in html
+    monkeypatch.setenv("AIWIKI_VIZ_MIN_INTERVAL_S", "soon")  # unreadable: the default hour
+    assert not curate._viz_due(root, at(10))
 
 
 def test_failed_inbox_source_is_excluded_from_later_commit(tmp_path: Path) -> None:
