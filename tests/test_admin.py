@@ -78,6 +78,8 @@ def test_a_revert_is_a_deterministic_commit_back_to_the_tree_before_the_changese
     head = gate.head()
     changeset = commit(gate, gate.put(PROBE, concept("Probe")), gate.put(METRIC, cited(gate.read(METRIC))))
     assert outside_ledger(gate, head, changeset["commit"])  # a new concept, a packet, indexes
+    node = '"id": "metrics/probe"'  # the graph was drawn with the new concept, seconds ago
+    assert node in git(gate.writer, "show", "HEAD:viz.html")
 
     response = revert(gate, {"changeset": changeset["id"], "reason": "curator token leaked"}, run="INC-7")
 
@@ -92,6 +94,9 @@ def test_a_revert_is_a_deterministic_commit_back_to_the_tree_before_the_changese
     # indexes and the source ledger. Only the append-only log and the visualization move on.
     assert outside_ledger(gate, head, job["commit"]) == ""
     assert not (gate.writer / PROBE).exists() and not (gate.writer / changeset["source_snapshot"]).exists()
+    # The graph embeds concept bodies, so a revert redraws it seconds after the last redraw too:
+    # what the revert takes out is not left readable in viz.html until the hour is up.
+    assert node not in git(gate.writer, "show", "HEAD:viz.html") and job["visualization"]["path"] == "viz.html"
     log = gate.read("log.md")
     assert log.index("**Revert**: Reverted changeset " + changeset["id"]) < log.index(
         f"Changeset {changeset['id']} curated")

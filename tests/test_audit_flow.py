@@ -565,6 +565,34 @@ def test_git_audit_preserves_concurrent_operational_state_for_every_agent_exit(
     ).stdout == ""
 
 
+def test_a_codex_audit_commit_redraws_the_graph_by_the_hourly_rule(tmp_path: Path, monkeypatch) -> None:
+    """The rollback path's audit commits like a changeset: a graph committed seconds ago is left out."""
+    bundle = _git_bundle(tmp_path)
+    (bundle / "viz.html").write_text("<html>generated</html>\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(bundle), "add", "viz.html"], check=True)
+    subprocess.run(["git", "-C", str(bundle), "commit", "-m", "graph"], check=True, capture_output=True)
+    job = I.new_audit_job(bundle, "ingest1", ["features/release.md"])
+    path = I.job_path(bundle, job["id"])
+
+    def agent(command, *args, **kwargs):
+        (bundle / "features" / "release.md").write_text(_concept(verified=True), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="reviewed", stderr="")
+
+    monkeypatch.delenv("AIWIKI_GIT", raising=False)
+    monkeypatch.setattr(curate, "_agent_process", agent)
+    monkeypatch.setattr(audit, "validate_bundle", lambda _bundle: [])
+    monkeypatch.setattr(
+        audit, "_deterministic_closeout",
+        lambda *_args: {"indexes": [], "log": "log.md", "missing_index_descriptions": []},
+    )
+    audit.run(bundle, "ingest1", path)
+
+    result = json.loads(path.read_text(encoding="utf-8"))
+    assert result["status"] == "done" and "features/release.md" in result["changed_files"], result
+    assert "viz.html" not in result["changed_files"] and "visualization" not in result
+    assert (bundle / "viz.html").read_text(encoding="utf-8") == "<html>generated</html>\n"
+
+
 def test_audit_timeout_restores_git_config_and_hook_before_any_git_command(
     tmp_path: Path, monkeypatch,
 ) -> None:

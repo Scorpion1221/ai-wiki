@@ -291,6 +291,21 @@ def test_a_verified_review_is_stamped_by_the_service_and_leaves_the_backlog(gate
     assert git(gate.writer, "status", "--porcelain") == ""
 
 
+def test_an_audit_commit_redraws_the_graph_by_the_hourly_rule(gate) -> None:
+    """Only a revert forces the redraw. An audit commits a stamp on each concept it reviews, hundreds
+    a day: forced, it would put the graph back into every one of those commits."""
+    lease(gate)
+    first = submit(gate, review(gate, AIO_AB)).json()
+    assert first["status"] == "done" and "viz.html" in first["changed_files"]  # the fixture's graph is months old
+    push(gate, AIO_AB, gate.read(AIO_AB).replace("Redacted fixture body.", "Redacted fixture body, edited."))
+
+    second = submit(gate, review(gate, AIO_AB)).json()
+
+    assert second["status"] == "done" and AIO_AB in second["changed_files"], second
+    assert "viz.html" not in second["changed_files"] and "visualization" not in second
+    assert git(gate.writer, "status", "--porcelain") == ""
+
+
 def test_a1_only_the_audit_scope_reviews(gate) -> None:
     head = gate.head()
     denied = submit(gate, review(gate, AIO_AB), token="curator")
