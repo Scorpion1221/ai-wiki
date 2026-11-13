@@ -1337,7 +1337,9 @@ describe that day.
 
 - **The graph (`viz.html`).** A bundle that tracks `viz.html` has it redrawn before a commit at most once per
   `AIWIKI_VIZ_MIN_INTERVAL_S` (3600; 0 redraws on every commit, as before 0.3.29), by the age of its last
-  commit. It is for people to open: no agent reads it and the workspace archive leaves it out. Redrawn on
+  commit. An admin revert redraws it whatever its age, because the graph embeds the bodies the revert takes
+  out; a shallow clone, which cannot date a single file, redraws on every commit. It is for people to open:
+  no agent reads it and the workspace archive leaves it out. Redrawn on
   every commit it was 15.6 MB rewritten 459 times in 24 h (2026-11-13), 17,262 versions in a 473 MB `.git`.
   The versions already in history stay until the repository is repacked or its history rewritten.
 - **Attention items.** Each maintainer run start (`maint begin`) queues at most 40 new (20 before 0.3.27)

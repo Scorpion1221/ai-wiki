@@ -75,8 +75,9 @@ and changed files. On a rejected push it rebases onto the moved remote and
 retries only when Git can rebase cleanly; a real conflict or final push failure marks the
 job failed, rolls back, and restores the inbox source for a retry from latest remote state.
 No second LLM pass mutates already-validated content. If the bundle repository already tracks a root
-`viz.html`, successful curation refreshes that snapshot before the same commit; repositories
-without one remain unchanged. The mirror pulls the result.
+`viz.html`, a commit redraws that snapshot when its last commit is older than
+`AIWIKI_VIZ_MIN_INTERVAL_S` (3600 seconds; 0 redraws on every commit) and leaves it out otherwise;
+a revert always redraws it. Repositories without one remain unchanged. The mirror pulls the result.
 
 The service—not Codex—writes the byte-identical immutable `sources/` snapshot. Curation
 runs in a disposable copy that contains no `.git`, `.okf`, or `sources/inbox`; only concept

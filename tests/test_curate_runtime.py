@@ -1873,7 +1873,10 @@ sources: [{id: fixture, resource: https://example.com/source}]
     assert curate._refresh_visualization(root, bundle) is None
     curate.generate_visualization(bundle, root / "viz.html", bundle_name="Custom Wiki Name")
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(root), "commit", "-m", "initial"], check=True, capture_output=True)
+    assert curate._viz_due(root), "tracked but never committed: there is no age to wait on"
+    # Authored a day before it was committed: the age is the commit's (a rebase keeps the author date).
+    authored = {**os.environ, "GIT_AUTHOR_DATE": f"@{int(datetime.now(UTC).timestamp()) - 86400} +0000"}
+    subprocess.run(["git", "-C", str(root), "commit", "-m", "initial"], check=True, capture_output=True, env=authored)
     (bundle / "second.md").write_text(
         """---
 type: Feature
@@ -1899,6 +1902,19 @@ sources: [{id: fixture, resource: https://example.com/source}]
     at = lambda seconds: datetime.fromtimestamp(committed + seconds, UTC)  # noqa: E731
     assert not curate._viz_due(root, at(3599)) and curate._viz_due(root, at(3600))
     assert curate._viz_due(root, at(-5)), "a commit stamped ahead of this clock must not freeze the graph"
+    # The age is the graph's own last commit, never HEAD's: a later commit that leaves viz.html alone
+    # (every changeset inside the hour) must not make it young again, or steady traffic never redraws.
+    later = {**os.environ, "GIT_AUTHOR_DATE": f"@{committed + 7200} +0000",
+             "GIT_COMMITTER_DATE": f"@{committed + 7200} +0000"}
+    subprocess.run(["git", "-C", str(root), "add", "-A", "--", "knowledge"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "a concept, no graph"], check=True, env=later)
+    assert int(subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%ct"], capture_output=True,
+                              text=True, check=True).stdout) == committed + 7200
+    assert not curate._viz_due(root, at(3599)) and curate._viz_due(root, at(3600))
+    # A shallow clone has only its tip, which stands in for every path: it cannot tell, so it draws.
+    shallow = tmp_path / "shallow"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{root}", str(shallow)], check=True)
+    assert curate._viz_due(shallow, at(7200 + 10)), "ten seconds after the tip, a full clone would wait"
 
     monkeypatch.setenv("AIWIKI_VIZ_MIN_INTERVAL_S", "0")  # as before: every commit
     result = curate._refresh_visualization(root, bundle)

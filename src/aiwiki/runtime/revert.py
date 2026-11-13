@@ -8,7 +8,8 @@ its content hash, so an audit's stamp on the changeset's content does not block 
 a file changed since then stops the revert there; the newer ones are still reverted.
 Service-owned files (indexes, log.md, the source hash ledger, viz.html) are rebuilt by the
 closeout instead, and log.md gains a Revert entry, so the append-only ledger keeps its
-history. The result may add no high lint finding, and no validation error outside the
+history. The graph is redrawn on every revert, not once an hour as on a changeset: it embeds
+the bodies the revert takes out. The result may add no high lint finding, and no validation error outside the
 restored files; the first changeset whose undo would add one stops the revert there too. It
 is committed with trailers and pushed under the writer lock, and a push-time rebase re-runs
 the compare-and-swap and that check on the merged tree (G14).
@@ -249,7 +250,8 @@ def _transaction(root: Path | None, bundle: Path, job: dict, job_path: Path) -> 
         job["phase"] = "rolled_back"
         return
     job["validation"] = {"status": "passed", "error_count": 0}
-    visualization = curate._refresh_visualization(root, bundle)
+    # Always redrawn, whatever the graph's age: it embeds the bodies this revert takes out.
+    visualization = curate._refresh_visualization(root, bundle, force=True)
     if visualization is not None:
         job["visualization"] = visualization
     job["phase"] = "before_commit"
