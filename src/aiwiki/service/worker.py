@@ -552,6 +552,7 @@ def _run_queued(bundle: Path, job_path: Path, job: dict, admitted: tuple[str, st
         audit.run_changeset(bundle, job_path, request, actor=actor, auditors=auditors())
         return
     curate.run_changeset(bundle, job_path, request, actor=actor, evidence_files=evidence,
+                         answers=changeset.answered_paths(items),
                          on_done=lambda done: _closeout(bundle, done))
 
 

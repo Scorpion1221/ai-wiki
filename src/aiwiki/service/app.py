@@ -933,6 +933,18 @@ def _scope(path: Path, actor: str, **backlog) -> dict | None:
     return {entry["path"]: entry for entry in found["concepts"]}
 
 
+def _answers(path: Path, request: dict) -> list[str]:
+    """The concept paths the changeset's attention items name (an unknown item: none; G3b refuses
+    it on a commit). The gate exempts those pages from the source cap."""
+    items = []
+    for item_id in request.get("work_items") or []:
+        try:
+            items.append(M.get_item(path, item_id))
+        except M.MaintError:
+            continue
+    return changeset.answered_paths(items)
+
+
 def _dry_run(path: Path, request: dict, actor: str, evidence: list[changeset.EvidenceFile]) -> JSONResponse:
     """Judge the request against the published revision in a scratch copy; write nothing."""
     root, revision, archive = _published(path)
@@ -948,7 +960,8 @@ def _dry_run(path: Path, request: dict, actor: str, evidence: list[changeset.Evi
             result = audit_runtime.evaluate_review(tree, request, actor=actor, now=now, auditors=_auditors(),
                                                    scope=_scope(path, actor, tree=tree, revision=revision))
         else:
-            result = changeset.evaluate(tree, request, actor=actor, now=now, evidence_files=evidence)
+            result = changeset.evaluate(tree, request, actor=actor, now=now, evidence_files=evidence,
+                                        answers=_answers(path, request))
         diffs = {}
         for rel, after in (result.pop("files", None) or {}).items():
             before = (tree / rel).read_text(encoding="utf-8") if (tree / rel).is_file() else ""

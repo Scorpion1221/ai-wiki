@@ -126,7 +126,9 @@ def issue_evidence(identifier: str, comment_id: str | None, *, autopilot: str | 
         if not kept:
             raise MulticaError(f"{identifier} has no comment {comment_id} a maintainer may cite")
     name = issue.get("identifier") or issue["id"]
-    text = "".join(block for block, _id in evidence_blocks(issue, name, str(issue.get("created_at")), kept, [], []))
+    written = description_author(issue, history(issue["id"], cache_dir))
+    text = "".join(block for block, _id in evidence_blocks(issue, name, str(issue.get("created_at")), kept, [], [],
+                                                           written))
     origin = {"kind": "issue", "issue_id": issue["id"], "identifier": name,
               "comments": [comment.get("id") for comment in kept]}
     stem = re.sub(r"[^A-Za-z0-9._-]", "_", f"{name}-{comment_id}" if comment_id else name)[:100]
@@ -176,7 +178,8 @@ def issue_candidates(
         return after < parse_time(value, "created_at") <= until
 
     kept = kept_comments(Path(row["comments_file"]), in_window, agents, counts)
-    events = timeline(issue["id"], in_window, cache_dir)
+    past = history(issue["id"], cache_dir)
+    events = [event for event in past if in_window(event.get("created_at"))]
     changes = [event for event in events if event["action"] == "status_changed"]
     edits = [event for event in events if event["action"] in EDITS]
     if not (row["new"] or kept or events):
@@ -188,7 +191,8 @@ def issue_candidates(
     origin = {"kind": "issue", "issue_id": issue["id"], "identifier": identifier}
     # Redact before packing, so packing measures what is frozen and a longer marker never clips.
     blocks = [(*secrets.redact(text), comment_id) for text, comment_id
-              in evidence_blocks(issue, identifier, delta["cursor"]["updated_at"], kept, changes, edits)]
+              in evidence_blocks(issue, identifier, delta["cursor"]["updated_at"], kept, changes, edits,
+                                 description_author(issue, past))]
     groups = planner.pack(blocks, planner.FILE_TEXT_LIMIT, size=lambda block: planner.utf8_size(block[0]))
     stem = f"{identifier}-{stamp(after)}"
     files = [
@@ -248,15 +252,42 @@ def kept_comments(
     return kept
 
 
-def timeline(issue_id: str, in_window: Callable[[Any], bool], cache_dir: Path) -> list[dict[str, Any]]:
-    """In-window status changes and title or description edits, oldest first."""
+def history(issue_id: str, cache_dir: Path) -> list[dict[str, Any]]:
+    """Every status change and title or description edit of the issue the server still serves."""
     actions = ("status_changed", *EDITS)
     events = run_multica(["issue", "timeline", issue_id, "--action", ",".join(actions), "--output", "json"],
                          cache=cache_dir / "timelines" / f"{issue_id}.json")
     if not isinstance(events, list):
         raise MulticaError(f"unexpected `multica issue timeline` response for {issue_id}")
-    return [event for event in events if isinstance(event, dict)
-            and event.get("action") in actions and in_window(event.get("created_at"))]
+    return [event for event in events if isinstance(event, dict) and event.get("action") in actions]
+
+
+def timeline(issue_id: str, in_window: Callable[[Any], bool], cache_dir: Path) -> list[dict[str, Any]]:
+    """In-window status changes and title or description edits, oldest first."""
+    return [event for event in history(issue_id, cache_dir) if in_window(event.get("created_at"))]
+
+
+def description_author(issue: dict[str, Any], events: Iterable[dict[str, Any]]) -> str:
+    """Who wrote the description as it stands, and when: ``edited by <type> <id> · <time>`` for its
+    latest ``description_updated``, else ``created by <type> <id> · <time>``. An issue a member
+    opened and an agent rewrote is the agent's text: 10 of 40 recent issues had their description
+    edited (2026-11-13). Empty when the issue says neither.
+
+    Every edit counts, the ones past the window's end too: the text frozen is the listing's current
+    description, and the timeline is read after the listing, so an edit made inside the settle
+    margin wrote the very text this signs (the window bounds comments and the Edits list, not this).
+    """
+    edits = [event for event in events if event.get("action") == "description_updated" and event.get("created_at")]
+    if edits:
+        last = max(edits, key=lambda event: parse_time(event["created_at"], "created_at"))
+        who, verb, when = (last.get("actor_type"), last.get("actor_id")), "edited", last["created_at"]
+    else:
+        who, verb, when = (issue.get("creator_type"), issue.get("creator_id")), "created", issue.get("created_at")
+    by = " ".join(str(part) for part in who if part)
+    if not (by or when):
+        return ""
+    # An edit with no actor on record still says it was edited: never a bare time that reads as the creation.
+    return " · ".join(part for part in (f"{verb} by {by}" if by else verb, str(when or "")) if part)
 
 
 def stamp(moment: datetime) -> str:
@@ -272,14 +303,17 @@ def transition(event: dict[str, Any]) -> tuple[Any, Any]:
 
 def evidence_blocks(
     issue: dict[str, Any], identifier: str, since: str, kept: list[dict[str, Any]], changes: list[dict[str, Any]],
-    edits: list[dict[str, Any]],
+    edits: list[dict[str, Any]], written: str = "",
 ) -> list[tuple[str, str | None]]:
     """(text, comment id) blocks: the issue header, then one block per kept comment."""
     header = [f"# {identifier} · {issue.get('title') or ''}", "", f"- issue: {issue['id']}",
               f"- status: {issue.get('status')}", f"- created_at: {issue.get('created_at')}",
               f"- activity since: {since}"]
     if issue.get("description"):
-        header += ["", "## Description", "", issue["description"]]
+        # Signed as each comment's title is (``written``: description_author): the description is
+        # often an agent's draft, and an unsigned one read as fact (the auditor refuses a claim that
+        # only "an unsigned Description" holds).
+        header += ["", f"## Description · {written}" if written else "## Description", "", issue["description"]]
     if changes:
         header += ["", "## Status changes", ""]
         header += [f"- {event['created_at']} {transition(event)[0]} → {transition(event)[1]} "
