@@ -86,8 +86,16 @@ def _profile_document(root: Path, path: Path) -> tuple[dict, str, str] | None:
         return None
     try:
         text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return _profile_text(text)
+
+
+def _profile_text(text: str) -> tuple[dict, str, str] | None:
+    """``_profile_document`` for a concept's text already read."""
+    try:
         frontmatter, body = parse(text)
-    except (OSError, UnicodeError, OKFDocumentError):
+    except OKFDocumentError:
         return None
     if validate_profile_document(frontmatter, body):
         return None
@@ -120,6 +128,54 @@ _generation = 0  # bumped by drop_snapshots: a scan begun before that is never k
 # every 1-10 ms; HFS+ and ext3 keep whole seconds and FAT two, so a whole-second ctime waits those out.
 _RACY_NS = 100_000_000
 _COARSE_TICK_NS = 2_000_000_000
+
+
+# The read mirror's reads answer from the snapshot its warmer last prepared (``warm``), so a request
+# right after a pull never waits for the next snapshot's scan, indexes or chunk vectors: on 0.3.27 a
+# search waited 4.8-8.3 s for ~20 s after each production pull while the warmer built them
+# (2026-11-13). The view is bounded: a change the warmer has not prepared within PREPARE_MAX_S, or a
+# warmer that has not looked for WARMER_STALE_S, sends reads back to preparing for themselves.
+PREPARE_MAX_S = 60.0
+WARMER_STALE_S = 30.0
+
+
+@dataclass(eq=False)
+class _Prepared:
+    """A snapshot the warmer handed to reads: settled, its search index, link graph and listing
+    built and, with embedding, its chunk index complete with its matrix (unless the builder gave
+    up on a failing endpoint, when the index may still lack chunks)."""
+    snapshot: _Snapshot
+    index: object | None  # the vector store's index of ``snapshot`` (vectors._Index), None without embedding
+    generation: int  # _generation when it was prepared: a writer mutation since retires it
+    checked_at: float  # time.monotonic() of the warmer's latest pass over the bundle
+    changed_at: float | None = None  # when a pass first found the files changed since ``snapshot``
+
+
+_prepared: dict[Path, _Prepared] = {}
+
+
+def _expired(view: _Prepared, now: float) -> bool:
+    """Whether reads may no longer use ``view``: no warmer pass within WARMER_STALE_S, or a change
+    the warmer found more than PREPARE_MAX_S ago and has not prepared."""
+    return now - view.checked_at > WARMER_STALE_S or (
+        view.changed_at is not None and now - view.changed_at > PREPARE_MAX_S)
+
+
+def _ready_view(root: Path) -> _Prepared | None:
+    """The warmer's prepared snapshot of ``root`` while reads may use it: no writer mutation since
+    (``drop_snapshots``) and not ``_expired``. Decided without touching the files: a stat walk of
+    the bundle (~1,100 calls, each giving up the GIL) costs a read 0.5-0.9 s while the warmer is
+    busy indexing a pull."""
+    view = _prepared.get(root)
+    if view is None or view.generation != _generation or _expired(view, time.monotonic()):
+        return None
+    return view
+
+
+def _read_snapshot(root: Path) -> _Snapshot:
+    """The snapshot a read answers from: the prepared one (``_ready_view``), else ``_snapshot``."""
+    view = _ready_view(root)
+    return view.snapshot if view is not None else _snapshot(root)
 
 
 def _settled(ctime_ns: int, now: int) -> bool:
@@ -238,11 +294,12 @@ def drop_snapshots() -> None:
     with _snapshot_guard:
         _generation += 1
         _snapshots.clear()
+        _prepared.clear()
 
 
 def _concept_records(root: Path):
     """Yield each valid v0.2 concept once with parsed and original content."""
-    yield from _snapshot(root).records
+    yield from _read_snapshot(root).records
 
 
 def is_bundle(p: Path) -> bool:
@@ -281,7 +338,7 @@ def discover(root: Path) -> dict[str, Path]:
 
 
 def count_concepts(root: Path) -> int:
-    return len(_snapshot(root).records)
+    return len(_read_snapshot(root).records)
 
 
 def scaffold(target: Path, name: str) -> None:
@@ -416,7 +473,7 @@ def health(root: Path) -> dict:
     freshness_counts: Counter = Counter()
     bases: Counter = Counter()  # declared stale_after, the 90-day default, or neither
     total = current = 0
-    snapshot = _snapshot(root)
+    snapshot = _read_snapshot(root)
     for _path, _rel, fm, _body, _text in snapshot.records:
         meta = concept_metadata(fm)
         total += 1
@@ -523,13 +580,17 @@ def _concept_entry(rel: str, fm: dict) -> dict:
     }
 
 
-def metadata_for_path(root: Path, path: Path) -> dict | None:
-    """Derived metadata for one valid concept, or ``None`` when it is not consumable."""
-    listing = _derived(_snapshot(root), _Listing)
+def metadata_for_path(root: Path, path: Path, text: str | None = None) -> dict | None:
+    """Derived metadata for one valid concept, or ``None`` when it is not consumable. ``text`` is
+    the file as the caller read it: when the snapshot read holds another version (a pull it has
+    not prepared yet), the metadata is that text's, so it always describes what the caller serves."""
+    listing = _derived(_read_snapshot(root), _Listing)
     if not listing.bundle_v02:
         return None
     rel = _candidate_rel(root, path)
     document = listing.document(path, rel) if rel is not None else None
+    if document is not None and text is not None and document[2] != text:
+        document = _profile_text(text)
     return concept_metadata(document[0]) if document is not None else None
 
 
@@ -606,7 +667,7 @@ def list_dir(root: Path, subdir: str | None = None, recursive: bool = False,
     if subdir and Path(subdir).is_absolute():
         raise ValueError("absolute paths are not bundle-relative")
     base = root if not subdir else safe_resolve(root, subdir)
-    listing = _derived(_snapshot(root), _Listing)
+    listing = _derived(_read_snapshot(root), _Listing)
     if base.is_file():
         return [_entry(root, base, listing)]
     if not base.is_dir():
@@ -806,11 +867,10 @@ def hybrid_search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[
     if vstore is None:
         rows, total = _lexical_search_page(root, query, top_k)
         return rows, total, None
-    snapshot = _snapshot(root)
+    snapshot, index = _vector_view(root, vstore)
     ranked = _lexical_ranking(root, query, snapshot)
-    index = vstore.ensure(snapshot, _embedding_inputs(snapshot))
     vector, why = vstore.rank(index, query) if query.strip() else ([], "empty query")
-    state = _vector_state(vstore.state())
+    state = _vector_state(vstore.state(index))
     if not vector:
         rows = _lexical_rows(ranked[:top_k], query)
         for row in rows:
@@ -841,28 +901,84 @@ def hybrid_search_page(root: Path, query: str, top_k: int | None = 10) -> tuple[
 
 
 def embedding_state(root: Path) -> dict | None:
-    """The semantic index's state for /health (None when embedding is not configured). It starts
-    the background build for the current snapshot, so a fresh mirror embeds before its first
-    search, but never waits for it."""
+    """The semantic index's state for /health (None when embedding is not configured): the prepared
+    snapshot's while the warmer serves one (``_vector_view``), else the current snapshot's, whose
+    background build it starts, so a fresh mirror embeds before its first search. Never waits."""
     vstore = _vectors.store(root)
     if vstore is None:
         return None
-    snapshot = _snapshot(root)
-    vstore.ensure(snapshot, _embedding_inputs(snapshot))
-    return vstore.state()
+    _snapshot_unused, index = _vector_view(root, vstore)
+    return vstore.state(index)
 
 
-def warm(root: Path) -> None:
-    """Prepare the current snapshot for reads before one asks: start embedding what it lacks, unless
-    the builder gave up on a failing endpoint (that is left to the next search); then build its search
-    index and link graph, which the first /search and /links after a pull would otherwise build
-    themselves (~2 s and ~1.3 s on the production bundle, 2026-11-06)."""
+def _vector_view(root: Path, vstore) -> tuple[_Snapshot, object]:
+    """The snapshot and chunk index a read uses: the prepared pair (``_ready_view``), never moving
+    the builder off the warmer's newer snapshot; else the current snapshot's index, which starts
+    its build. A builder that gave up on a failing endpoint is restarted by a read either way."""
+    view = _ready_view(root)
+    if view is not None and view.index is not None:
+        if view.index.pending:
+            vstore.retry()
+        return view.snapshot, view.index
     snapshot = _snapshot(root)
-    vstore = _vectors.store(root)
-    if vstore is not None:
-        vstore.ensure(snapshot, _embedding_inputs(snapshot), restart=False)
+    return snapshot, vstore.ensure(snapshot, _embedding_inputs(snapshot))
+
+
+def warm(root: Path) -> bool:
+    """Prepare the bundle's next snapshot before a read asks, then hand it to reads (``_ready_view``).
+
+    The service's warmer calls it every EMBED_WARM_S. A pass whose files match the prepared
+    snapshot costs one stat walk. Otherwise it scans them (``_snapshot``), builds the search index,
+    link graph and listing (~0.7, ~0.2 and ~0.01 s on this Mac for the production bundle,
+    2026-11-13) and starts embedding the changed chunks, unless the builder gave up on a failing
+    endpoint (that is left to the next search). It hands the new snapshot over only once it is
+    settled and, with embedding, its chunks are embedded and their matrix built, or the builder has
+    given up; until then reads keep the previous one. True when it left a pull to hand over later,
+    so the warmer looks again soon instead of a whole EMBED_WARM_S later."""
+    generation = _generation
+    now = time.monotonic()
+    view = _prepared.get(root)
+    if view is not None and view.generation == generation and _expired(view, now):
+        # Reads have already moved past it to newer files: a later pass must never hand it back.
+        with _snapshot_guard:
+            if _prepared.get(root) is view:
+                del _prepared[root]
+        view = None
+        _malloc.trim()  # its snapshot, indexes and matrix were freed with the last reference
+    if view is not None and view.generation == generation:
+        view.checked_at = now
+        if view.snapshot.fingerprint == _fingerprint(root):
+            view.changed_at = None
+            if view.index is not None and view.index.owners and not view.index.pending:
+                view.index.ready_matrix()  # a builder a search restarted has finished: build it here
+            return False
+        if view.changed_at is None:
+            view.changed_at = now
+    snapshot = _snapshot(root)
+    if not snapshot.settled:
+        return True  # a file changed within the racy window: the next pass scans it again
     _derived(snapshot, _SearchIndex)
     _derived(snapshot, _LinkGraph)
+    _derived(snapshot, _Listing)
+    vstore = _vectors.store(root)
+    index = None
+    if vstore is not None:
+        index = vstore.ensure(snapshot, _embedding_inputs(snapshot), restart=False)
+        if not index.pending:
+            if index.owners:
+                index.ready_matrix()
+        elif not vstore.gave_up:
+            return True  # the builder is embedding the pull: a later pass hands it over
+    with _snapshot_guard:
+        if generation != _generation:
+            return False  # a writer mutation overlapped this pass: its snapshot is never read
+        replaced = _prepared.get(root)
+        _prepared[root] = _Prepared(snapshot, index, generation, now)
+    freed = replaced is not None and replaced.snapshot is not snapshot
+    view = replaced = None  # the last references to the previous generation (its snapshot, indexes, matrix)
+    if freed:
+        _malloc.trim()  # once they are gone: the trims at its scan and matrix ran while reads still held it
+    return False
 
 
 def _embedding_inputs(snapshot: _Snapshot) -> list[tuple[str, str, str, str]]:
@@ -901,7 +1017,7 @@ def _lexical_ranking(root: Path, query: str, snapshot: _Snapshot | None = None) 
     terms = _tokens(query)
     if not terms:
         return []
-    index = _derived(snapshot or _snapshot(root), _SearchIndex)
+    index = _derived(snapshot or _read_snapshot(root), _SearchIndex)
     if not index.records:
         return []
 
@@ -1036,7 +1152,7 @@ def links(root: Path, rel: str) -> dict:
     target = safe_resolve(root, rel)  # ValueError (escape) handled by caller
     if not target.is_file():
         raise FileNotFoundError(rel)
-    graph = _derived(_snapshot(root), _LinkGraph)
+    graph = _derived(_read_snapshot(root), _LinkGraph)
     if rel not in graph.concepts:
         raise FileNotFoundError(rel)  # reserved/structural files have no link graph
 
