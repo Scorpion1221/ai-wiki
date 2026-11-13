@@ -6,7 +6,6 @@ from __future__ import annotations
 import threading
 import time
 
-import pytest
 from test_service_vectors import _builder_idle, _bundle
 
 from aiwiki.service import bundle as B
@@ -132,7 +131,6 @@ def test_a_pass_with_nothing_changed_keeps_the_prepared_snapshot(tmp_path, embed
 
 def test_a_change_the_warmer_does_not_prepare_in_time_is_read_as_before(tmp_path, embedder, monkeypatch) -> None:
     """PREPARE_MAX_S bounds how long reads keep the previous snapshot after the warmer found a change."""
-    monkeypatch.setattr(B, "PREPARE_MAX_S", 0.3)
     root = _bundle(tmp_path / "kb")
     _prepared(root, embedder)
     _pull(root)
@@ -140,7 +138,7 @@ def test_a_change_the_warmer_does_not_prepare_in_time_is_read_as_before(tmp_path
     try:
         B.warm(root)                                    # finds the change, cannot hand it over yet
         assert B.grep(root, "moonbeam") == []
-        time.sleep(0.35)
+        B._prepared[root].changed_at -= B.PREPARE_MAX_S + 1
         assert B.grep(root, "moonbeam")                 # past the bound: the read scans for itself
         _rows, _total, retrieval = B.hybrid_search_page(root, QUESTION, 5)
         assert retrieval["mode"] == "lexical" and "being built" in retrieval["reason"]  # as on 0.3.27
@@ -149,16 +147,60 @@ def test_a_change_the_warmer_does_not_prepare_in_time_is_read_as_before(tmp_path
     _builder_idle(root)
 
 
-def test_without_a_recent_warmer_pass_a_read_scans_as_before(tmp_path, embedder, monkeypatch) -> None:
+def test_without_a_recent_warmer_pass_a_read_scans_as_before(tmp_path, embedder) -> None:
     """A warmer that stopped looking (WARMER_STALE_S) never pins reads to an old snapshot."""
-    monkeypatch.setattr(B, "WARMER_STALE_S", 0.3)
     root = _bundle(tmp_path / "kb")
     _prepared(root, embedder)
     _pull(root)                                         # no warmer pass from here on
-    assert B.grep(root, "moonbeam") == []               # a pass 0.15 s ago: still the prepared snapshot
-    time.sleep(0.2)
+    assert B.grep(root, "moonbeam") == []               # a recent pass: still the prepared snapshot
+    B._prepared[root].checked_at -= B.WARMER_STALE_S + 1
     assert B.grep(root, "moonbeam")
     _builder_idle(root)
+
+
+def test_a_warmer_that_resumes_never_hands_reads_an_older_snapshot_again(tmp_path, embedder, monkeypatch) -> None:
+    """Review R1-1: once reads moved past an expired view to newer files, a resumed warmer must not
+    revive it while the pull is still being prepared; reads keep the newer files."""
+    root = _bundle(tmp_path / "kb")
+    before = _prepared(root, embedder)
+    _pull(root)
+    before.checked_at -= B.WARMER_STALE_S + 1           # the warmer stalled
+    assert B.grep(root, "moonbeam")                     # reads moved on to the pulled files
+    release = _hold_chunk_embedding(monkeypatch)
+    try:
+        assert B.warm(root) is True                     # resumes: the pull's chunks are still in flight
+        assert root not in B._prepared
+        assert B.grep(root, "moonbeam")                 # never back to the snapshot before the pull
+    finally:
+        release.set()
+    _builder_idle(root)
+    B.warm(root)
+    assert B._prepared[root].snapshot is B._snapshots[root] and B.grep(root, "moonbeam")
+
+
+def test_the_previous_generation_is_released_before_the_trim(tmp_path, embedder, monkeypatch) -> None:
+    """Review R1-2: the trim after a hand-over runs once nothing holds the previous snapshot."""
+    import gc
+    import weakref
+    from types import SimpleNamespace
+
+    root = _bundle(tmp_path / "kb")
+    old = weakref.ref(_prepared(root, embedder).snapshot)
+    alive_at_trim = []
+    monkeypatch.setattr(B, "_malloc", SimpleNamespace(trim=lambda: alive_at_trim.append(old() is not None)))
+    _pull(root)
+    _builder_idle(root)
+    gc.disable()                                        # freed by reference counts, as in production
+    try:
+        B.warm(root)                                    # scans, indexes and embeds the pull, then hands it over
+        end = time.monotonic() + 5
+        while B._prepared[root].snapshot is not B._snapshots[root]:
+            assert time.monotonic() < end
+            _builder_idle(root)
+            B.warm(root)
+    finally:
+        gc.enable()
+    assert alive_at_trim and alive_at_trim[-1] is False
 
 
 def test_a_writer_mutation_is_read_at_once(tmp_path, embedder) -> None:
@@ -191,6 +233,7 @@ def test_with_the_builder_given_up_the_pull_is_handed_over_and_a_search_retries(
     view = B._prepared[root]
     assert view.snapshot is B._snapshots[root] and view.index.pending
     assert B.grep(root, "moonbeam")
+    embedder.mode = "ok"                                # the endpoint is back; only a read restarts a gave-up builder
     asked = len(embedder.requests)
     _rows, _total, retrieval = B.hybrid_search_page(root, QUESTION, 5)
     assert retrieval["mode"] == "lexical" and "being built" in retrieval["reason"]
@@ -198,7 +241,6 @@ def test_with_the_builder_given_up_the_pull_is_handed_over_and_a_search_retries(
     while len(embedder.requests) == asked:              # the search restarted the builder
         assert time.monotonic() < end
         time.sleep(0.01)
-    embedder.mode = "ok"
     end = time.monotonic() + 5
     while view.index.pending:
         assert time.monotonic() < end
@@ -209,9 +251,7 @@ def test_with_the_builder_given_up_the_pull_is_handed_over_and_a_search_retries(
     assert B.hybrid_search_page(root, QUESTION, 5)[2]["mode"] == "hybrid"
 
 
-@pytest.mark.parametrize("endpoint", ["ok"])
-def test_the_service_warmer_hands_a_pull_over_before_a_read_sees_it(tmp_path, embedder, monkeypatch,
-                                                                    endpoint) -> None:
+def test_the_service_warmer_hands_a_pull_over_before_a_read_sees_it(tmp_path, embedder, monkeypatch) -> None:
     """End to end through the app: the warmer thread prepares a pull and the next /search reads it."""
     from test_smoke import AUTH, _client
 

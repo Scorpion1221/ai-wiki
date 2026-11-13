@@ -86,8 +86,16 @@ def _profile_document(root: Path, path: Path) -> tuple[dict, str, str] | None:
         return None
     try:
         text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return _profile_text(text)
+
+
+def _profile_text(text: str) -> tuple[dict, str, str] | None:
+    """``_profile_document`` for a concept's text already read."""
+    try:
         frontmatter, body = parse(text)
-    except (OSError, UnicodeError, OKFDocumentError):
+    except OKFDocumentError:
         return None
     if validate_profile_document(frontmatter, body):
         return None
@@ -146,18 +154,20 @@ class _Prepared:
 _prepared: dict[Path, _Prepared] = {}
 
 
+def _expired(view: _Prepared, now: float) -> bool:
+    """Whether reads may no longer use ``view``: no warmer pass within WARMER_STALE_S, or a change
+    the warmer found more than PREPARE_MAX_S ago and has not prepared."""
+    return now - view.checked_at > WARMER_STALE_S or (
+        view.changed_at is not None and now - view.changed_at > PREPARE_MAX_S)
+
+
 def _ready_view(root: Path) -> _Prepared | None:
     """The warmer's prepared snapshot of ``root`` while reads may use it: no writer mutation since
-    (``drop_snapshots``), a warmer pass within WARMER_STALE_S, and no change it found that is older
-    than PREPARE_MAX_S. Decided without touching the files: a stat walk of the bundle (~1,100 calls,
-    each giving up the GIL) costs a read 0.5-0.9 s while the warmer is busy indexing a pull."""
+    (``drop_snapshots``) and not ``_expired``. Decided without touching the files: a stat walk of
+    the bundle (~1,100 calls, each giving up the GIL) costs a read 0.5-0.9 s while the warmer is
+    busy indexing a pull."""
     view = _prepared.get(root)
-    if view is None or view.generation != _generation:
-        return None
-    now = time.monotonic()
-    if now - view.checked_at > WARMER_STALE_S:
-        return None
-    if view.changed_at is not None and now - view.changed_at > PREPARE_MAX_S:
+    if view is None or view.generation != _generation or _expired(view, time.monotonic()):
         return None
     return view
 
@@ -580,7 +590,7 @@ def metadata_for_path(root: Path, path: Path, text: str | None = None) -> dict |
     rel = _candidate_rel(root, path)
     document = listing.document(path, rel) if rel is not None else None
     if document is not None and text is not None and document[2] != text:
-        document = _profile_document(root, path)
+        document = _profile_text(text)
     return concept_metadata(document[0]) if document is not None else None
 
 
@@ -928,6 +938,12 @@ def warm(root: Path) -> bool:
     generation = _generation
     now = time.monotonic()
     view = _prepared.get(root)
+    if view is not None and view.generation == generation and _expired(view, now):
+        # Reads have already moved past it to newer files: a later pass must never hand it back.
+        with _snapshot_guard:
+            if _prepared.get(root) is view:
+                del _prepared[root]
+        view = None
     if view is not None and view.generation == generation:
         view.checked_at = now
         if view.snapshot.fingerprint == _fingerprint(root):
@@ -957,9 +973,10 @@ def warm(root: Path) -> bool:
             return False  # a writer mutation overlapped this pass: its snapshot is never read
         replaced = _prepared.get(root)
         _prepared[root] = _Prepared(snapshot, index, generation, now)
-    if replaced is not None and replaced.snapshot is not snapshot:
-        del replaced  # the previous snapshot, its indexes and chunk matrix: back to the system
-        _malloc.trim()
+    freed = replaced is not None and replaced.snapshot is not snapshot
+    view = replaced = None  # the last references to the previous generation (its snapshot, indexes, matrix)
+    if freed:
+        _malloc.trim()  # once they are gone: the trims at its scan and matrix ran while reads still held it
     return False
 
 
