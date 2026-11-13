@@ -582,6 +582,66 @@ def test_identity_and_body_shrink_guards_honor_allow(bundle: Path) -> None:
     assert _evaluate(bundle, allowed)["status"] == "would_apply"
 
 
+def test_a_concept_citing_the_cap_of_sources_takes_no_new_reading(bundle: Path, monkeypatch) -> None:
+    """2026-11-06..12: 719 increments went onto a concept that already cited 8 or more sources and 24%
+    of those versions passed their review, against 46% onto a concept citing 7 or fewer and 57% of new
+    concepts. Past the cap an issue, repository or member item writes a dated concept of its own."""
+    head = _read(bundle, AI_STUDY)
+    cited = len({source["resource"] for source in parse_document(head).frontmatter["sources"]})
+    appended = _cite(head)
+
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited + 1))  # one below the cap: it still takes one
+    assert _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)))["status"] == "would_apply"
+
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
+    result = _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)))
+    assert _codes(result) == ["too_many_sources"], result["errors"]
+    assert f"already cites {cited} sources (cap {cited})" in result["errors"][0]["message"]
+    assert "dated concept of its own" in result["errors"][0]["hint"] and result["errors"][0]["path"] == AI_STUDY
+
+    # A fix that must stay on the page: the same allowance as a page past the size cap.
+    allowed = _request(_put(bundle, AI_STUDY, appended), allow={"grow": [{"path": AI_STUDY, "reason": "a fix"}]})
+    assert _evaluate(bundle, allowed)["status"] == "would_apply"
+    # An answer to an attention item (a refusal, a split, a stale date) changes the page its notice
+    # names: that page is exempt, and only that page.
+    assert _evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), answers=[AI_STUDY])[
+        "status"] == "would_apply"
+    assert _codes(_evaluate(bundle, _request(_put(bundle, AI_STUDY, appended)), answers=[AIO_AB])) == [
+        "too_many_sources"], "an answer about another page is an increment here"
+    # A batch of an attention item and an increment: the increment's page is still capped.
+    other = _read(bundle, AIO_AB)
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", "1")
+    batch = _request(_put(bundle, AI_STUDY, appended), _put(bundle, AIO_AB, _cite(other)))
+    refused = _evaluate(bundle, batch, answers=[AI_STUDY])
+    assert [(error["code"], error["path"]) for error in refused["errors"]] == [("too_many_sources", AIO_AB)]
+    monkeypatch.setenv("AIWIKI_CONCEPT_SOURCES", str(cited))
+    # NFC as every path of a changeset: an origin path in another normal form names the same page.
+
+    accented = "experiments/caf\u00e9-ab.md"
+    (bundle / accented).write_text(head, encoding="utf-8")
+    decomposed = unicodedata.normalize("NFD", accented)
+    assert decomposed != accented
+    request = _request(_put(bundle, accented, _cite(head)))
+    assert _codes(_evaluate(bundle, request)) == ["too_many_sources"]
+    assert _evaluate(bundle, request, answers=[decomposed])["status"] == "would_apply"
+    # A deprecation cites the packet too, and retiring a page is never an increment.
+    retire = {"path": AI_STUDY, "op": "deprecate", "base": changeset.content_hash(head),
+              "superseded_by": "risks/new.md", "reason": "superseded by the dated reading"}
+    result = _evaluate(bundle, _request(_put(bundle, "risks/new.md", _new_concept(), base=None), retire))
+    assert "too_many_sources" not in _codes(result), result["errors"]
+
+
+def test_the_pages_an_answer_may_change_come_from_the_items_origin() -> None:
+    """The writer and the CLI both read the item's own origin, never its files: the CLI leaves the
+    notice out of evidence.item_files, and a split's child of an attention item has no notice at all."""
+    attention = {"origin": {"kind": "attention", "path": AI_STUDY, "reason": "audit_unverified"}}
+    child = {"origin": {"kind": "attention", "path": AIO_AB, "reason": "oversized"}, "files": []}
+    others = [{"origin": {"kind": "issue", "identifier": "WAIO-1"}}, {"origin": {"kind": "repo", "path": "tasks/x"}},
+              {"origin": {"kind": "attention"}}, {"origin": None}, {}, "it_x"]
+    assert changeset.answered_paths([attention, *others, child]) == [AI_STUDY, AIO_AB]
+    assert changeset.answered_paths([]) == []
+
+
 def test_a_body_past_the_size_cap_never_grows(bundle: Path, monkeypatch) -> None:
     """2026-11-05..07: concepts under 6k characters ended verified 60% of the time, those over 20k 3%.
     Past the cap a page may shrink or keep its length; a new reading gets a dated concept of its own."""

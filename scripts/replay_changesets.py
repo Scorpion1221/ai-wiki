@@ -14,8 +14,8 @@ Those service-owned values must also be the ones design §2.4 prescribes, and in
 ``sources/.hashes.yaml`` must match exactly. The evidence id is the historical snapshot's
 name stem, so the packet lands at the path the concepts already cite.
 
-The bytes are proposed verbatim, so a retitle or deep cut the ingest made is refused by
-the gate. ``--declare-allow`` declares it in ``allow``, as a compliant agent must; the
+The bytes are proposed verbatim, so a retitle, a deep cut, or growth past the size or source
+cap the ingest made is refused by the gate. ``--declare-allow`` declares it in ``allow``, as a compliant agent must; the
 report counts the ingests that needed it (``allow_declared``) apart from those accepted
 verbatim (``accepted_verbatim``).
 
@@ -86,6 +86,22 @@ def _is_concept(rel: str) -> bool:
     return changeset._path_error(rel) is None
 
 
+def _sources(text: str) -> set[str]:
+    """The resources a concept cites, as the gate counts them for the source cap."""
+    listed = parse_document(text).frontmatter.get("sources")
+    return {str(source.get("resource")) for source in listed or () if isinstance(source, dict)}
+
+
+def _grows(before: str, after: str) -> bool:
+    """Whether the gate would want ``allow.grow`` for this edit of an existing concept: its body ends
+    past the size cap and longer than it was, or it adds a source to a concept at the source cap."""
+    limits = changeset.limits()
+    body, new_body = _identity_and_body(before)[1], _identity_and_body(after)[1]
+    cited = _sources(before)
+    return (len(new_body) > max(limits["body_chars"], len(body))
+            or (len(cited) >= limits["concept_sources"] and bool(_sources(after) - cited)))
+
+
 def _identity_and_body(text: str) -> tuple[tuple[object, object], str]:
     document = parse_document(text)
     return (document.frontmatter.get("type"), document.frontmatter.get("title")), document.body.strip()
@@ -113,7 +129,7 @@ def build_request(repo: Path, commit: str, parent: str) -> dict:
         raise ValueError(f"{snapshots[0]} is not a content-addressed source snapshot")
     # write_source stores an upload as <slug(stem)>-<sha><ext>, Markdown as .md.source.
     suffix = {".md.source": ".md", ".source": ""}.get(match["ext"], match["ext"])
-    files, allow = [], {"retype": [], "shrink": []}
+    files, allow = [], {"retype": [], "shrink": [], "grow": []}
     for _status, rel in changed:
         if not _is_concept(rel):
             continue
@@ -121,13 +137,21 @@ def build_request(repo: Path, commit: str, parent: str) -> dict:
         before, after = None if old is None else old.decode("utf-8"), _show(repo, commit, rel).decode("utf-8")
         files.append({"path": rel, "op": "put", "content": after,
                       "base": None if before is None else changeset.content_hash(before)})
+        # An ingest older than the size and source caps (0.3.24, 0.3.28) may have grown a page past
+        # one of them, or created one past the size cap; a compliant agent would have had to say why.
+        limits = changeset.limits()
+        grew = {"path": rel, "reason": f"ingest {commit[:12]} predates the size and source caps"}
         if before is None:
+            if len(_identity_and_body(after)[1]) > limits["body_chars"]:
+                allow["grow"].append(grew)
             continue
         (identity, body), (new_identity, new_body) = _identity_and_body(before), _identity_and_body(after)
         if new_identity != identity:
             allow["retype"].append({"path": rel, "reason": f"ingest {commit[:12]} changed its type or title"})
         if body and len(new_body) < SHRINK_RATIO * len(body):
             allow["shrink"].append({"path": rel, "reason": f"ingest {commit[:12]} shortened its body"})
+        if _grows(before, after):
+            allow["grow"].append(grew)
     request = {
         "schema": changeset.SCHEMA, "kind": "curate", "intent": "evidence", "base_revision": parent,
         "work_items": [],

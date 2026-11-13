@@ -45,6 +45,18 @@ evidence (`propose --upload`) or reach the human-reviewed trust tier. The mainta
   an unverified review, a held refusal or a stale date rides in the split's `notice.md` (`also due`)
   instead of an item of its own. They take none of the 40 attention items a run start creates for
   audit and freshness notices.
+- **A concept citing 8 sources takes no new reading.** A changeset that would add its packet to a
+  concept already citing `AIWIKI_CONCEPT_SOURCES` (8) sources is refused (`too_many_sources`),
+  whatever brought it: an issue, repository or member item, or a person's `--upload`. The reading is
+  a dated concept of its own that links the page, one per topic and day. The page an attention
+  item's notice names (a refusal, a split, a stale date) is exempt, that page only, even in a batch
+  with other items; `allow.grow` lets a fix through. 2026-11-06..12: versions appended to a concept citing
+  8 or more passed 24% of their reviews, new concepts 57%.
+- **An issue's Description is signed.** The collector titles it `## Description · edited by
+  <actor_type> <actor_id> · <time>` for its latest edit, else `created by <creator_type>
+  <creator_id> · <created_at>` (`edited · <time>` when the edit has no actor on record: no author,
+  read as unsigned), as it titles each comment, so an agent's draft is not read as a
+  member's word or as an unsigned fact.
 - **A correction may bring `stale_after` forward.** A review restores `type`, `title`,
   `sources` and `status`, and `stale_after` unless the correction moves it earlier. The server knows principals,
   not agents: a maintainer that reaches the auditor's token (or the reverse) audits its own

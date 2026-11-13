@@ -76,6 +76,13 @@ _LIMITS = {
     # own that links back. 2026-11-05..07: concepts under 6k characters ended verified 60% of the
     # time, those over 20k 3% (one unsupported sentence fails the page; a review has ~10 minutes).
     "body_chars": ("AIWIKI_CONCEPT_BODY_CHARS", 20_000),
+    # A concept citing this many sources takes no new one from an increment (an issue, repository or
+    # member item): the reading gets a dated concept of its own that links back. 2026-11-06..12, 719
+    # increments went onto a concept that already cited 8 or more; 24% of those versions passed their
+    # review, against 46% onto a concept citing 7 or fewer and 57% of new concepts. An answer to an
+    # attention item (a refusal, a split, a stale date) must change the page its notice names: that
+    # page alone is exempt, never the other files of the changeset.
+    "concept_sources": ("AIWIKI_CONCEPT_SOURCES", 8),
 }
 # Error code -> HTTP status. The failure class follows from the status (see _failure).
 CODES = {
@@ -84,7 +91,8 @@ CODES = {
     "yaml_parse": 422, "missing_key": 422, "invalid_value": 422, "legacy_key": 422,
     "invalid_status": 422, "uncited_change": 422, "unknown_evidence_ref": 422,
     "resource_unresolvable": 422, "broken_link": 422, "dangling_contradiction": 422,
-    "duplicate_title": 422, "body_shrink": 422, "body_too_long": 422, "identity_locked": 422, "path_forbidden": 422,
+    "duplicate_title": 422, "body_shrink": 422, "body_too_long": 422, "too_many_sources": 422,
+    "identity_locked": 422, "path_forbidden": 422,
     "service_owned_path": 422, "delete_forbidden": 422, "restructure_new_source": 422,
     "secret_detected": 422, "validation": 422, "audit_scope": 422, "self_verification": 422,
     "notice_not_evidence": 422, "stale_after_needs_new_evidence": 422,
@@ -104,6 +112,9 @@ HINTS = {
     "body_too_long": "put the new reading in a dated concept of its own that links back (or move old readings "
                      "out with allow.shrink); list the path in allow.grow with a reason only for a fix that "
                      "must stay on this page",
+    "too_many_sources": "write the reading as a dated concept of its own (concept new) that links this page, "
+                        "and leave this page as it is; list the path in allow.grow with a reason only for a "
+                        "fix that must stay on this page",
     "identity_locked": "restore type and title, or list the path in allow.retype with a reason",
     "path_forbidden": "remove this file from the changeset",
     "service_owned_path": "remove this file; the service writes it",
@@ -558,6 +569,17 @@ def _label(part: Mapping) -> str:
     return f"{part['item']}/{part['file']}" if part.get("item") else str(part.get("file"))
 
 
+def answered_paths(items: Sequence[Mapping]) -> list[str]:
+    """The concept path each attention work item names: what its answer must change. A split's
+    child keeps its parent's origin, so it answers the same page."""
+    paths = []
+    for item in items:
+        origin = item.get("origin") if isinstance(item, Mapping) else None
+        if isinstance(origin, Mapping) and origin.get("kind") == NOTICE_KIND and isinstance(origin.get("path"), str):
+            paths.append(origin["path"])
+    return paths
+
+
 def build_packet(
     evidence: Mapping,
     evidence_files: Sequence[EvidenceFile] = (),
@@ -794,11 +816,14 @@ def evaluate(
     actor: str,
     now: datetime,
     evidence_files: Sequence[EvidenceFile] = (),
+    answers: Sequence[str] = (),
 ) -> dict:
     """Judge one curate changeset against ``base_dir`` without changing it (G1, G6, G8–G12).
 
     ``actor`` is the token's actor stamped as ``generated.by``; ``now`` is the trusted
     service time. ``evidence_files`` carries the frozen bytes of ``evidence.item_files``.
+    ``answers`` lists the concept paths the changeset's attention items name (``origin.path``
+    of each work item whose ``origin.kind`` is ``attention``): the source cap exempts those pages.
     The result's ``status`` is ``would_apply``, ``noop`` or ``rejected``; ``files`` holds
     the stamped bytes of every file the changeset writes and ``source`` the packet path.
     """
@@ -839,14 +864,15 @@ def evaluate(
         return _rejected(result, errors)
     temporary, workspace = policy._isolated_agent_bundle(base)
     try:
-        return _evaluate_in(workspace, files, request, packet, result, actor=actor, now=now, lim=lim)
+        return _evaluate_in(workspace, files, request, packet, result, actor=actor, now=now, lim=lim,
+                            answers=frozenset(_nfc(path) for path in answers))
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _evaluate_in(
     workspace: Path, files: list[dict], request: Mapping, packet: Packet, result: dict, *, actor: str, now: datetime,
-    lim: dict[str, int],
+    lim: dict[str, int], answers: frozenset[str] = frozenset(),
 ) -> dict:
     evidence_id = request["evidence"]["id"]
     allow = request.get("allow") or {}
@@ -1002,6 +1028,12 @@ def _evaluate_in(
             if len(body) > lim["body_chars"] and len(body) > len(head_body) and rel not in allowed["grow"]:
                 errors.append(_error("body_too_long", f"body grows to {len(body)} characters, past "
                                      f"{lim['body_chars']}" + (f" (was {len(head_body)})" if before else ""), rel))
+        if before is not None and not deprecate and rel not in answers and rel not in allowed["grow"]:
+            # An increment adds its packet to a concept that already cites the cap's worth of sources.
+            cited = {_source_key(source) for source in head_sources}
+            if len(cited) >= lim["concept_sources"] and packet_resource not in cited:
+                errors.append(_error("too_many_sources", f"the concept already cites {len(cited)} sources "
+                                     f"(cap {lim['concept_sources']}); it takes no new reading", rel))
         if before is None:
             clashes = sorted(name for name in _names(after) if names.get(name, rel) not in (rel, *deprecating))
             if clashes:
