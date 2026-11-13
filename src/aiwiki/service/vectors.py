@@ -290,9 +290,20 @@ class Store:
                 self.index, self.key = index, key
             index = self.index
             if index.pending and not self.building and (restart or not self.gave_up):
-                self.building, self.gave_up = True, False
-                threading.Thread(target=self._build, name="embedding-builder", daemon=True).start()
+                self._start()
             return index
+
+    def retry(self) -> None:
+        """Restart a builder that gave up on a failing endpoint, on the newest index: what ``ensure``
+        does for a search that reads the warmer's prepared index instead of asking for one."""
+        with self.lock:
+            if self.gave_up and not self.building and self.index is not None and self.index.pending:
+                self._start()
+
+    def _start(self) -> None:
+        """Start the builder thread (the caller holds ``self.lock``)."""
+        self.building, self.gave_up = True, False
+        threading.Thread(target=self._build, name="embedding-builder", daemon=True).start()
 
     def _next_batch(self) -> tuple[_Index, list[int], list[str]] | None:
         """Up to BATCH chunks the newest index still lacks; ones the cache already holds (embedded
@@ -346,8 +357,9 @@ class Store:
             if done_for is not None and not done_for.pending:
                 self._compact(done_for)
 
-    def state(self) -> dict:
-        index = self.index
+    def state(self, index: _Index | None = None) -> dict:
+        """``index``'s embedding state (default: the newest index's), with the store's errors."""
+        index = self.index if index is None else index
         total = len(index.owners) if index else 0
         done = len(index.vectors) if index else 0
         error = (index.error if index else None) or self.disk_error
