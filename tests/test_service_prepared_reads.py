@@ -234,6 +234,7 @@ def test_with_the_builder_given_up_the_pull_is_handed_over_and_a_search_retries(
     assert view.snapshot is B._snapshots[root] and view.index.pending
     assert B.grep(root, "moonbeam")
     embedder.mode = "ok"                                # the endpoint is back; only a read restarts a gave-up builder
+    embedder.block = threading.Event()                  # ... and holds the restarted request: the answer stays lexical
     asked = len(embedder.requests)
     _rows, _total, retrieval = B.hybrid_search_page(root, QUESTION, 5)
     assert retrieval["mode"] == "lexical" and "being built" in retrieval["reason"]
@@ -241,6 +242,7 @@ def test_with_the_builder_given_up_the_pull_is_handed_over_and_a_search_retries(
     while len(embedder.requests) == asked:              # the search restarted the builder
         assert time.monotonic() < end
         time.sleep(0.01)
+    embedder.block.set()
     end = time.monotonic() + 5
     while view.index.pending:
         assert time.monotonic() < end

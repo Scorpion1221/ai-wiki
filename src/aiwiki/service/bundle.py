@@ -944,6 +944,7 @@ def warm(root: Path) -> bool:
             if _prepared.get(root) is view:
                 del _prepared[root]
         view = None
+        _malloc.trim()  # its snapshot, indexes and matrix were freed with the last reference
     if view is not None and view.generation == generation:
         view.checked_at = now
         if view.snapshot.fingerprint == _fingerprint(root):
