@@ -1416,7 +1416,8 @@ changeset only with a 40+ character note, and that answer is not reviewed again.
 - **Agent texts.** Publish the skills (AGENTS.md §5) and the agent instructions. In the live
   Auditor prompt add only the `triage_max=20` line, the §3.6 review-point line and the triage
   words of the 执行方式 and 结项 lines from `docs/prompts/auditor-autopilot-prompt.md`; keep the
-  live `max` (100) and `cfg` (`maint-solvely-wiki.json`), which the repository copy does not hold.
+  live `cfg` (`maint-solvely-wiki.json`), which the repository copy does not hold. Its `max` is the
+  live one, 100.
 - **Rollback.** Removing the variable and restarting stops the listing and new reviews only:
   items a review reopened keep `triage.md`, the `Triage tr_…` lead and the 40+ character note
   rule. Never roll the writer back below 0.3.6 while any item holds a `triage` file: 0.3.5 takes
