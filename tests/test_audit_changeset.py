@@ -20,7 +20,7 @@ import pytest
 from gate_fixture import AI_STUDY, AIO_AB, METRIC, Gate, cite, clone, concept, git, wait_for
 
 from aiwiki.cli import main as cli
-from aiwiki.cli import workspace
+from aiwiki.cli import maint, workspace
 from aiwiki.engine.document import parse_document
 from aiwiki.engine.validate import body_spill_errors
 from aiwiki.runtime import audit, changeset
@@ -1032,6 +1032,43 @@ def wiki(capsys, *args) -> tuple[int, dict]:
     return code, json.loads(out[out.rfind("\n{\n") + 1:] if not out.startswith("{") else out)
 
 
+def test_the_deadline_stops_a_run_that_still_has_budget_and_backlog(gate, capsys, monkeypatch) -> None:
+    """2026-11-14: with max raised to 100, a run must stop taking before Multica's 3 h task timeout
+    kills it, or its pending verdicts, its triage and its report are lost. The CLI keeps the time, as
+    `maint begin --deadline` does for the maintainer, so the skill never has to count."""
+    tools = gate.tmp / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setattr(workspace, "RETRY_DELAYS_S", (0, 0, 0))
+    gate.connect("auditor")
+    state = gate.tmp / "auditor-state"
+    start = datetime(2026, 11, 15, 1, 0, tzinfo=UTC)
+    clock = {"now": start}
+    monkeypatch.setattr(maint, "_now", lambda: clock["now"])
+    code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "30m", "--state-dir", state)
+    assert code == 0 and begun["backlog"] == 1 and begun["budget"]["deadline"] == "2026-11-15T01:30:00Z", begun
+    code, taken = wiki(capsys, "review", "next", "--state-dir", state)
+    assert code == 0 and taken["path"] == AIO_AB, taken
+    code, recorded = wiki(capsys, "review", "verdict", AIO_AB, "unverified", "--note", "lift not in S1",
+                          "--state-dir", state)
+    assert code == 0 and recorded["pending"] == 1, recorded
+    clock["now"] = start + timedelta(minutes=31)
+    code, stopped = wiki(capsys, "review", "next", "--state-dir", state)
+    assert (code, stopped["stopped"], stopped["taken"]) == (11, "deadline", 1), stopped
+    assert stopped["next"].endswith("review submit"), stopped  # what is pending still goes out
+    code, triage = wiki(capsys, "review", "triage", "next", "--state-dir", state)
+    assert (code, triage["stopped"]) == (11, "deadline"), triage
+    # A begin repeated within the run keeps the first deadline: it cannot buy itself more time.
+    code, again = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "3h", "--state-dir", state)
+    assert code == 0 and again["budget"]["deadline"] == begun["budget"]["deadline"], again
+    # Past the deadline the run still submits what it holds and ends.
+    code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
+    assert code == 0 and sent["pending"] == 0, sent
+    assert wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)[0] == 0
+
+
 def test_review_verbs_keep_the_workspace_clean_and_drop_what_the_writer_refuses(gate, capsys, monkeypatch) -> None:
     tools = gate.tmp / "bin"
     tools.mkdir()
@@ -1048,6 +1085,7 @@ def test_review_verbs_keep_the_workspace_clean_and_drop_what_the_writer_refuses(
     concept = gate.tmp / "auditor-state" / "reviews"
     concept = next(concept.glob("*/ws")) / AIO_AB
     assert wiki(capsys, "review", "next", "--state-dir", state)[0] == 11  # --max 1
+    assert begun["budget"]["deadline"] and taken["budget"]["deadline"] == begun["budget"]["deadline"]
 
     assert wiki(capsys, "review", "verdict", AIO_AB, "corrected", "--note", "n", "--state-dir", state)[0] == 2
     concept.write_text(narrowed(concept.read_text(encoding="utf-8")), encoding="utf-8")

@@ -32,7 +32,7 @@ import contextlib
 import hashlib
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -47,6 +47,7 @@ from aiwiki.runtime.changeset import VERDICTS
 OK, FAILED, USAGE, PREFLIGHT, DROPPED, TRANSIENT, EMPTY, BUDGET = 0, 1, 2, 4, 6, 8, 10, 11
 BATCH = 5  # reviews per audit changeset (design §2.3)
 TRIAGE_MAX = 20  # triage items a run takes unless begin says otherwise
+DEADLINE_S = 120 * 60  # after this, a run takes no more concepts or triage items: it submits and ends in time
 # Related evidence: the concept's distinctive identifiers (backticked names, file paths, camelCase,
 # snake_case, UPPER_CASE and dotted names) found in frozen sources it does not cite. An audit that
 # reads only the cited sources re-verified graph-jsx while a newer uncited source showed
@@ -94,14 +95,17 @@ def _backlog(bundle: str) -> dict:
 
 
 def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace_dir: Path | None,
-          as_human: bool = False, triage_max: int = TRIAGE_MAX) -> tuple[int, dict]:
+          as_human: bool = False, triage_max: int = TRIAGE_MAX, deadline_s: int = DEADLINE_S) -> tuple[int, dict]:
     """doctor → auditor lease → workspace pull → the backlog's size. ``as_human`` preflights a
-    human reviewer (design §5.5), whom the writer does not hold to the backlog."""
+    human reviewer (design §5.5), whom the writer does not hold to the backlog. ``deadline_s`` from
+    the first begin, the run takes no more (``review next`` and ``triage next`` exit 11)."""
     from aiwiki.cli import doctor, update, workspace
 
     folder = _folder(state_dir, run)
     state = maint._read(folder / "review.json") or {  # a begin repeated within the run keeps its record
         "run": run, "bundle": bundle, "max": max_reviews, "taken": [], "pending": {}, "submitted": [], "dropped": []}
+    # A run recorded by an older CLI, or begun again, keeps the deadline it has (or gets one from now).
+    state.setdefault("deadline", maint._iso(maint._now() + timedelta(seconds=deadline_s)))
     if state["bundle"] != bundle:
         raise MaintError(f"run {run} reviews bundle {state['bundle']!r}, not {bundle!r}", USAGE)
     state["human"] = as_human
@@ -144,7 +148,7 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
     return OK, {"run": run, "bundle": bundle, "workspace": state["workspace"], "base_revision": pulled["base_revision"],
                 "lease_expires_at": lease.get("expires_at"), "mode": found.get("mode"), "epoch": found.get("epoch"),
                 "backlog": found.get("total"), "seed": found.get("seed"),
-                "budget": {"max": state["max"], "taken": len(state["taken"])},
+                "budget": {"max": state["max"], "taken": len(state["taken"]), "deadline": state["deadline"]},
                 "triage": {"backlog": triaged and triaged.get("total"), "epoch": triaged and triaged.get("epoch"),
                            "max": _triage(state)["max"], "taken": len(_triage(state)["taken"])},
                 "next": f"ai-wiki -b {bundle} review next --json"}
@@ -175,8 +179,9 @@ def next_concept(state_dir: Path, bundle: str | None, path: str | None = None) -
     state = _load(state_dir, bundle)
     if path is not None and not state.get("human"):
         raise MaintError("--path takes a concept outside the backlog: only a run begun --as-human may", USAGE)
-    if len(state["taken"]) >= state["max"]:
-        return BUDGET, {"stopped": "budget", "taken": len(state["taken"]), "pending": len(state["pending"]),
+    spent = _spent(state, len(state["taken"]), state["max"])
+    if spent:
+        return BUDGET, {"stopped": spent, "taken": len(state["taken"]), "pending": len(state["pending"]),
                         "next": f"ai-wiki -b {state['bundle']} review submit" if state["pending"] else
                         f"ai-wiki -b {state['bundle']} review end --run {state['run']}"}
     root = Path(state["workspace"])
@@ -206,7 +211,8 @@ def next_concept(state_dir: Path, bundle: str | None, path: str | None = None) -
         "path": path, "base": entry["base"], "reason": entry["reason"], "type": entry.get("type"),
         "title": entry.get("title"), "generated": entry.get("generated"),
         "concept": str(root / path), "evidence": [str(root / rel) for rel in entry.get("sources") or []],
-        "budget": {"taken": len(state["taken"]), "max": state["max"], "pending": len(state["pending"])},
+        "budget": {"taken": len(state["taken"]), "max": state["max"], "pending": len(state["pending"]),
+                   "deadline": state.get("deadline")},
         "commands": [f"ai-wiki -b {state['bundle']} review evidence {path}",
                      f"ai-wiki -b {state['bundle']} review verdict {path} verified|corrected|unverified "
                      "--note '<why>'"],
@@ -435,6 +441,14 @@ def submit(state_dir: Path, bundle: str | None, *, dry_run: bool, wait: float) -
 # --- triage review: the maintainer's skips and duplicates (service/triage.py) -----------------------
 
 
+def _spent(state: dict, taken: int, limit: int) -> str | None:
+    """Why the run may take nothing more: ``budget`` (its count) or ``deadline`` (its time), else None."""
+    if taken >= limit:
+        return "budget"
+    deadline = state.get("deadline")
+    return "deadline" if deadline and maint._iso(maint._now()) >= deadline else None
+
+
 def _triage(state: dict, max_items: int = TRIAGE_MAX) -> dict:
     """The run's triage record, made with ``max_items`` the first time (as ``max``, a begin
     repeated within the run keeps it); a run begun by an older CLI gets the default budget."""
@@ -483,8 +497,9 @@ def triage_next(state_dir: Path, bundle: str | None) -> tuple[int, dict]:
     record = _triage(state)
     tail = f"ai-wiki -b {state['bundle']} review triage submit" if record["pending"] else \
         f"ai-wiki -b {state['bundle']} review end --run {state['run']}"
-    if len(record["taken"]) >= record["max"]:
-        return BUDGET, {"stopped": "budget", "taken": len(record["taken"]), "pending": len(record["pending"]),
+    spent = _spent(state, len(record["taken"]), record["max"])
+    if spent:
+        return BUDGET, {"stopped": spent, "taken": len(record["taken"]), "pending": len(record["pending"]),
                         "next": tail}
     passed: list[dict] = []
     while True:
@@ -681,12 +696,14 @@ def add_parser(sub, common: dict) -> None:
                   'ai-wiki -b solvely-wiki review begin --run "$MULTICA_ISSUE_ID"')
     begin_.add_argument("--run", required=True, type=cli._run, help="the run id (X-AIWiki-Run)")
     begin_.add_argument("--max", type=cli._positive, default=20, help="concepts this run may take (default: 20)")
+    begin_.add_argument("--deadline", type=maint._duration, default=DEADLINE_S,
+                        help="take no concept or triage item after this, from the first begin (default: 120m)")
     begin_.add_argument("--dir", type=Path, help="the workspace (default: <state-dir>/reviews/<run>/ws)")
     begin_.add_argument("--as-human", action="store_true",
                         help="a human reviewer (human: principal with human_verify): verdicts are human-reviewed")
     begin_.add_argument("--triage-max", type=cli._positive, default=TRIAGE_MAX,
                         help=f"triage items this run may take (default: {TRIAGE_MAX})")
-    take = verb("next", "take the next backlog concept (exit 10 backlog empty, 11 budget spent)",
+    take = verb("next", "take the next backlog concept (exit 10 backlog empty, 11 budget or deadline spent)",
                 "ai-wiki review next --json", "ai-wiki review next --path metrics/x.md  # a human run")
     take.add_argument("--path", help="a human run: take this concept, in the backlog or not")
     check = verb("evidence", "re-check the concept's frozen evidence; re-read its Git parts on this host; "
@@ -721,7 +738,7 @@ def add_parser(sub, common: dict) -> None:
         return parser
 
     triage_verb("next", "take the next skip or duplicate to re-check, with its frozen files (exit 10 none, "
-                        "11 budget spent)", "ai-wiki review triage next --json")
+                        "11 budget or deadline spent)", "ai-wiki review triage next --json")
     judged = triage_verb("verdict", "record upheld, or missed with the claims it lost",
                          "ai-wiki review triage verdict it_3f2a9c1b7d10 upheld --note 'only lockfile bumps'",
                          "ai-wiki review triage verdict it_3f2a9c1b7d10 missed --note 'a member decision' "
@@ -742,7 +759,8 @@ def command(a: argparse.Namespace, selected: str | None) -> int:
     try:
         if a.action == "begin":
             code, result = begin(maint._bundle(selected), run=a.run, state_dir=state_dir, max_reviews=a.max,
-                                 workspace_dir=a.dir, as_human=a.as_human, triage_max=a.triage_max)
+                                 workspace_dir=a.dir, as_human=a.as_human, triage_max=a.triage_max,
+                                 deadline_s=a.deadline)
         elif a.action == "next":
             code, result = next_concept(state_dir, selected, a.path)
         elif a.action == "evidence":
