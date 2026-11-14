@@ -85,6 +85,29 @@ def test_a_committed_changeset_receipt_reads_like_an_ingest(gate) -> None:
     assert I.pending_audits(gate.writer, older_than_hours=0)["total"] == 0
 
 
+def test_the_graph_is_redrawn_at_most_once_per_interval(gate, monkeypatch) -> None:
+    """viz.html is for people to open. Redrawn on every commit it was 15.6 MB rewritten 459 times in
+    24 h (2026-11-13); a commit inside the interval now leaves it out, and the next one past it draws it."""
+    seeded = git(gate.writer, "show", "HEAD:viz.html")  # committed with the fixture's base, months ago
+    first = gate.post(gate.item_request(gate.item(run="WAIO-612")), run="WAIO-612").json()
+    assert first["status"] == "done" and "viz.html" in first["changed_files"], first["changed_files"]
+    drawn = git(gate.writer, "show", "HEAD:viz.html")
+    assert first["visualization"]["path"] == "viz.html" and drawn != seeded
+
+    # Seconds later: the commit leaves the graph out and nothing is left behind for the next one.
+    item = gate.item(b"# second reading\n", run="WAIO-612", topic="repo:x#tasks/second")
+    second = gate.post(gate.item_request(item, gate.put(AIO_AB, cite(gate.read(AIO_AB)))), run="WAIO-612").json()
+    assert second["status"] == "done" and "viz.html" not in second["changed_files"], second["changed_files"]
+    assert "visualization" not in second and git(gate.writer, "show", "HEAD:viz.html") == drawn
+    assert git(gate.writer, "status", "--porcelain") == ""
+
+    monkeypatch.setenv("AIWIKI_VIZ_MIN_INTERVAL_S", "0")  # the interval has passed
+    item = gate.item(b"# third reading\n", run="WAIO-612", topic="repo:x#tasks/third")
+    third = gate.post(gate.item_request(item, gate.put(AI_STUDY, cite(gate.read(AI_STUDY)))), run="WAIO-612").json()
+    assert third["status"] == "done" and "viz.html" in third["changed_files"], third["changed_files"]
+    assert git(gate.writer, "show", "HEAD:viz.html") != drawn
+
+
 def test_a_noop_changeset_is_a_200_receipt_without_a_commit(gate) -> None:
     head = gate.head()
 

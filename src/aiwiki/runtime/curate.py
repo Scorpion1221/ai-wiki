@@ -702,9 +702,41 @@ def _exclude_inbox(root: Path, bundle: Path) -> None:
             f.write("".join(f"{pattern}\n" for pattern in missing))
 
 
-def _refresh_visualization(root: Path, bundle: Path) -> dict | None:
-    """Refresh an opt-in, repo-root visualization before the curation commit."""
+# The graph is for people to open, never read by an agent (the workspace archive leaves it out): once
+# an hour is fresh enough. Redrawn on every commit it was 15.6 MB rewritten 459 times in 24 h
+# (2026-11-13), 17,262 versions in a 473 MB .git that the mirror pulls every 5 minutes.
+VIZ_MIN_INTERVAL_S = 3600
+
+
+def _viz_due(root: Path, now: datetime | None = None) -> bool:
+    """Whether the tracked graph is older than ``AIWIKI_VIZ_MIN_INTERVAL_S`` (0: every commit, as
+    before). Its age is the time of the last commit that changed the file itself (never HEAD's:
+    under steady traffic that would keep it forever young), so a restart or a full clone keeps the
+    cadence. A shallow clone cannot tell (its tip commit stands in for every path): always due."""
+    try:
+        interval = int(os.environ.get("AIWIKI_VIZ_MIN_INTERVAL_S", VIZ_MIN_INTERVAL_S))
+    except ValueError:
+        interval = VIZ_MIN_INTERVAL_S
+    if interval <= 0:
+        return True
+    if _git(root, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        return True
+    last = _git(root, "log", "-1", "--format=%ct", "--", "viz.html")
+    stamp = last.stdout.strip() if last.returncode == 0 else ""
+    if not stamp.isdigit():
+        return True  # tracked but never committed, or history unreadable: draw it
+    age = (now or datetime.now(UTC)).timestamp() - int(stamp)
+    return age >= interval or age < 0  # a committer clock ahead of ours must not freeze the graph
+
+
+def _refresh_visualization(root: Path, bundle: Path, *, force: bool = False) -> dict | None:
+    """Refresh an opt-in, repo-root visualization before the curation commit, at most once per
+    ``AIWIKI_VIZ_MIN_INTERVAL_S``; between redraws the commit leaves the file as it is. ``force``
+    redraws whatever its age: the graph embeds concept bodies, so a revert must take the reverted
+    content out of it in the same commit."""
     if _git(root, "ls-files", "--error-unmatch", "--", "viz.html").returncode != 0:
+        return None
+    if not (force or _viz_due(root)):
         return None
     output = root / "viz.html"
     name = None

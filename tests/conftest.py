@@ -8,6 +8,7 @@ def _no_ambient_credentials(monkeypatch):
     """A host's injected AIWIKI_TOKEN/AIWIKI_PRINCIPALS would override the tests' own auth."""
     monkeypatch.delenv("AIWIKI_TOKEN", raising=False)
     monkeypatch.delenv("AIWIKI_PRINCIPALS", raising=False)
+    monkeypatch.delenv("AIWIKI_VIZ_MIN_INTERVAL_S", raising=False)  # the tests pin the default hour
 
 
 @pytest.fixture(autouse=True)
