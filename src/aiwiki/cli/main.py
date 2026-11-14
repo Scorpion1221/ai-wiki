@@ -161,6 +161,18 @@ def _pair(value: str) -> tuple[str, str]:
     return path, reason
 
 
+def _retirement(value: str) -> tuple[str, str]:
+    path, reason = _pair(value)
+    # PATH:SUPERSEDED_BY:REASON is --deprecate's form: a reason opening with a concept path and a colon
+    # would silently drop that successor. A source file (sources/…, or a bare file name) opens a reason fine.
+    successor = re.match(r"((?!sources/)[\w.-]+(?:/[\w.-]+)+\.md):", reason.strip())
+    if successor:
+        raise argparse.ArgumentTypeError(
+            f"the reason opens with the concept path {successor.group(1)}: name a successor with "
+            "--deprecate PATH:SUPERSEDED_BY:REASON, or reword the reason")
+    return path, reason
+
+
 def _triple(value: str) -> tuple[str, str, str]:
     path, successor, reason = (value.split(":", 2) + ["", ""])[:3]
     if not path or not successor or not reason.strip():
@@ -1040,7 +1052,11 @@ def main(argv=None) -> int:
                                    "a batch the run holds in one changeset")
         evidence.add_argument("--upload", help="cite this file as the evidence packet (needs --source-id)")
         parser.add_argument("--source-id", help="the evidence id the concepts cite (default: the one they cite)")
-        parser.add_argument("--deprecate", action="append", type=_triple, metavar="PATH:SUPERSEDED_BY:REASON")
+        parser.add_argument("--deprecate", action="append", type=_triple, metavar="PATH:SUPERSEDED_BY:REASON",
+                            help="deprecate PATH in favour of the live concept SUPERSEDED_BY, for REASON")
+        parser.add_argument("--retire", action="append", type=_retirement, metavar="PATH:REASON",
+                            help="deprecate PATH with no successor: what it describes ended and nothing replaced "
+                                 "it (an experiment that stopped), for REASON")
         parser.add_argument("--allow-shrink", action="append", type=_pair, metavar="PATH:REASON",
                             help="let PATH's body shrink below 70%% of its base, for REASON")
         parser.add_argument("--allow-retype", action="append", type=_pair, metavar="PATH:REASON",

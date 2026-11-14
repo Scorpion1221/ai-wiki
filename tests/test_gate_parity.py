@@ -78,6 +78,8 @@ CASES = [
         r"- id: dated-first-payment.*?(?=aliases:)", "", t, flags=re.S)))),
     ("deprecates", "would_apply", lambda ws: edit(ws, METRIC, cite) or [
         "--deprecate", f"{AI_STUDY}:{METRIC}:folded into the funnel metric"]),
+    ("retires", "would_apply", lambda ws: edit(ws, METRIC, cite) or [
+        "--retire", f"{AI_STUDY}:the experiment stopped"]),
     ("allowed shrink", "would_apply", lambda ws: edit(ws, AI_STUDY, shrunk) or [
         "--allow-shrink", f"{AI_STUDY}:readout moved to the funnel metric"]),
     ("binary packet", "would_apply", lambda ws: edit(ws, METRIC, cite) or evidence(
@@ -155,6 +157,10 @@ CASES = [
         arg for rel in (AI_STUDY, VIEWS, VISITORS, COUNTRY) for arg in ("--deprecate", f"{rel}:{METRIC}:many")]),
     ("deprecate a missing concept", "input", lambda ws: edit(ws, METRIC, cite) or [
         "--deprecate", f"metrics/nope.md:{METRIC}:gone"]),
+    ("retire a missing concept", "input", lambda ws: edit(ws, METRIC, cite) or [
+        "--retire", "metrics/nope.md:gone"]),
+    ("retire too many", "too_large", lambda ws: edit(ws, METRIC, cite) or [
+        arg for rel in (AI_STUDY, VIEWS, VISITORS, COUNTRY) for arg in ("--retire", f"{rel}:many")]),
     # protection
     ("body shrink", "body_shrink", lambda ws: edit(ws, AI_STUDY, shrunk)),
     ("retitle", "identity_locked", lambda ws: edit(ws, METRIC, lambda t: cite(t).replace(
