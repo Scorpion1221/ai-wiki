@@ -102,6 +102,20 @@ def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     assert "ai-wiki-auditor" in prompt and not {resolve(root, command)[0] for command in commands(prompt)} - verbs
 
 
+def test_the_auditor_run_budget_is_the_prompt_max_alone() -> None:
+    """2026-11-13/14: three audit runs begun with --max 100 stopped after 20 concepts, the agent
+    citing the skill's "at most 20". The skill names no count of its own: `review next` ends the
+    loop (exit 10 or 11), and the prompt's max is the one number."""
+    text = AUDITOR.read_text(encoding="utf-8")
+    preamble = " ".join(text.split("## 1.", 1)[0].split())
+    # What the skill says `max` is: no number of its own, once the exit codes it names are set aside.
+    said = re.search(r"`max` \((.*?)\), `triage_max`", preamble)[1]
+    assert "never a count or clock of your own" in said and not re.search(r"\d", re.sub(r"`[^`]*`|\d+-hour", "", said))
+    assert not re.search(r"\bat most \d+ concepts\b", " ".join(text.split())), "the phrasing behind 2026-11-13/14"
+    prompt = (PROMPT.parent / "auditor-autopilot-prompt.md").read_text(encoding="utf-8")
+    assert re.search(r'^max=\d+', prompt, re.M) and '--max "$max"' in AUDITOR.read_text(encoding="utf-8")
+
+
 def test_the_curator_signals_date_every_time_bound_type_and_never_undated_evidence() -> None:
     curator = ROOT / "skills" / "okf-knowledge-curator"
     text = curator.joinpath("SKILL.md").read_text(encoding="utf-8")

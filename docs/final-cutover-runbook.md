@@ -738,7 +738,8 @@ the unverified ones, including the concepts of H8's pending-audit ingests and R2
 default 10 a day the newest would wait about a week, and the 72 h alert does not measure seed
 or legacy corrections.
 The Auditor runs once a day (07:00 CST, after the maintainer's 02:00 run) and reviews up to
-20 concepts a run. New work comes first in its backlog, so 30 seed a day releases a seed of
+20 concepts a run (cutover sizing; since 0.3.7 it runs after each maintainer run, `max=100`, and from
+0.3.31 `review begin` stops it taking after a 2-hour `--deadline`). New work comes first in its backlog, so 30 seed a day releases a seed of
 about 70 to 80 concepts (the unverified count `ai-wiki health` shows, plus verifications
 older than their version) within three days, and the Auditor reviews it over about four days,
 longer on a day of heavy new work.
@@ -1416,7 +1417,8 @@ changeset only with a 40+ character note, and that answer is not reviewed again.
 - **Agent texts.** Publish the skills (AGENTS.md §5) and the agent instructions. In the live
   Auditor prompt add only the `triage_max=20` line, the §3.6 review-point line and the triage
   words of the 执行方式 and 结项 lines from `docs/prompts/auditor-autopilot-prompt.md`; keep the
-  live `max` (100) and `cfg` (`maint-solvely-wiki.json`), which the repository copy does not hold.
+  live `cfg` (`maint-solvely-wiki.json`), which the repository copy does not hold. Its `max` is the
+  live one, 100.
 - **Rollback.** Removing the variable and restarting stops the listing and new reviews only:
   items a review reopened keep `triage.md`, the `Triage tr_…` lead and the 40+ character note
   rule. Never roll the writer back below 0.3.6 while any item holds a `triage` file: 0.3.5 takes
