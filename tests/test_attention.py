@@ -200,9 +200,21 @@ def test_freshness_past_the_default_queues_a_refresh_item(gate, monkeypatch) -> 
     assert "newer than the generation" in item["brief"]
 
 
-def test_a_deprecated_concept_needs_no_attention(gate, monkeypatch) -> None:
+def test_a_note_that_the_concept_ended_names_both_ways_to_deprecate_it() -> None:
+    """The auditor cannot change status; its note goes to the maintainer as a fix. A concept that ended
+    with nothing in its place is retired, so the brief names --retire beside --deprecate."""
+    note = "正文已称实验结束、仅历史记录，status 仍 stable，依 §3.3 应由维护者调整。"
+    assert attention.fixes(note) == ["ended (--deprecate or --retire)"]
+    # All four fixes named and a three-digit refusal count: `maint next` shows the first 300 characters.
+    brief = attention._brief({"reason": attention.AUDIT_HELD, "refusals": 120,
+                              "note": "标题 description stale_after " + note})
+    assert "--retire" in brief[:300]
+
+
+@pytest.mark.parametrize("successor", [METRIC, None], ids=["superseded", "retired"])
+def test_a_deprecated_concept_needs_no_attention(gate, monkeypatch, successor) -> None:
     deprecated = "metrics/view-references-exposure-proxy-2026-09.md"
-    assert gate.post(gate.request(gate.deprecate(deprecated))).status_code == 201
+    assert gate.post(gate.request(gate.deprecate(deprecated, successor))).status_code == 201
     unverify(gate, AIO_AB)
     monkeypatch.setattr(attention, "today", lambda: TODAY + timedelta(days=400))  # every concept is stale
 

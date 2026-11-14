@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.29 -->
+<!-- ai-wiki:version 0.3.30 -->
 
 # AI Wiki Curating Maintainer
 
@@ -115,7 +115,7 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
     freeze the source it names (`source:sources/<file>`), a Git file or an issue. `audit_held`: the
     auditor waits for this answer (only a changeset closing it returns the concept to review). Fix
     each "Fix first" names, which a review cannot: retitle (`--allow-retype`), `--deprecate` a
-    superseded concept, move `stale_after` earlier by the date rule, restate the `description`.
+    superseded concept (`--retire` an ended one), move `stale_after` earlier by the date rule, restate the `description`.
   - "the gate refused the requested …: D_…": after D_NOVEL_TOKEN, D_NEW_LINK, D_GROWTH or
     D_CAVEAT_REMOVED the note is a rejected edit: never apply it without new evidence proving it.
     D_NO_EVIDENCE: the concept cites no frozen source; add one, or skip.
@@ -182,8 +182,8 @@ Pass the same extra flags to both, and only when true:
 - `--allow-shrink <path>:<reason>`: the body shrank below 70% of its base because content moved
   to another concept or was wrong. Never to drop supported facts.
 - `--allow-grow <path>:<reason>`: a fix that must stay on a page past 20000 characters or 8 sources, or a split moving readings into another page at the source cap; a new reading never.
-- `--deprecate <path>:<superseded_by>:<reason>`: retire a concept in favour of an existing or
-  same-changeset successor (at most 3 per changeset). Never delete or rename a file.
+- `--deprecate <path>:<superseded_by>:<reason>`: a concept a live or same-changeset one replaced. `--retire <path>:<reason>`:
+  one that ended with nothing in its place (a stopped experiment, a closed risk). At most 3 per changeset. Never delete or rename a file.
 
 | Result | Action | Cap |
 |---|---|---|

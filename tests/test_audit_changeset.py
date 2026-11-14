@@ -809,8 +809,9 @@ def test_a6_d0e2a12_replayed_is_downgraded(gate) -> None:
     assert "快照非结论" in judged["files"][AIO_AB] and judged["audit"]["unverified_concepts"] == [AIO_AB]
 
 
-def test_a7_a_deprecated_concept_is_never_reviewed(gate) -> None:
-    retired = gate.post(gate.request(gate.deprecate(AI_STUDY)), token="owner")
+@pytest.mark.parametrize("successor", [METRIC, None], ids=["superseded", "retired"])
+def test_a7_a_deprecated_concept_is_never_reviewed(gate, successor) -> None:
+    retired = gate.post(gate.request(gate.deprecate(AI_STUDY, successor)), token="owner")
     assert retired.status_code == 201 and published(gate, AI_STUDY)["status"] == "deprecated"
     lease(gate, "owner")
 

@@ -454,11 +454,15 @@ def _file_errors(files: object, lim: dict[str, int]) -> list[dict]:
                 errors.append(_error("too_large", f"content exceeds {lim['concept_bytes']} bytes", path))
             base = entry.get("base")
         elif op == "deprecate":
-            if set(entry) != {"path", "op", "base", "superseded_by", "reason"} or not all(
-                isinstance(entry[key], str) and entry[key].strip() for key in ("superseded_by", "reason")
+            # With ``superseded_by`` the concept gives way to a live one; without the key it is retired:
+            # what it describes ended and nothing took its place (an experiment that stopped).
+            keys = {"path", "op", "base", "reason"}
+            if set(entry) - {"superseded_by"} != keys or not all(
+                isinstance(entry[key], str) and entry[key].strip() for key in set(entry) & {"superseded_by", "reason"}
             ):
-                errors.append(_error("input", "deprecate takes path, base, superseded_by and reason", path))
-            elif _path_error(_nfc(entry["superseded_by"])):
+                errors.append(_error("input", "deprecate takes path, base and reason, and superseded_by (a concept "
+                                     "path) unless nothing replaced the concept: then leave the key out", path))
+            elif "superseded_by" in entry and _path_error(_nfc(entry["superseded_by"])):
                 # Checked before anything reads it: the successor must be a concept path.
                 errors.append(_error("broken_link", f"superseded_by {entry['superseded_by']!r} is not a concept path",
                                      path))
@@ -762,14 +766,19 @@ def _base_checks(bundle: Path, files: list[dict]) -> tuple[list[dict], list[dict
     return errors, conflicts
 
 
-def _deprecation(before: str, entry: dict, title: str, now: datetime) -> str:
-    """HEAD bytes with a dated deprecation note on top of the body (§2.2 rule 3)."""
+def _deprecation(before: str, entry: dict, title: str | None, now: datetime) -> str:
+    """HEAD bytes with a dated deprecation note on top of the body (§2.2 rule 3). ``title`` is the
+    successor's; None retires the concept with no successor, and the note links nothing."""
     lines = before.splitlines(keepends=True)
     end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
     head, body = "".join(lines[: end + 1]), "".join(lines[end + 1:])
-    link = posixpath.relpath(entry["superseded_by"], posixpath.dirname(entry["path"]) or ".")
     reason = " ".join(entry["reason"].split())
-    note = f"> Deprecated {now:%Y-%m-%d}: superseded by [{title}]({link}). {reason}\n\n"
+    if title is None:
+        why = "retired, no successor."
+    else:
+        link = posixpath.relpath(entry["superseded_by"], posixpath.dirname(entry["path"]) or ".")
+        why = f"superseded by [{title}]({link})."
+    note = f"> Deprecated {now:%Y-%m-%d}: {why} {reason}\n\n"
     return head + ("" if head.endswith("\n") else "\n") + note + body.lstrip("\n")
 
 
@@ -925,7 +934,12 @@ def _evaluate_in(
             errors.append(_error("invalid_value", f"evidence.id {evidence_id!r} already names another source of "
                                  "this concept", rel, hint="choose an evidence.id this concept's sources do not use"))
             continue
-        if deprecate:
+        if deprecate and "superseded_by" not in entry:
+            # G8, a retirement: nothing took the concept's place, so the note names no successor.
+            edited = _deprecation(before, entry, None, now)
+            if packet_resource not in {_source_key(source) for source in head_sources}:
+                edited = bookkeeping.append_sources(edited, [{"id": evidence_id, "resource": PACKET_RESOURCE}])
+        elif deprecate:
             # G8: the service writes a deprecation from HEAD; it cites the packet itself.
             successor = entry["superseded_by"] = _nfc(entry["superseded_by"])
             successor_path = workspace / successor  # G1 made it a relative concept path
@@ -938,7 +952,8 @@ def _evaluate_in(
                 successor == rel or successor_fm is None or successor_fm.get("status") == "deprecated"
                 or successor in deprecating
             ):
-                errors.append(_error("broken_link", f"superseded_by {successor!r} is not a live concept", rel))
+                errors.append(_error("broken_link", f"superseded_by {successor!r} is not a live concept", rel,
+                                     hint="name a live concept, or retire it with no successor (--retire)"))
                 continue
             edited = _deprecation(before, entry, str(successor_fm.get("title") or successor), now)
             if packet_resource not in {_source_key(source) for source in head_sources}:

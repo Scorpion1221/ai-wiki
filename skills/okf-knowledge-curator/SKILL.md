@@ -7,7 +7,7 @@ description: >-
   leave generated/verified bookkeeping to the service without faking verification, and hand
   concept edits back to deterministic service gates.
 ---
-<!-- ai-wiki:version 0.3.29 -->
+<!-- ai-wiki:version 0.3.30 -->
 
 # OKF Knowledge Curator
 
@@ -210,8 +210,9 @@ edited for its evidence) meets all three; never touch a concept only to add them
 - **Supersession.** When the evidence or the body records that the concept was retired or
   replaced, or that its premise was superseded, deprecate it rather than leave it stable. In
   Remote maintainer mode that is `ai-wiki propose --deprecate <path>:<superseded_by>:<reason>`
-  on the unedited file (the service writes the note); the successor is the replacement or, for a
-  retirement, the concept that records it. The `description` states the body's latest state and
+  on the unedited file (the service writes the note); the successor is the replacement. When it
+  ended and no concept replaced it (a stopped experiment, a closed risk), `--retire <path>:<reason>`
+  names none: never invent a successor. The `description` states the body's latest state and
   its date at the boundary its evidence proves ("2026-10-29 已合并", not the 10-12 "开发中"; a
   merge is not a release); a state only a comment reports stays out of it. A pass that changes
   the concept fixes a description the body has moved past.
@@ -262,8 +263,8 @@ replace the worker-specific ones above:
    and pick an `<evidence-id>` none of them uses (else `invalid_value`).
 3. Omit `status`, `generated` and `verified`: the gate stamps them (new concepts become
    `draft`) and overwrites any you write. Start new concepts with `ai-wiki concept new`.
-4. Never delete or rename a concept: retire it with `ai-wiki propose --deprecate
-   PATH:SUPERSEDED_BY:REASON`. `type` and `title` are identity-locked (`--allow-retype
+4. Never delete or rename a concept: `ai-wiki propose --deprecate PATH:SUPERSEDED_BY:REASON`,
+   or `--retire PATH:REASON` when nothing replaced it. `type` and `title` are identity-locked (`--allow-retype
    PATH:REASON`); a body below 70% of its base needs `--allow-shrink PATH:REASON`.
 5. Judge the workspace with `ai-wiki validate` (the gate's own code), then `ai-wiki propose`;
    fix rejections by `code`, `line` and `hint`. The gate closes out indexes, log, source hashes,

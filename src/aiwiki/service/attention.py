@@ -51,7 +51,7 @@ LEDGER = "sources/.hashes.yaml"
 FIXES = (
     (re.compile(r"(?<![小节])标题|\btitle\b", re.IGNORECASE), "title (--allow-retype)"),
     (re.compile(r"supersed|deprecat|退役|弃用|已被(?:取代|替代)|仍为?\s*stable|status:?\s*stable", re.IGNORECASE),
-     "superseded (--deprecate)"),
+     "ended (--deprecate or --retire)"),
     (re.compile(r"stale_after", re.IGNORECASE), "stale_after (only earlier)"),
     (re.compile(r"\bdescription\b|摘要", re.IGNORECASE), "description (latest state)"),
 )

@@ -278,7 +278,7 @@ def _item_evidence(root: Path, bundle: str, item_id: str, *,
 
 
 def build(root: Path, state: dict, *, item: str | list[str] | None = None, upload: Path | None = None,
-          source_id: str | None = None, deprecate=(), allow_shrink=(), allow_retype=(), allow_grow=(),
+          source_id: str | None = None, deprecate=(), retire=(), allow_shrink=(), allow_retype=(), allow_grow=(),
           close: bool = True, run: str | None = None) -> tuple[dict, Evidence]:
     """The changeset of the workspace's local changes and the frozen evidence it names.
 
@@ -303,6 +303,9 @@ def build(root: Path, state: dict, *, item: str | list[str] | None = None, uploa
         path = unicodedata.normalize("NFC", path)
         files.append({"path": path, "op": "deprecate", "base": _base_hash(root, path),
                       "superseded_by": successor, "reason": reason})
+    for path, reason in retire:  # a deprecation that names no successor
+        path = unicodedata.normalize("NFC", path)
+        files.append({"path": path, "op": "deprecate", "base": _base_hash(root, path), "reason": reason})
     if not files:
         raise WorkspaceError("nothing to propose: the workspace matches its base revision")
     if not source_id:
@@ -629,7 +632,8 @@ def run(a, bundle: str | None) -> int:
 
 def _changeset_options(a) -> dict:
     return {"item": a.item, "upload": Path(a.upload).expanduser() if a.upload else None, "source_id": a.source_id,
-            "deprecate": a.deprecate or (), "allow_shrink": a.allow_shrink or (),
+            "deprecate": a.deprecate or (), "retire": getattr(a, "retire", None) or (),
+            "allow_shrink": a.allow_shrink or (),
             "allow_retype": a.allow_retype or (), "allow_grow": getattr(a, "allow_grow", None) or (), "run": a.run,
             "close": not getattr(a, "no_close", False)}
 

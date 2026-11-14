@@ -171,6 +171,18 @@ SCHEMA_ERRORS = {
         "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"], "superseded_by": AI_STUDY,
         "reason": " ",
     }]},
+    "retire_without_reason": lambda request: {**request, "files": [{
+        "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"], "reason": " "}]},
+    # Only a missing key retires: an empty or null successor is a mistake, never a retirement.
+    "deprecate_with_an_empty_successor": lambda request: {**request, "files": [{
+        "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"], "superseded_by": " ",
+        "reason": "merged"}]},
+    "deprecate_with_a_null_successor": lambda request: {**request, "files": [{
+        "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"], "superseded_by": None,
+        "reason": "merged"}]},
+    "retire_with_an_unknown_key": lambda request: {**request, "files": [{
+        "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"], "reason": "stopped",
+        "successor": AI_STUDY}]},
     # Unhashable or undecodable values are input errors, never exceptions.
     "kind_list": lambda request: {**request, "kind": ["curate"]},
     "kind_mapping": lambda request: {**request, "kind": {}},
@@ -834,6 +846,39 @@ def test_deprecate_writes_a_dated_note_status_and_citation(bundle: Path) -> None
     assert _codes(_evaluate(bundle, _request(again))) == ["conflict"]
 
 
+def test_retire_deprecates_with_no_successor(bundle: Path) -> None:
+    """An experiment that stopped has nothing to give way to (2026-11-14: five concepts the
+    auditor asked to retire stayed stable for days, the maintainer finding no live successor)."""
+    base = changeset.content_hash(_read(bundle, METRIC))
+    retire = {"path": METRIC, "op": "deprecate", "base": base, "reason": "the experiment\nstopped on 2026-11-10"}
+    result = _evaluate(bundle, _request(retire))
+    assert result["status"] == "would_apply", result["errors"]
+    assert (result["concept_files"], result["deprecated_files"]) == ([], [METRIC])
+    document = parse_document(result["files"][METRIC])
+    assert document.body.startswith(
+        "> Deprecated 2026-09-24: retired, no successor. the experiment stopped on 2026-11-10\n\n# Summary\n")
+    assert "](" not in document.body.split("\n", 1)[0]  # the note links nothing
+    assert document.frontmatter["status"] == "deprecated"
+    assert document.frontmatter["sources"][-1] == {"id": EVIDENCE_ID, "resource": "/" + result["source"]}
+    assert result["bookkeeping_preview"][METRIC] == ["generated stamped", "status=deprecated"]
+    # It is still a deprecation: the per-changeset cap and the base CAS hold, the reason is scanned.
+    (bundle / METRIC).write_text(_read(bundle, METRIC).replace("status: stable", "status: deprecated"))
+    assert _codes(_evaluate(bundle, _request(retire))) == ["conflict"]
+    secret = "ghp_" + "A1b2" * 9
+    ai_study = {"path": AI_STUDY, "op": "deprecate", "base": changeset.content_hash(_read(bundle, AI_STUDY)),
+                "reason": f"rotated key {secret}"}
+    leaked = _evaluate(bundle, _request(ai_study))
+    assert _codes(leaked) == ["secret_detected"] and secret not in json.dumps(leaked)
+
+
+def test_a_named_successor_must_still_be_live(bundle: Path) -> None:
+    """Naming a successor that is not a live concept stays an error, and its hint points at --retire."""
+    deprecate = {"path": AI_STUDY, "op": "deprecate", "base": changeset.content_hash(_read(bundle, AI_STUDY)),
+                 "superseded_by": "decisions/none.md", "reason": "merged"}
+    [error] = _evaluate(bundle, _request(deprecate))["errors"]
+    assert error["code"] == "broken_link" and "--retire" in error["hint"]
+
+
 def test_a_deprecation_reason_is_scanned_and_bounded(bundle: Path) -> None:
     deprecate = {"path": AI_STUDY, "op": "deprecate", "base": changeset.content_hash(_read(bundle, AI_STUDY)),
                  "superseded_by": METRIC}
@@ -860,7 +905,7 @@ def test_a_symlinked_successor_is_not_a_live_concept(bundle: Path) -> None:
                  "superseded_by": "decisions/link.md", "reason": "merged"}
     assert _evaluate(bundle, _request(deprecate))["errors"] == [{
         "code": "broken_link", "path": AI_STUDY, "message": "superseded_by 'decisions/link.md' is not a live concept",
-        "hint": changeset.HINTS["broken_link"],
+        "hint": "name a live concept, or retire it with no successor (--retire)",
     }]
 
 

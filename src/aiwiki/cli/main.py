@@ -1040,7 +1040,11 @@ def main(argv=None) -> int:
                                    "a batch the run holds in one changeset")
         evidence.add_argument("--upload", help="cite this file as the evidence packet (needs --source-id)")
         parser.add_argument("--source-id", help="the evidence id the concepts cite (default: the one they cite)")
-        parser.add_argument("--deprecate", action="append", type=_triple, metavar="PATH:SUPERSEDED_BY:REASON")
+        parser.add_argument("--deprecate", action="append", type=_triple, metavar="PATH:SUPERSEDED_BY:REASON",
+                            help="deprecate PATH in favour of the live concept SUPERSEDED_BY, for REASON")
+        parser.add_argument("--retire", action="append", type=_pair, metavar="PATH:REASON",
+                            help="deprecate PATH with no successor: what it describes ended and nothing replaced "
+                                 "it (an experiment that stopped), for REASON")
         parser.add_argument("--allow-shrink", action="append", type=_pair, metavar="PATH:REASON",
                             help="let PATH's body shrink below 70%% of its base, for REASON")
         parser.add_argument("--allow-retype", action="append", type=_pair, metavar="PATH:REASON",
