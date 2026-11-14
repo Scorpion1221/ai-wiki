@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 
-VERSION = "0.3.29"
+VERSION = "0.3.30"
 
 _BUILD: list[str | None] = []
 

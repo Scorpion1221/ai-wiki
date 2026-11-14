@@ -634,3 +634,15 @@ def test_propose_stops_following_a_job_it_may_no_longer_see(gate, ws, capsys, tm
         answer["status"], polls[:] = status, []
         code, result = wiki_json(capsys, "propose", *upload(ws), "--wait", "5", "--state-dir", tmp_path / "st")
         assert (code, result["detail"], polls) == (exit_code, "refused", ["/jobs/abc123"])
+
+
+@pytest.mark.parametrize("reason", ["the experiment stopped on 2026-11-10", "S1-status.md: it stopped on 2026-11-10",
+                                    "sources/s1-status.md:12 says it stopped", "WAIO-1933: stopped"])
+def test_retire_keeps_a_reason_that_opens_with_a_file_or_an_issue(reason) -> None:
+    assert cli._retirement(f"experiments/a.md:{reason}") == ("experiments/a.md", reason)
+
+
+def test_retire_refuses_the_deprecate_syntax(capsys) -> None:
+    """--retire a.md:b/c.md:merged would retire a.md with the reason "b/c.md:merged" and drop its successor."""
+    code, out = wiki(capsys, "validate", "--retire", "experiments/a.md:metrics/b.md:merged into it")
+    assert code == 2 and 'kind: "usage"' in out and "opens with the concept path metrics/b.md" in out

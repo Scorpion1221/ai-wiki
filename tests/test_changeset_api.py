@@ -257,6 +257,15 @@ def test_deprecations_have_their_own_daily_quota(gate) -> None:
     assert one_more.status_code == 201, one_more.text
 
 
+def test_retirements_count_toward_the_daily_deprecation_quota(gate) -> None:
+    # The curator's principal may deprecate 2 concepts a day; a retirement is one of them.
+    first = gate.post(gate.request(gate.deprecate(AI_STUDY, None), gate.deprecate(AIO_AB, None)))
+    assert first.status_code == 201, first.text
+    assert gate.job(first.json()["id"])["deprecations"] == 2
+    over = gate.post(gate.request(gate.deprecate(VISITORS, None)))
+    assert over.status_code == 429 and over.json()["errors"][0]["limit"] == "deprecations_per_day"
+
+
 def test_a_deprecation_retry_after_waits_for_deprecations_to_age_out(gate) -> None:
     # A changeset that deprecated nothing, a day old but for an hour, frees no deprecation.
     first = gate.post(gate.request())

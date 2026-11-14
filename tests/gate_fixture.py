@@ -208,9 +208,11 @@ class Gate:
         base = changeset.content_hash(target.read_text(encoding="utf-8")) if target.is_file() else None
         return {"path": rel, "op": "put", "base": base, "content": content}
 
-    def deprecate(self, rel: str, superseded_by: str = METRIC, *, bundle: str = "kb-a") -> dict:
-        return {"path": rel, "op": "deprecate", "base": changeset.content_hash(self.read(rel, bundle)),
-                "superseded_by": superseded_by, "reason": "folded into the funnel metric"}
+    def deprecate(self, rel: str, superseded_by: str | None = METRIC, *, bundle: str = "kb-a") -> dict:
+        """A deprecation in favour of ``superseded_by``; None retires the concept with no successor."""
+        entry = {"path": rel, "op": "deprecate", "base": changeset.content_hash(self.read(rel, bundle)),
+                 "reason": "folded into the funnel metric" if superseded_by else "the experiment stopped"}
+        return entry if superseded_by is None else {**entry, "superseded_by": superseded_by}
 
     # --- work items -----------------------------------------------------------------------
 
