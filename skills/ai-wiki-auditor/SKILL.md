@@ -18,8 +18,8 @@ downgrades what breaks its rules. Your judgment is only this: is each claim of t
 supported by the frozen evidence the concept cites? Work serially, without subagents.
 
 The automation prompt supplies `bundle`, `run` (the issue id), `max` (the concepts this run may
-take; `review begin` enforces it, so take until `review next` exits `10` or `11`, never a count of
-your own), `triage_max` (triage items, §3.6) and `cfg` (the collector config with `repos.root`).
+take; `review begin` enforces it and a 2-hour deadline: take until `review next` exits `10` or `11`,
+never a count or clock of your own), `triage_max` (§3.6) and `cfg` (the config with `repos.root`).
 Shell variables do not survive between tool calls: write the values into every command, and pass
 `-b "$bundle"` to every `ai-wiki` command. `$WS` is the `workspace` path `review begin` prints.
 
@@ -77,7 +77,7 @@ Read `$WS/SCHEMA.md` once. Then repeat.
 
 `ai-wiki -b "$bundle" review next --json`. Exit `0`: `path`, `base` (the content hash your verdict
 judges), `reason`, `concept` (the file in `$WS`) and `evidence` (its frozen sources in `$WS`). Exit
-`10` (backlog empty) or `11` (budget spent): go to §3.5, then §3.6. Reasons: `generation` (new
+`10` (backlog empty) or `11` (budget or deadline spent): go to §3.5, then §3.6. Reasons: `generation` (new
 content); `external` (a push past the service changed it or a source it cites); `seed` (an older
 unaudited concept); `correction`: an auditor's narrowing nobody has confirmed yet. Its backlog entry
 names `corrected_run` (the run that wrote it; `legacy: true` for one from before this rule, which
