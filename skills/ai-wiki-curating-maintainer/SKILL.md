@@ -114,7 +114,7 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
   - `audit_unverified`, "the auditor's own verdict": the note says why this version is unsupported;
     freeze the source it names (`source:sources/<file>`), a Git file or an issue. `audit_held`: the
     auditor waits for this answer (only a changeset closing it returns the concept to review). Fix each "Fix
-    first" names, which a review cannot: retitle (`--allow-retype`), `status` (§3.4's flags, as evidence shows), move
+    first" names, which a review cannot: retitle (`--allow-retype`), set `status` (§3.4's flags, as evidence shows), move
     `stale_after` earlier by the date rule, restate the `description`.
   - "the gate refused the requested …: D_…": after D_NOVEL_TOKEN, D_NEW_LINK, D_GROWTH or
     D_CAVEAT_REMOVED the note is a rejected edit: never apply it without new evidence proving it.

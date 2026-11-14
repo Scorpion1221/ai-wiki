@@ -163,9 +163,13 @@ def _pair(value: str) -> tuple[str, str]:
 
 def _retirement(value: str) -> tuple[str, str]:
     path, reason = _pair(value)
-    if re.match(r"[\w./-]+\.md:", reason.strip()):  # PATH:SUPERSEDED_BY:REASON, meant for --deprecate
-        raise argparse.ArgumentTypeError("expected PATH:REASON; name a successor with "
-                                         "--deprecate PATH:SUPERSEDED_BY:REASON")
+    # PATH:SUPERSEDED_BY:REASON is --deprecate's form: a reason opening with a concept path and a colon
+    # would silently drop that successor. A source file (sources/…, or a bare file name) opens a reason fine.
+    successor = re.match(r"((?!sources/)[\w.-]+(?:/[\w.-]+)+\.md):", reason.strip())
+    if successor:
+        raise argparse.ArgumentTypeError(
+            f"the reason opens with the concept path {successor.group(1)}: name a successor with "
+            "--deprecate PATH:SUPERSEDED_BY:REASON, or reword the reason")
     return path, reason
 
 
