@@ -204,7 +204,7 @@ def test_a_note_that_the_concept_ended_names_both_ways_to_deprecate_it() -> None
     """The auditor cannot change status; its note goes to the maintainer as a fix. A concept that ended
     with nothing in its place is retired, so the brief names --retire beside --deprecate."""
     note = "正文已称实验结束、仅历史记录，status 仍 stable，依 §3.3 应由维护者调整。"
-    assert attention.fixes(note) == ["ended (--deprecate or --retire)"]
+    assert attention.fixes(note) == ["status (--deprecate/--retire)"]
     # All four fixes named and a three-digit refusal count: `maint next` shows the first 300 characters.
     brief = attention._brief({"reason": attention.AUDIT_HELD, "refusals": 120,
                               "note": "标题 description stale_after " + note})

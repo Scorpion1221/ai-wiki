@@ -634,3 +634,11 @@ def test_propose_stops_following_a_job_it_may_no_longer_see(gate, ws, capsys, tm
         answer["status"], polls[:] = status, []
         code, result = wiki_json(capsys, "propose", *upload(ws), "--wait", "5", "--state-dir", tmp_path / "st")
         assert (code, result["detail"], polls) == (exit_code, "refused", ["/jobs/abc123"])
+
+
+def test_retire_refuses_the_deprecate_syntax() -> None:
+    """--retire a.md:b.md:merged would retire a.md with the reason "b.md:merged" and drop its successor."""
+    assert cli._retirement("experiments/a.md:the experiment stopped on 2026-11-10") == (
+        "experiments/a.md", "the experiment stopped on 2026-11-10")
+    with pytest.raises(cli.argparse.ArgumentTypeError, match="--deprecate"):
+        cli._retirement("experiments/a.md:metrics/b.md:merged into it")

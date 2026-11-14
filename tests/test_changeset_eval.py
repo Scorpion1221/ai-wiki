@@ -180,6 +180,8 @@ SCHEMA_ERRORS = {
     "deprecate_with_a_null_successor": lambda request: {**request, "files": [{
         "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"], "superseded_by": None,
         "reason": "merged"}]},
+    "retire_without_a_reason_key": lambda request: {**request, "files": [{
+        "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"]}]},
     "retire_with_an_unknown_key": lambda request: {**request, "files": [{
         "path": METRIC, "op": "deprecate", "base": request["files"][0]["base"], "reason": "stopped",
         "successor": AI_STUDY}]},

@@ -161,6 +161,14 @@ def _pair(value: str) -> tuple[str, str]:
     return path, reason
 
 
+def _retirement(value: str) -> tuple[str, str]:
+    path, reason = _pair(value)
+    if re.match(r"[\w./-]+\.md:", reason.strip()):  # PATH:SUPERSEDED_BY:REASON, meant for --deprecate
+        raise argparse.ArgumentTypeError("expected PATH:REASON; name a successor with "
+                                         "--deprecate PATH:SUPERSEDED_BY:REASON")
+    return path, reason
+
+
 def _triple(value: str) -> tuple[str, str, str]:
     path, successor, reason = (value.split(":", 2) + ["", ""])[:3]
     if not path or not successor or not reason.strip():
@@ -1042,7 +1050,7 @@ def main(argv=None) -> int:
         parser.add_argument("--source-id", help="the evidence id the concepts cite (default: the one they cite)")
         parser.add_argument("--deprecate", action="append", type=_triple, metavar="PATH:SUPERSEDED_BY:REASON",
                             help="deprecate PATH in favour of the live concept SUPERSEDED_BY, for REASON")
-        parser.add_argument("--retire", action="append", type=_pair, metavar="PATH:REASON",
+        parser.add_argument("--retire", action="append", type=_retirement, metavar="PATH:REASON",
                             help="deprecate PATH with no successor: what it describes ended and nothing replaced "
                                  "it (an experiment that stopped), for REASON")
         parser.add_argument("--allow-shrink", action="append", type=_pair, metavar="PATH:REASON",
