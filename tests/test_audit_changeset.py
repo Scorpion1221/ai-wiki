@@ -1044,20 +1044,29 @@ def test_the_deadline_stops_a_run_that_still_has_budget_and_backlog(gate, capsys
     monkeypatch.setattr(workspace, "RETRY_DELAYS_S", (0, 0, 0))
     gate.connect("auditor")
     state = gate.tmp / "auditor-state"
+    start = datetime(2026, 11, 15, 1, 0, tzinfo=UTC)
+    clock = {"now": start}
+    monkeypatch.setattr(maint, "_now", lambda: clock["now"])
     code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "30m", "--state-dir", state)
-    assert code == 0 and begun["backlog"] == 1, begun
-    start = datetime.fromisoformat(begun["budget"]["deadline"].replace("Z", "+00:00")) - timedelta(minutes=30)
-    monkeypatch.setattr(maint, "_now", lambda: start + timedelta(minutes=31))
+    assert code == 0 and begun["backlog"] == 1 and begun["budget"]["deadline"] == "2026-11-15T01:30:00Z", begun
+    code, taken = wiki(capsys, "review", "next", "--state-dir", state)
+    assert code == 0 and taken["path"] == AIO_AB, taken
+    code, recorded = wiki(capsys, "review", "verdict", AIO_AB, "unverified", "--note", "lift not in S1",
+                          "--state-dir", state)
+    assert code == 0 and recorded["pending"] == 1, recorded
+    clock["now"] = start + timedelta(minutes=31)
     code, stopped = wiki(capsys, "review", "next", "--state-dir", state)
-    assert (code, stopped["stopped"], stopped["taken"]) == (11, "deadline", 0), stopped
+    assert (code, stopped["stopped"], stopped["taken"]) == (11, "deadline", 1), stopped
+    assert stopped["next"].endswith("review submit"), stopped  # what is pending still goes out
     code, triage = wiki(capsys, "review", "triage", "next", "--state-dir", state)
     assert (code, triage["stopped"]) == (11, "deadline"), triage
     # A begin repeated within the run keeps the first deadline: it cannot buy itself more time.
-    code, again = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--state-dir", state)
+    code, again = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "3h", "--state-dir", state)
     assert code == 0 and again["budget"]["deadline"] == begun["budget"]["deadline"], again
-    monkeypatch.setattr(maint, "_now", lambda: start + timedelta(minutes=29))
-    code, taken = wiki(capsys, "review", "next", "--state-dir", state)
-    assert code == 0 and taken["path"] == AIO_AB, taken
+    # Past the deadline the run still submits what it holds and ends.
+    code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
+    assert code == 0 and sent["pending"] == 0, sent
+    assert wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)[0] == 0
 
 
 def test_review_verbs_keep_the_workspace_clean_and_drop_what_the_writer_refuses(gate, capsys, monkeypatch) -> None:

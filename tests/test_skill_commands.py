@@ -111,6 +111,7 @@ def test_the_auditor_run_budget_is_the_prompt_max_alone() -> None:
     # What the skill says `max` is: no number of its own, once the exit codes it names are set aside.
     said = re.search(r"`max` \((.*?)\), `triage_max`", preamble)[1]
     assert "never a count or clock of your own" in said and not re.search(r"\d", re.sub(r"`[^`]*`|\d+-hour", "", said))
+    assert not re.search(r"\bat most \d+ concepts\b", " ".join(text.split())), "the phrasing behind 2026-11-13/14"
     prompt = (PROMPT.parent / "auditor-autopilot-prompt.md").read_text(encoding="utf-8")
     assert re.search(r'^max=\d+', prompt, re.M) and '--max "$max"' in AUDITOR.read_text(encoding="utf-8")
 
