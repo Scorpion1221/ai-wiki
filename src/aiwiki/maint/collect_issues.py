@@ -127,12 +127,34 @@ def issue_evidence(identifier: str, comment_id: str | None, *, autopilot: str | 
             raise MulticaError(f"{identifier} has no comment {comment_id} a maintainer may cite")
     name = issue.get("identifier") or issue["id"]
     written = description_author(issue, history(issue["id"], cache_dir))
-    text = "".join(block for block, _id in evidence_blocks(issue, name, str(issue.get("created_at")), kept, [], [],
-                                                           written))
+    blocks = evidence_blocks(issue, name, str(issue.get("created_at")), kept, [], [], written)
     origin = {"kind": "issue", "issue_id": issue["id"], "identifier": name,
               "comments": [comment.get("id") for comment in kept]}
     stem = re.sub(r"[^A-Za-z0-9._-]", "_", f"{name}-{comment_id}" if comment_id else name)[:100]
-    return planner.evidence_file(f"add-{stem}.md", text, origin)
+    file = planner.evidence_file(f"add-{stem}.md", "".join(block for block, _id in blocks), origin)
+    file["left_out"] = left_out(file, blocks, kept) if comment_id is None else []  # one comment: nothing to name
+    return file
+
+
+def left_out(file: dict[str, Any], blocks: list[tuple[str, str | None]],
+             kept: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The comments a clipped freeze does not hold whole, oldest first: ``{comment, author,
+    created_at, bytes}``. The clip keeps the start, so a long issue loses its latest comments,
+    often the final report (2026-11-06..15: 107 of 250 whole-issue freezes were cut and left out
+    71% of their comments). Each can be frozen alone with ``issue:<identifier>#<comment>``; one
+    longer than the file limit is clipped there too (``bytes`` says so).
+    """
+    if not file["origin"]["truncated"]:
+        return []
+    frozen, by_id = file["data"].decode(), {comment.get("id"): comment for comment in kept}
+    rows = []
+    for block, comment_id in blocks:
+        redacted = secrets.redact(block)[0]
+        if comment_id is not None and redacted not in frozen:
+            comment = by_id[comment_id]
+            rows.append({"comment": comment_id, "author": comment.get("author_type"),
+                         "created_at": comment.get("created_at"), "bytes": len(redacted.encode())})
+    return rows
 
 
 def run_delta(

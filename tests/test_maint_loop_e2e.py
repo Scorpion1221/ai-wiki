@@ -461,6 +461,41 @@ def test_add_evidence_extracts_only_what_the_collectors_may_cite(loop, capsys) -
     assert files[-1] == added["file"] and len(files) == 2
 
 
+def test_add_evidence_names_what_a_cut_issue_left_out(loop, capsys) -> None:
+    """A whole issue past the file limit prints the comments it does not hold whole and the command
+    that freezes one of them alone; that command, as printed, adds the comment whole."""
+    st = loop["st"]
+    state = json.loads((loop["tmp"] / "multica.json").read_text(encoding="utf-8"))
+    long = [{"id": f"c-{n}", "author_id": "m-1", "author_type": "member", "type": "comment",
+             "created_at": f"2026-01-0{n}T00:00:00Z", "content": f"reading {n} " + "x" * 9000} for n in (3, 4, 5)]
+    final = {"id": "c-6", "author_id": "m-1", "author_type": "member", "type": "comment",
+             "created_at": "2026-01-06T00:00:00Z", "content": "Final report: the retry cap shipped."}
+    huge = {**final, "id": "c-7", "created_at": "2026-01-07T00:00:00Z", "content": "log " + "y" * 30000}
+    multica({**state, "comments": {"issue-7": [*state["comments"]["issue-7"], *long, final, huge]}}, loop["tmp"])
+    assert wiki_json(capsys, "maint", "begin", "--run", RUN, "--only", "repos", "--state-dir", st,
+                     "--config", loop["config"])[0] == 0
+    item_id = wiki_json(capsys, "maint", "next", "--state-dir", st)[1]["item"]
+
+    code, added = wiki_json(capsys, "maint", "add-evidence", item_id, "issue:WAIO-7", "--state-dir", st,
+                            "--config", loop["config"])
+
+    assert code == 0 and added["truncated"], added
+    assert [row["comment"] for row in added["left_out"]] == ["c-5", "c-6", "c-7"]
+    assert "Final report" not in Path(added["path"]).read_text(encoding="utf-8")
+    command = added["next"].split("  (")[0].split()
+    assert command[:5] == ["ai-wiki", "maint", "add-evidence", item_id, "issue:WAIO-7#<comment>"]
+    command[4] = command[4].replace("<comment>", "c-6")
+    code, alone = wiki_json(capsys, *command[1:], "--state-dir", st)
+    assert code == 0 and not alone["truncated"] and "left_out" not in alone and "next" not in alone
+    assert "Final report: the retry cap shipped." in Path(alone["path"]).read_text(encoding="utf-8")
+    code, clipped = wiki_json(capsys, "maint", "add-evidence", item_id, "issue:WAIO-7#c-7", "--state-dir", st,
+                              "--config", loop["config"])  # one comment past the limit: clipped, nothing to name
+    assert code == 0 and clipped["truncated"] and "left_out" not in clipped and "next" not in clipped
+    code, out = wiki(capsys, "maint", "add-evidence", item_id, "issue:WAIO-7", "--state-dir", st,
+                     "--config", loop["config"])  # the default text output shows the list too
+    assert code == 0 and "c-6" in out and "issue:WAIO-7#<comment>" in out
+
+
 def test_add_evidence_reads_the_reference_checkout_before_the_network(loop, capsys) -> None:
     st, url = loop["st"], f"file://{loop['remote'].resolve()}"
     git(loop["work"], "remote", "set-url", "origin", url)  # an identity that outlives the remote itself

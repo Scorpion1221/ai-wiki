@@ -274,6 +274,50 @@ def test_added_issue_evidence_signs_its_description_too(multica: Path, tmp_path:
         "data"].decode()
 
 
+def test_a_cut_issue_freeze_names_the_comments_it_left_out(multica: Path, tmp_path: Path) -> None:
+    """2026-11-06..15: 107 of 250 whole-issue freezes were cut at 24 KB, leaving out 71% of their
+    comments; 10 skips looked for a final report the cut had dropped. The freeze names each comment
+    it does not hold whole, so the maintainer can freeze it alone."""
+    secret = "ghp_" + "Z" * 36
+    pad = "x" * 9000
+    save(multica, {
+        "issues": [issue(970, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z")],
+        "comments": {"issue-970": [
+            comment("c1", "2026-09-02T00:00:00Z", "one " + pad),
+            comment("c2", "2026-09-03T00:00:00Z", f"two {secret} " + pad, author=ANALYST),
+            comment("c-maint", "2026-09-03T12:00:00Z", "wiki updated " + pad, author=MAINTAINER),
+            comment("c3", "2026-09-04T00:00:00Z", "three " + pad),  # clipped mid-comment
+            comment("c4", "2026-09-05T00:00:00Z", "Final report: 374/374 passed."),
+        ]},
+    })
+
+    def evidence(comment_id: str | None) -> dict[str, Any]:
+        return collect_issues.issue_evidence("WAIO-970", comment_id, cache_dir=tmp_path / str(comment_id),
+                                             autopilot=AUTOPILOT, exclude_agents=[MAINTAINER, AUDITOR])
+
+    whole = evidence(None)
+    text = whole["data"].decode()
+    assert whole["origin"]["truncated"] and whole["origin"]["comments"] == ["c1", "c2", "c3", "c4"]
+    assert "two <redacted:" in text and "## Comment c3" in text and "Final report" not in text
+    assert [(row["comment"], row["author"], row["created_at"]) for row in whole["left_out"]] == [
+        ("c3", "member", "2026-09-04T00:00:00Z"), ("c4", "member", "2026-09-05T00:00:00Z")]
+    assert whole["left_out"][1]["bytes"] < 200 < 9000 < whole["left_out"][0]["bytes"]
+    alone = evidence("c4")  # what the maintainer adds next: the one comment, whole
+    assert "Final report: 374/374 passed." in alone["data"].decode() and alone["left_out"] == []
+    named = evidence("c3")  # one comment is never "left out" of its own freeze, even clipped
+    assert not named["origin"]["truncated"] and named["left_out"] == []
+    save(multica, {"issues": [issue(972, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z")],
+                   "comments": {"issue-972": [comment("c9", "2026-09-02T00:00:00Z", "y" * 30000)]}})
+    huge = collect_issues.issue_evidence("WAIO-972", "c9", cache_dir=tmp_path / "972", autopilot=AUTOPILOT,
+                                         exclude_agents=[MAINTAINER, AUDITOR])
+    assert huge["origin"]["truncated"] and huge["left_out"] == []
+    save(multica, {"issues": [issue(971, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z")],
+                   "comments": {"issue-971": [comment("c5", "2026-09-02T00:00:00Z", "short")]}})
+    complete = collect_issues.issue_evidence("WAIO-971", None, cache_dir=tmp_path / "971", autopilot=AUTOPILOT,
+                                             exclude_agents=[MAINTAINER, AUDITOR])
+    assert not complete["origin"]["truncated"] and complete["left_out"] == []
+
+
 def test_the_description_is_signed_by_whoever_wrote_it_last() -> None:
     """2026-11-13: 10 of 40 recent issues had their description edited. A member's issue an agent
     rewrote is the agent's text; an unsigned or creator-signed Description read as the member's."""

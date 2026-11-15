@@ -816,9 +816,14 @@ def add_evidence(state_dir: Path, bundle: str | None, item_id: str, ref: str, co
           body={"name": file["name"], "origin": file["origin"], "content_b64": base64.b64encode(file["data"]).decode()})
     root = Path(state["workspace"])
     workspace._item_evidence(root, state["bundle"], item_id)
-    return OK, {"item": item_id, "file": file["name"], "bytes": file["bytes"], "sha256": file["sha256"],
-                "truncated": file["origin"]["truncated"], "redactions": file["origin"]["redactions"],
-                "path": str(root / workspace.META / "items" / item_id / file["name"])}
+    result = {"item": item_id, "file": file["name"], "bytes": file["bytes"], "sha256": file["sha256"],
+              "truncated": file["origin"]["truncated"], "redactions": file["origin"]["redactions"],
+              "path": str(root / workspace.META / "items" / item_id / file["name"])}
+    if file.get("left_out"):  # an issue cut at the file limit: the comments it does not hold whole
+        result["left_out"] = file["left_out"]
+        result["next"] = (f"ai-wiki maint add-evidence {item_id} issue:{file['origin']['identifier']}#<comment> "
+                          f"--config {config}  (each left_out comment you need, alone)")
+    return OK, result
 
 
 # --- end and status ------------------------------------------------------------------------------
