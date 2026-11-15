@@ -38,3 +38,52 @@ def test_bad_usage_is_refused_before_the_host(tmp_path, args):
     assert done.returncode == 2
     assert "usage:" in done.stderr
     assert "called ssh" not in done.stderr and "called scp" not in done.stderr
+
+
+AUTO = SCRIPT.with_name("auto_release.sh")
+
+
+def _auto(*args: str, tmp_path: Path) -> subprocess.CompletedProcess:
+    # Every tool that could reach GitHub, the host or production fails loudly: a refusal must come first.
+    bin_dir = tmp_path / "auto-bin"
+    bin_dir.mkdir(exist_ok=True)
+    for tool in ("ssh", "scp", "gh", "ai-wiki"):
+        fake = bin_dir / tool
+        fake.write_text(f"#!/bin/sh\necho 'called {tool}' >&2\nexit 99\n")
+        fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+           "AUTO_RELEASE_LOG": str(tmp_path / "auto-release.log")}
+    return subprocess.run([BASH, str(AUTO), *args], capture_output=True, text=True, env=env, timeout=60)
+
+
+def test_auto_release_parses_and_is_executable():
+    assert subprocess.run([BASH, "-n", str(AUTO)], capture_output=True, text=True).returncode == 0
+    assert AUTO.stat().st_mode & stat.S_IXUSR
+
+
+@pytest.mark.parametrize("args", [(), ("check",), ("release", "only-the-repo"), ("verify",), ("verify", "a", "b"),
+                                  ("deploy", "repo", "1"), ("check", "a", "b", "c")])
+def test_auto_release_refuses_bad_usage_before_any_tool(tmp_path, args):
+    done = _auto(*args, tmp_path=tmp_path)
+    assert done.returncode == 2 and "auto_release.sh release" in done.stderr
+    assert "called" not in done.stderr and not (tmp_path / "auto-release.log").exists()
+
+
+def test_auto_release_refuses_what_is_not_a_repository_before_github_or_the_host(tmp_path):
+    done = _auto("release", str(tmp_path), "94", tmp_path=tmp_path)
+    assert done.returncode == 2 and "is not a git repository" in done.stderr
+    assert "called" not in done.stderr and not (tmp_path / "auto-release.log").exists()
+
+
+def test_auto_release_stops_when_the_pull_request_cannot_be_read(tmp_path):
+    """A repository whose fetch works but whose PR cannot be read (gh fails): exit 2, nothing merged, no log line."""
+    origin, repo = tmp_path / "origin.git", tmp_path / "repo"
+    for cmd in (["git", "init", "-q", "--bare", str(origin)], ["git", "init", "-q", str(repo)]):
+        subprocess.run(cmd, check=True, capture_output=True)
+    (repo / "f").write_text("x\n")
+    for cmd in (["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "x"],
+                ["remote", "add", "origin", str(origin)], ["push", "-q", "origin", "HEAD:main"]):
+        subprocess.run(["git", "-C", str(repo), *cmd], check=True, capture_output=True)
+    done = _auto("release", str(repo), "94", tmp_path=tmp_path)
+    assert done.returncode == 2 and "cannot read PR 94" in done.stderr
+    assert "called ssh" not in done.stderr and not (tmp_path / "auto-release.log").exists()

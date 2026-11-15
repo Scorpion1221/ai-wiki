@@ -1337,6 +1337,26 @@ Verify: `review end` counts the verdict, and `ai-wiki cat <concept> --json` show
 they use the `ai-wiki-maintainer` skill (step 1's archive, R2, step 5's rollback block) they
 describe that day.
 
+- **Releases that go by themselves (2026-11-16, the owner's decision).** A release that cannot change what the
+  writer stores, what the gate or the audit accepts, or how production is operated may be merged and deployed
+  by an agent without the owner's word; everything else still waits for him.
+  `scripts/release_gate.py classify <repo> <base> <head>` decides which a diff is (exit 0 `auto`, 3 `ask` with
+  each file and reason): tests, docs other than `docs/prompts/`, version stamps, the reader's, curator's and
+  maintainer's skills, and package modules the server never imports (computed from the import closure of
+  `service`, `runtime` and `engine` at both ends of the diff) other than the auditor's CLI and the code that
+  freezes evidence. Of the 40 releases to 2026-11-16 it lets 6 through.
+  `scripts/auto_release.sh release <repo> <pr>` is the only path that merges such a release. It checks, from
+  GitHub and the host and never the caller's word: the PR open, to main, mergeable and not behind main; CI
+  green on its head; the gate's `auto`; `AUTO_RELEASE_REVIEW` (the caller's review gate, run with the head
+  appended) exiting 0; production serving main; at most one such release in 24 h (`AUTO_RELEASE_PER_DAY`).
+  It then merges pinned to the head, deploys with main's `deploy_bwg.sh` (waiting up to 90 minutes for an
+  idle writer), and verifies: writer and mirror on the commit, the worker active, no container restart, no
+  error line in either log since the deploy, `ai-wiki health` on that build, a hybrid search. A failed
+  verification deploys the previous commit again and verifies that. Exit 0 released; 3 needs the owner,
+  nothing changed; 4 merged but not deployed (run it again); 5 rolled back and healthy, main holds the merge:
+  open a revert PR; 6 the rollback failed: a person, now. One line per step in `~/.ai-wiki/auto-release.log`.
+  The rollback is a deploy of the previous commit: rehearsed on production 2026-11-15 19:01Z (0.3.33 to
+  0.3.32 in 50 s, back in 41 s, no error line either way).
 - **The graph (`viz.html`).** A bundle that tracks `viz.html` has it redrawn before a commit at most once per
   `AIWIKI_VIZ_MIN_INTERVAL_S` (3600; 0 redraws on every commit, as before 0.3.29), by the age of its last
   commit. An admin revert redraws it whatever its age, because the graph embeds the bodies the revert takes
