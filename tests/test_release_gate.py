@@ -202,3 +202,51 @@ def test_this_repository_s_server_closure_is_what_the_rule_assumes() -> None:
                  "src/aiwiki/cli/review.py"):
         assert path in files and path not in closure  # held by name: the rule's two lists still name real files
         assert path.startswith((*release_gate.FREEZE, *release_gate.AUDIT))
+
+
+COVERS = ROOT / "scripts" / "review_covers.py"
+
+
+def review(reviews: Path, number: int, head: str, verdict: str = "APPROVED", findings: list | None = None) -> None:
+    reviews.mkdir(exist_ok=True)
+    (reviews / f"round-{number}.json").write_text(json.dumps(
+        {"round": number, "verdict": verdict, "reviewedHeads": {"ai-wiki": head}, "findings": findings or []}))
+
+
+def covered(reviews: Path, root: Path, head: str, repo_id: str = "ai-wiki") -> tuple[int, str]:
+    done = subprocess.run([sys.executable, "-I", str(COVERS), str(reviews), str(root), repo_id, head],
+                          capture_output=True, text=True, check=False)
+    return done.returncode, done.stdout + done.stderr
+
+
+def test_the_review_record_must_approve_exactly_the_code_released(repo, tmp_path) -> None:
+    """The control repository's gate proves the rounds chain; this proves the round that approved is
+    about the code that ships. A merge of the reviewed commit keeps its tree; a later commit does not."""
+    root, base = repo
+    reviews = tmp_path / "reviews"
+    reviewed = commit(root, {"src/aiwiki/cli/search.py": "RETRIES = 3\n"}, "reviewed")
+    assert covered(reviews, root, reviewed)[0] == 3  # no round at all
+    review(reviews, 1, reviewed, "REQUEST_CHANGES")
+    assert "ended REQUEST_CHANGES" in covered(reviews, root, reviewed)[1]
+    review(reviews, 2, reviewed[:7])  # a short sha, as the rounds record them
+    assert covered(reviews, root, reviewed) == (0, f"review_covers: round 2 approved {reviewed[:7]}, "
+                                                   f"the code of {reviewed[:7]}\n")
+    git(root, "checkout", "-q", "-b", "baseline", base)  # the baseline merges the issue: same tree, new commit
+    git(root, "-c", "user.name=t", "-c", "user.email=t@example.com", "merge", "-q", "--no-ff", "-m", "merge",
+        reviewed)
+    merged = git(root, "rev-parse", "HEAD")
+    assert merged != reviewed and covered(reviews, root, merged)[0] == 0
+    later = commit(root, {"src/aiwiki/cli/search.py": "RETRIES = 99\n"}, "slipped in after the review")
+    code, why = covered(reviews, root, later)
+    assert code == 3 and f"reviewed {reviewed[:7]}; the release {later[:7]} holds other code" in why
+    assert "names no reviewed head for other" in covered(reviews, root, merged, "other")[1]
+    review(reviews, 3, reviewed, findings=[{"id": "R3-1", "severity": "P2", "status": "open"},
+                                           {"id": "R3-2", "severity": "P3", "status": "open"}])
+    assert "leaves R3-1 open" in covered(reviews, root, merged)[1]  # an open P2 blocks; a P3 does not
+    review(reviews, 3, reviewed, findings=[{"id": "R3-2", "severity": "P3", "status": "open"}])
+    assert covered(reviews, root, merged)[0] == 0
+    review(reviews, 10, "0" * 40)  # round 10 is later than round 3, though it sorts before it as text
+    assert covered(reviews, root, merged)[0] == 2
+    (reviews / "round-11.json").write_text("{not json")
+    assert covered(reviews, root, merged)[0] == 2
+    assert subprocess.run([sys.executable, "-I", str(COVERS)], capture_output=True).returncode == 2

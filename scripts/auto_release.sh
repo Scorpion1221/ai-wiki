@@ -24,7 +24,9 @@
 #   - CI is green on the PR's head (both jobs completed with success);
 #   - release_gate.py classify <merge-base> <head> says auto;
 #   - AUTO_RELEASE_REVIEW (a command, run with the head sha appended) exits 0: the caller's review record for
-#     exactly this head. Without it `release` refuses: a release nobody reviewed never goes by itself;
+#     exactly this head. Without it `release` refuses: a release nobody reviewed never goes by itself.
+#     scripts/review_covers.py <reviews-dir> <repo-dir> <repo-id> is such a command: the latest round approved,
+#     nothing blocking open, and the commit it reviewed has the head's tree;
 #   - production serves the commit main is at (nothing else is half-deployed), and no deploy is running;
 #   - fewer than AUTO_RELEASE_PER_DAY (default 1) releases went out by this script in the last 24 h.
 #

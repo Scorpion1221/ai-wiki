@@ -1348,7 +1348,9 @@ describe that day.
   `scripts/auto_release.sh release <repo> <pr>` is the only path that merges such a release. It checks, from
   GitHub and the host and never the caller's word: the PR open, to main, mergeable and not behind main; CI
   green on its head; the gate's `auto`; `AUTO_RELEASE_REVIEW` (the caller's review gate, run with the head
-  appended) exiting 0; production serving main; at most one such release in 24 h (`AUTO_RELEASE_PER_DAY`).
+  appended) exiting 0, for which `scripts/review_covers.py <reviews-dir> <repo> ai-wiki` checks that the latest
+  round approved, left no P1 or P2 open and reviewed a commit with the head's tree; production serving main;
+  at most one such release in 24 h (`AUTO_RELEASE_PER_DAY`).
   It then merges pinned to the head, deploys with main's `deploy_bwg.sh` (waiting up to 90 minutes for an
   idle writer), and verifies: writer and mirror on the commit, the worker active, no container restart, no
   error line in either log since the deploy, `ai-wiki health` on that build, a hybrid search. A failed
