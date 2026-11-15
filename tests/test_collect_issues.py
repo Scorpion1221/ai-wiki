@@ -274,6 +274,79 @@ def test_added_issue_evidence_signs_its_description_too(multica: Path, tmp_path:
         "data"].decode()
 
 
+def test_a_cut_issue_freeze_names_the_comments_it_left_out(multica: Path, tmp_path: Path) -> None:
+    """2026-11-06..15: 112 whole-issue freezes (87 issues) were cut at 24 KB and left out 71% of their
+    comments; 10 skips looked for a final report the cut had dropped. The freeze names each comment
+    it does not hold whole, so the maintainer can freeze it alone. What is frozen stays as it was."""
+    secret = "ghp_" + "Z" * 36
+    pad = "x" * 9000
+    row = issue(970, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z")
+    kept = [comment("c1", "2026-09-02T00:00:00Z", "one " + pad),
+            comment("c2", "2026-09-03T00:00:00Z", f"two {secret} " + pad, author=ANALYST),
+            comment("c3", "2026-09-04T00:00:00Z", "three " + pad),  # clipped mid-comment
+            comment("c4", "2026-09-05T00:00:00Z", "Final report: 374/374 passed.")]
+    by_maintainer = comment("c-maint", "2026-09-03T12:00:00Z", "wiki updated " + pad, author=MAINTAINER)
+    key = ("-----BEGIN RSA PRIVATE KEY-----\nabc", "-----END RSA PRIVATE KEY-----")
+    save(multica, {
+        "issues": [row, issue(971, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z"),
+                   issue(972, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z"),
+                   issue(973, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z", description="d" * 25000),
+                   issue(974, "2026-09-01T00:00:00Z", "2026-09-22T00:00:00Z")],
+        "comments": {
+            "issue-970": [*kept[:2], by_maintainer, *kept[2:]],
+            "issue-971": [comment("c5", "2026-09-02T00:00:00Z", "short")],
+            "issue-972": [comment("c9", "2026-09-02T00:00:00Z", "y" * 30000)],
+            "issue-973": [comment("c7", "2026-09-02T00:00:00Z", "结论：全部通过。"),
+                          comment("c8", "2026-09-03T00:00:00Z", f"token {secret}", author=ANALYST)],
+            "issue-974": [comment("k1", "2026-09-02T00:00:00Z", key[0]), comment("k2", "2026-09-03T00:00:00Z", "mid"),
+                          comment("k3", "2026-09-04T00:00:00Z", "xyz\n" + key[1])],
+        },
+    })
+
+    def evidence(identifier: str, comment_id: str | None = None) -> dict[str, Any]:
+        return collect_issues.issue_evidence(identifier, comment_id, cache_dir=tmp_path / f"{identifier}-{comment_id}",
+                                             autopilot=AUTOPILOT, exclude_agents=[MAINTAINER, AUDITOR])
+
+    whole = evidence("WAIO-970")
+    text = whole["data"].decode()
+    assert whole["origin"]["truncated"] and "## Comment c3" in text and "Final report" not in text
+    assert [(row["comment"], row["author"], row["created_at"]) for row in whole["left_out"]] == [
+        ("c3", "member", "2026-09-04T00:00:00Z"), ("c4", "member", "2026-09-05T00:00:00Z")]
+    # The file the writer stores is the one frozen before `left_out` existed: name, bytes, hash, origin.
+    blocks = collect_issues.evidence_blocks(row, "WAIO-970", row["created_at"], kept, [], [],
+                                            collect_issues.description_author(row, []))
+    before = planner.evidence_file("add-WAIO-970.md", "".join(block for block, _ in blocks), {
+        "kind": "issue", "issue_id": "issue-970", "identifier": "WAIO-970", "comments": ["c1", "c2", "c3", "c4"]})
+    assert {name: whole[name] for name in before} == before and set(whole) == {*before, "left_out"}
+    assert "two <redacted:github_token>" in text and whole["origin"]["redactions"] == 1
+
+    alone = evidence("WAIO-970", "c4")  # what the maintainer adds next: the one comment, whole
+    assert "Final report: 374/374 passed." in alone["data"].decode() and alone["left_out"] == []
+    assert evidence("WAIO-970", "c3")["left_out"] == []  # a named comment is never "left out" of its own freeze
+    huge = evidence("WAIO-972", "c9")
+    assert huge["origin"]["truncated"] and huge["left_out"] == []  # even when the limit clips it
+    complete = evidence("WAIO-971")
+    assert not complete["origin"]["truncated"] and complete["left_out"] == []
+
+    # A description past the limit: no comment is held, each is named; `bytes` is the comment's own
+    # size as frozen (UTF-8, after redaction), without the header.
+    behind = evidence("WAIO-973")
+    assert behind["origin"]["truncated"] and "## Comment" not in behind["data"].decode()
+    as_frozen = (f"\n## Comment c7 · member {MEMBER} · 2026-09-02T00:00:00Z\n\n结论：全部通过。\n",
+                 f"\n## Comment c8 · agent {ANALYST} · 2026-09-03T00:00:00Z\n\ntoken <redacted:github_token>\n")
+    sizes = [len(block.encode()) for block in as_frozen]
+    assert behind["left_out"] == [
+        {"comment": "c7", "author": "member", "created_at": "2026-09-02T00:00:00Z", "bytes": sizes[0]},
+        {"comment": "c8", "author": "agent", "created_at": "2026-09-03T00:00:00Z", "bytes": sizes[1]}]
+    assert sizes[0] > len(as_frozen[0])  # bytes, not characters
+
+    # Not cut: nothing is named, though the key block's redaction took the comments between with it.
+    spanned = evidence("WAIO-974")
+    text = spanned["data"].decode()
+    assert not spanned["origin"]["truncated"] and "mid" not in text and "<redacted:private_key>" in text
+    assert spanned["left_out"] == []
+
+
 def test_the_description_is_signed_by_whoever_wrote_it_last() -> None:
     """2026-11-13: 10 of 40 recent issues had their description edited. A member's issue an agent
     rewrote is the agent's text; an unsigned or creator-signed Description read as the member's."""
