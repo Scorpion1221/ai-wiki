@@ -1341,10 +1341,12 @@ describe that day.
   writer stores, what the gate or the audit accepts, or how production is operated may be merged and deployed
   by an agent without the owner's word; everything else still waits for him.
   `scripts/release_gate.py classify <repo> <base> <head>` decides which a diff is (exit 0 `auto`, 3 `ask` with
-  each file and reason): tests, docs other than `docs/prompts/`, version stamps, the reader's, curator's and
-  maintainer's skills, and package modules the server never imports (computed from the import closure of
-  `service`, `runtime` and `engine` at both ends of the diff) other than the auditor's CLI and the code that
-  freezes evidence. Of the 40 releases to 2026-11-16 it lets 6 through.
+  each file and reason): tests, docs other than `docs/prompts/`, version stamps, the reader's skill, and
+  package modules outside the server packages that the server never imports (computed from the import closure
+  of `service`, `runtime` and `engine` at both ends of the diff; a package's `__init__` counts with every
+  module below it) other than the auditor's CLI and the code that freezes evidence. The maintainer's,
+  curator's and auditor's skills ask, as prompts do; so do symlinks, and every package file when a server
+  module loads modules by name. Of the 40 releases to 2026-11-16 it lets 6 through.
   `scripts/auto_release.sh release <repo> <pr>` is the only path that merges such a release. It checks, from
   GitHub and the host and never the caller's word: the PR open, to main, mergeable and not behind main; CI
   green on its head; the gate's `auto`; `AUTO_RELEASE_REVIEW` (the caller's review gate, run with the head

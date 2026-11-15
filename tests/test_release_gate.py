@@ -22,6 +22,7 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not 
 sys.path.insert(0, str(SCRIPT.parent))
 import release_gate  # noqa: E402
 
+MAINTAINER_SKILL = "skills/ai-wiki-curating-maintainer/SKILL.md"
 BASE = {
     "src/aiwiki/__init__.py": "",
     "src/aiwiki/version.py": 'VERSION = "0.3.33"\n',
@@ -44,6 +45,7 @@ BASE = {
     "uv.lock": ('[[package]]\nname = "ai-wiki"\nversion = "0.3.33"\n\n'
                 '[[package]]\nname = "pyyaml"\nversion = "6.0.2"\n'),
     "skills/ai-wiki/SKILL.md": "---\nname: ai-wiki\n---\n<!-- ai-wiki:version 0.3.33 -->\nSearch first.\n",
+    MAINTAINER_SKILL: "---\nname: m\n---\n<!-- ai-wiki:version 0.3.33 -->\nCurate.\n",
     "skills/ai-wiki-auditor/SKILL.md": "---\nname: ai-wiki-auditor\n---\n<!-- ai-wiki:version 0.3.33 -->\nReview.\n",
     "tests/test_x.py": "def test_x():\n    assert True\n",
     "tests/fixtures/skills-fingerprint.json": '{"version": "0.3.33", "sha256": "aa"}\n',
@@ -60,6 +62,7 @@ BUMP = {
     "pyproject.toml": BASE["pyproject.toml"].replace("0.3.33", "0.3.34"),
     "uv.lock": BASE["uv.lock"].replace('version = "0.3.33"', 'version = "0.3.34"'),
     "skills/ai-wiki/SKILL.md": BASE["skills/ai-wiki/SKILL.md"].replace("0.3.33", "0.3.34"),
+    MAINTAINER_SKILL: BASE[MAINTAINER_SKILL].replace("0.3.33", "0.3.34"),
     "skills/ai-wiki-auditor/SKILL.md": BASE["skills/ai-wiki-auditor/SKILL.md"].replace("0.3.33", "0.3.34"),
     "tests/fixtures/skills-fingerprint.json": '{"version": "0.3.34", "sha256": "bb"}\n',
 }
@@ -127,6 +130,15 @@ def test_what_cannot_change_what_the_writer_stores_or_accepts_goes_by_itself(rep
     ({"src/aiwiki/cli/review.py": "DEADLINE_S = 1\n"}, "src/aiwiki/cli/review.py", "how the audit runs"),
     ({"skills/ai-wiki-auditor/SKILL.md": BUMP["skills/ai-wiki-auditor/SKILL.md"] + "Verify all.\n"},
      "skills/ai-wiki-auditor/SKILL.md", "how the audit runs"),
+    # The maintainer's skill is that agent's instructions: what it writes into the wiki follows from it.
+    ({MAINTAINER_SKILL: BUMP[MAINTAINER_SKILL] + "Skip.\n"}, MAINTAINER_SKILL, "an agent's instructions"),
+    ({"skills/new-agent/SKILL.md": "---\nname: n\n---\nDo.\n"}, "skills/new-agent/SKILL.md",
+     "an agent's instructions"),
+    # A second line that merely looks like the version is not the package's version.
+    ({"pyproject.toml": BASE["pyproject.toml"] + '\n[tool.x]\nversion = "9.9.9"\n'}, "pyproject.toml",
+     "more than the version"),
+    # A new module under a server package asks before any import names it.
+    ({"src/aiwiki/service/extra.py": "X = 1\n"}, "src/aiwiki/service/extra.py", "imports it"),
     ({"docs/prompts/production-autopilot-prompt.md": "max=500\n"}, "docs/prompts/production-autopilot-prompt.md",
      "prompt"),
     ({"scripts/deploy_bwg.sh": "#!/usr/bin/env bash\nrm -rf /\n"}, "scripts/deploy_bwg.sh", "low-risk list"),
@@ -250,3 +262,43 @@ def test_the_review_record_must_approve_exactly_the_code_released(repo, tmp_path
     (reviews / "round-11.json").write_text("{not json")
     assert covered(reviews, root, merged)[0] == 2
     assert subprocess.run([sys.executable, "-I", str(COVERS)], capture_output=True).returncode == 2
+
+
+def test_a_package_init_runs_with_every_module_below_it(repo) -> None:
+    """The server imports `aiwiki.maint.planner`, which runs `aiwiki/maint/__init__.py` and `aiwiki/__init__.py`
+    first: a change to either reaches the writer though no import statement names it."""
+    for init in ("src/aiwiki/maint/__init__.py", "src/aiwiki/__init__.py"):
+        root, base = repo
+        head = commit(root, {init: "import os\nos.environ.setdefault('X', '1')\n"}, f"change {init}")
+        code, result = gate(root, base, head)
+        assert code == 3 and {row["file"]: row["reason"] for row in result["ask"]}[init].endswith("imports it"), result
+        git(root, "reset", "-q", "--hard", base)
+    root, base = repo  # the CLI's own __init__ is not on the server: nothing there imports the cli package
+    assert gate(root, base, commit(root, {"src/aiwiki/cli/__init__.py": "X = 1\n"}, "cli init"))[0] == 0
+
+
+def test_loading_modules_by_name_makes_every_package_file_ask(repo) -> None:
+    """An import by name hides its target from the closure, so nothing can be called outside the server."""
+    root, base = repo
+    by_name = "import importlib\nM = importlib.import_module('aiwiki.cli.search')\n"
+    dynamic = commit(root, {"src/aiwiki/runtime/gate.py": by_name}, "the gate loads a module by name")
+    head = commit(root, {"src/aiwiki/cli/search.py": "RETRIES = 9\n"}, "a CLI module changes")
+    code, result = gate(root, dynamic, head)
+    assert code == 3 and "loads modules by name" in result["ask"][0]["reason"], result
+
+
+def test_a_symlink_is_never_low_risk(repo) -> None:
+    root, base = repo
+    (root / "tests" / "link.py").symlink_to("../src/aiwiki/runtime/gate.py")
+    head = commit(root, {}, "a test that is a link into the server")
+    code, result = gate(root, base, head)
+    assert code == 3 and result["ask"] == [{"file": "tests/link.py", "reason": "a symlink or submodule"}]
+
+
+def test_a_rename_is_judged_at_both_paths(repo) -> None:
+    """Moving a server module under tests/ is a deletion from the server and an addition: the deletion asks."""
+    root, base = repo
+    git(root, "mv", "src/aiwiki/engine/document.py", "tests/document.py")
+    head = commit(root, {}, "moved")
+    code, result = gate(root, base, head)
+    assert code == 3 and "src/aiwiki/engine/document.py" in {row["file"] for row in result["ask"]}

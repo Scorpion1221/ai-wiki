@@ -17,20 +17,23 @@ A changed file is low-risk when it is one of:
   docs/** and README.md       documentation, but not docs/prompts/** (the autopilot prompts)
   a version stamp             src/aiwiki/version.py, pyproject.toml and uv.lock differing only in
                               the package version; a SKILL.md differing only in its stamp
-  skills/**                   the reader's, the curator's and the maintainer's skills (the gate
-                              and the audit still judge what those agents write), not the auditor's
-  src/aiwiki/**/*.py          a module the server never imports (see below) that is neither the
-                              auditor's CLI nor the code that freezes evidence
+  skills/ai-wiki/**           the reader's skill. The maintainer's, the curator's and the auditor's
+                              skills are those agents' instructions: they ask, like a prompt
+  src/aiwiki/**/*.py          a module outside the server packages that the server never imports
+                              (see below) and that is neither the auditor's CLI nor the code that
+                              freezes evidence
 
-Everything else asks: a module the writer or the mirror imports, a new dependency, the deploy
-and watchdog scripts, CI, the Dockerfile, the prompts, the Multica pointers, any path this list
-does not name.
+Everything else asks: a module the writer or the mirror imports, anything under the three server
+packages, a new dependency, the deploy and watchdog scripts, CI, the Dockerfile, the prompts, the
+Multica pointers, a symlink or submodule, any path this list does not name.
 
 "The server imports it" is computed, not listed: the import closure of ``aiwiki.service``,
 ``aiwiki.runtime`` and ``aiwiki.engine`` inside the package, at the base and at the head, so a
-module that joins or leaves the server in this very diff asks too. A source file that does not
-parse asks. 2026-10-27..11-16: of the last 40 releases on main this rule lets 6 through (CLI
-habit verbs, read retries, a test fix) and holds 34.
+module that joins or leaves the server in this very diff asks too. A package's ``__init__`` runs
+with every module below it. When a source file does not parse, or a module the server imports
+loads modules by name at run time (``import_module``, ``__import__``), the closure is unknown and
+every package file asks. 2026-10-27..11-16: of the last 40 releases on main this rule lets 6
+through (CLI habit verbs, read retries, a test fix) and holds 34.
 """
 from __future__ import annotations
 
@@ -48,9 +51,12 @@ SERVER = tuple(PACKAGE + name + "/" for name in ("service", "runtime", "engine")
 # Client code that decides what the writer is sent to store, or how the audit runs: the owner's.
 FREEZE = (PACKAGE + "maint/", PACKAGE + "cli/maint.py", PACKAGE + "cli/workspace.py")
 AUDIT = (PACKAGE + "cli/review.py", "skills/ai-wiki-auditor/")
+READER_SKILL = "skills/ai-wiki/"
+# Loading a module by name hides it from the import statements the closure reads.
+DYNAMIC = re.compile(r"\bimport_module\s*\(|\b__import__\s*\(|\brunpy\b|\bpkgutil\b")
 STAMPS = {
     "src/aiwiki/version.py": (r'^VERSION = "[0-9][0-9A-Za-z.+-]*"$', re.M),
-    "pyproject.toml": (r'^version = "[0-9][0-9A-Za-z.+-]*"$', re.M),
+    "pyproject.toml": (r'(?<=\A\[project\]\nname = "ai-wiki"\n)version = "[0-9][0-9A-Za-z.+-]*"$', re.M),
     "uv.lock": (r'(?<=^name = "ai-wiki"\nversion = )"[0-9][0-9A-Za-z.+-]*"$', re.M),
 }
 SKILL_STAMP = r"^<!-- ai-wiki:version [0-9][0-9A-Za-z.+-]* -->$"
@@ -85,7 +91,7 @@ def sources(repo: str, sha: str) -> dict[str, str]:
 
 def server_closure(files: dict[str, str]) -> set[str] | None:
     """The package files the server packages import, directly or through one another. None when
-    one of them does not parse: nothing can then be said to be outside it."""
+    one of them does not parse or loads modules by name: nothing can then be said to be outside it."""
     modules = {}
     for path in files:
         parts = path[len("src/"):-len(".py")].split("/")
@@ -98,7 +104,9 @@ def server_closure(files: dict[str, str]) -> set[str] | None:
             tree = ast.parse(files[path])
         except (SyntaxError, ValueError):
             return None
-        names: list[str] = []
+        if DYNAMIC.search(files[path]):
+            return None
+        names: list[str] = [".".join(package)]  # importing a module runs each package above it first
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names += [alias.name for alias in node.names]
@@ -150,10 +158,12 @@ def reason(path: str, closures: tuple[set[str] | None, set[str] | None], stamp_o
     if path.startswith("docs/"):
         return "an autopilot or agent prompt" if path.startswith("docs/prompts/") else None
     if path.startswith("skills/"):
-        return None
+        return None if path.startswith(READER_SKILL) else "an agent's instructions (a maintainer or curator skill)"
     if path.startswith(PACKAGE) and path.endswith(".py"):
+        if path.startswith(SERVER):
+            return "the writer or the mirror imports it"
         if None in closures:
-            return "a package file does not parse, so the server's imports are unknown"
+            return "a package file does not parse or loads modules by name, so the server's imports are unknown"
         if any(path in closure for closure in closures):
             return "the writer or the mirror imports it"
         if path.startswith(FREEZE):
@@ -167,10 +177,14 @@ def classify(repo: str, base: str, head: str) -> dict:
     changed = [path for path in git(repo, "diff", "--name-only", "--no-renames", "-z", base, head).decode().split("\0")
                if path]
     closures = (server_closure(sources(repo, base)), server_closure(sources(repo, head)))
+    # A symlink or a submodule is not the file its path names: never low-risk.
+    special = {line.split("\t", 1)[1] for sha in (base, head)
+               for line in git(repo, "ls-tree", "-r", "-z", sha).decode().split("\0")
+               if line and line.split(" ", 1)[0] in ("120000", "160000")}
     ask = []
     for path in changed:
         stamp_only = only_the_stamp_differs(path, text_at(repo, base, path), text_at(repo, head, path))
-        why = reason(path, closures, stamp_only)
+        why = "a symlink or submodule" if path in special else reason(path, closures, stamp_only)
         if why:
             ask.append({"file": path, "reason": why})
     if not changed:
