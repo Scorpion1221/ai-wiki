@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.32 -->
+<!-- ai-wiki:version 0.3.33 -->
 
 # AI Wiki Curating Maintainer
 
@@ -103,7 +103,7 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
   `issue:<identifier>#<comment-id>` (a collectable issue) or `source:sources/<file>` (a frozen file
   directly under `sources/`; on a line-ends refusal, pull the workspace as it says). It refuses a
   credential store (a secret file, a Kubernetes Secret): cite the commit message or a document that
-  describes the change. Evidence comes only from this extraction, never from your own text.
+  describes the change. Evidence comes only from this extraction, never from your own text. A whole issue (`issue:<identifier>`) is cut at 24 KB: add each `left_out` comment you need with `#<comment-id>`.
 - A `rebaseline:<remote>` item holds only `baseline.md`, a new or re-based repository's summary:
   freeze the files worth reading with `add-evidence` at its `commit`, then curate them here or
   split with `baseline.md` in one group. Skip it only when nothing in the baseline is durable.
