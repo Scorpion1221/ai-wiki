@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on a correction your own run wrote.
 ---
-<!-- ai-wiki:version 0.3.31 -->
+<!-- ai-wiki:version 0.3.32 -->
 
 # AI Wiki Auditor
 
@@ -18,8 +18,9 @@ downgrades what breaks its rules. Your judgment is only this: is each claim of t
 supported by the frozen evidence the concept cites? Work serially, without subagents.
 
 The automation prompt supplies `bundle`, `run` (the issue id), `max` (the concepts this run may
-take; `review begin` enforces it and a 2-hour deadline: take until `review next` exits `10` or `11`,
-never a count or clock of your own), `triage_max` (§3.6) and `cfg` (the config with `repos.root`).
+take; `review begin` enforces it and a 2-hour deadline whose last 30 minutes are §3.6's: take
+until `review next` exits `10` or `11`, never a count or clock of your own), `triage_max` (§3.6)
+and `cfg` (the config with `repos.root`).
 Shell variables do not survive between tool calls: write the values into every command, and pass
 `-b "$bundle"` to every `ai-wiki` command. `$WS` is the `workspace` path `review begin` prints.
 
