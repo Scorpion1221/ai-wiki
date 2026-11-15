@@ -244,9 +244,15 @@ def test_one_release_a_day(world: World) -> None:
     done = world.run("release")
     assert done.returncode == 3 and "in the last 24 h (limit 1)" in done.stderr
     assert world.main_now() == world.main
-    assert world.run("release", AUTO_RELEASE_PER_DAY="5").returncode == 0  # the owner's knob
+    # The owner's knob counts releases, not log lines: the first wrote two lines (merged, deployed) and is one.
+    assert world.run("release", AUTO_RELEASE_PER_DAY="2").returncode == 0
     assert world.read()["deploys"] == [second] and world.read()["writer"] == second
     assert f"previous={first} deployed" in world.log.read_text().splitlines()[-1]  # what a rollback would restore
+    world.log.write_text(world.log.read_text() + "not-a-date pr=1 head=x previous=y merged\n")
+    world.main = world.main_now()
+    world.propose({"src/aiwiki/cli/search.py": "RETRIES = 5\n"}, serving=second)
+    done = world.run("release", AUTO_RELEASE_PER_DAY="3")  # two dated releases and a line that cannot be dated
+    assert done.returncode == 3 and "3 release(s)" in done.stderr
 
 
 def test_a_busy_writer_past_the_wait_leaves_the_merge_undeployed(world: World) -> None:

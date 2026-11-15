@@ -143,8 +143,11 @@ recent=0
 import sys, datetime
 now = datetime.datetime.now(datetime.timezone.utc); n = 0
 for line in open(sys.argv[1]):
-    try: n += (now - datetime.datetime.fromisoformat(line.split()[0].replace("Z", "+00:00"))).total_seconds() < 86400
-    except Exception: pass
+    words = line.split()
+    if not words or words[-1] != "merged":  # one release writes several lines; its merge is the one counted
+        continue
+    try: n += (now - datetime.datetime.fromisoformat(words[0].replace("Z", "+00:00"))).total_seconds() < 86400
+    except Exception: n += 1  # a line that cannot be dated counts: the limit fails closed
 print(n)' "$LOG")
 [ "$recent" -lt "$PER_DAY" ] || stop 3 "$recent release(s) went out by this script in the last 24 h (limit $PER_DAY)"
 say "conditions hold: PR $PR ${HEAD:0:7} -> main ${MAIN:0:7}, production on ${PREV:0:7}"
