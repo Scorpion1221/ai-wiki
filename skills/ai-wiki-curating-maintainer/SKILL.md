@@ -99,11 +99,11 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
   `ai-wiki -b "$bundle" maint split <item> --group <file>,<file> --group <file>`, 2 to 20 groups
   placing every file of the item exactly once.
 - A file is missing: `ai-wiki -b "$bundle" maint add-evidence <item> <remote>@<commit>:<path>#L<x>-<y> --config "$cfg"`
-  (a tracked repository; drop `#L…` for the whole file), or `issue:<identifier>#<comment-id>` (a
-  collectable issue; a whole issue is cut at 24 KB: add each `left_out` comment you need alone) or
-  `source:sources/<file>` (a frozen file directly under `sources/`; on a line-ends refusal, pull the
-  workspace as it says). It refuses a credential store (a secret file, a Kubernetes Secret): cite a
-  commit or document on the change. Evidence comes only from this extraction, never your own text.
+  (a tracked repository; drop `#L…` for the whole file), or in place of the Git ref
+  `issue:<identifier>#<comment-id>` (a collectable issue) or `source:sources/<file>` (a frozen file
+  directly under `sources/`; on a line-ends refusal, pull the workspace as it says). It refuses a
+  credential store (a secret file, a Kubernetes Secret): cite the commit message or a document that
+  describes the change. Evidence comes only from this extraction, never from your own text. A whole issue (`issue:<identifier>`) is cut at 24 KB: add each `left_out` comment you need with `#<comment-id>`.
 - A `rebaseline:<remote>` item holds only `baseline.md`, a new or re-based repository's summary:
   freeze the files worth reading with `add-evidence` at its `commit`, then curate them here or
   split with `baseline.md` in one group. Skip it only when nothing in the baseline is durable.

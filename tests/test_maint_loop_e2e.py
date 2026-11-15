@@ -463,7 +463,7 @@ def test_add_evidence_extracts_only_what_the_collectors_may_cite(loop, capsys) -
 
 def test_add_evidence_names_what_a_cut_issue_left_out(loop, capsys) -> None:
     """A whole issue past the file limit prints the comments it does not hold whole and the command
-    that freezes one of them alone; that command, as printed, adds the comment whole."""
+    that freezes one of them alone; that command, as printed but for the comment's id, adds it whole."""
     st = loop["st"]
     state = json.loads((loop["tmp"] / "multica.json").read_text(encoding="utf-8"))
     long = [{"id": f"c-{n}", "author_id": "m-1", "author_type": "member", "type": "comment",
@@ -482,10 +482,13 @@ def test_add_evidence_names_what_a_cut_issue_left_out(loop, capsys) -> None:
     assert code == 0 and added["truncated"], added
     assert [row["comment"] for row in added["left_out"]] == ["c-5", "c-6", "c-7"]
     assert "Final report" not in Path(added["path"]).read_text(encoding="utf-8")
-    command = added["next"].split("  (")[0].split()
-    assert command[:5] == ["ai-wiki", "maint", "add-evidence", item_id, "issue:WAIO-7#<comment>"]
-    command[4] = command[4].replace("<comment>", "c-6")
-    code, alone = wiki_json(capsys, *command[1:], "--state-dir", st)
+    stored = item(loop, item_id)["files"][-1]  # what the writer holds is the file alone: no list in its origin
+    assert set(stored["origin"]) == {"kind", "issue_id", "identifier", "comments", "truncated", "redactions"}
+    assert "left_out" not in stored and stored["sha256"] == added["sha256"]
+    command = added["next"].replace("<comment>", "c-6").split()  # as printed, but for the comment's id
+    assert command[:5] == ["ai-wiki", "maint", "add-evidence", item_id, "issue:WAIO-7#c-6"]
+    assert command[-2:] == ["--state-dir", str(st)], "this run's state is not in the default directory"
+    code, alone = wiki_json(capsys, *command[1:])
     assert code == 0 and not alone["truncated"] and "left_out" not in alone and "next" not in alone
     assert "Final report: the retry cap shipped." in Path(alone["path"]).read_text(encoding="utf-8")
     code, clipped = wiki_json(capsys, "maint", "add-evidence", item_id, "issue:WAIO-7#c-7", "--state-dir", st,

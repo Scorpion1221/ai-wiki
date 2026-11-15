@@ -820,9 +820,10 @@ def add_evidence(state_dir: Path, bundle: str | None, item_id: str, ref: str, co
               "truncated": file["origin"]["truncated"], "redactions": file["origin"]["redactions"],
               "path": str(root / workspace.META / "items" / item_id / file["name"])}
     if file.get("left_out"):  # an issue cut at the file limit: the comments it does not hold whole
-        result["left_out"] = file["left_out"]
+        tail = "" if state_dir == cli._STATE_DIR.expanduser() else f" --state-dir {state_dir}"
+        result["left_out"] = file["left_out"]  # ``next`` freezes one of them alone: run it with the comment's id
         result["next"] = (f"ai-wiki maint add-evidence {item_id} issue:{file['origin']['identifier']}#<comment> "
-                          f"--config {config}  (each left_out comment you need, alone)")
+                          f"--config {config}{tail}")
     return OK, result
 
 

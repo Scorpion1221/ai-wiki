@@ -139,10 +139,14 @@ def issue_evidence(identifier: str, comment_id: str | None, *, autopilot: str | 
 def left_out(file: dict[str, Any], blocks: list[tuple[str, str | None]],
              kept: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The comments a clipped freeze does not hold whole, oldest first: ``{comment, author,
-    created_at, bytes}``. The clip keeps the start, so a long issue loses its latest comments,
-    often the final report (2026-11-06..15: 107 of 250 whole-issue freezes were cut and left out
-    71% of their comments). Each can be frozen alone with ``issue:<identifier>#<comment>``; one
-    longer than the file limit is clipped there too (``bytes`` says so).
+    created_at, bytes}``, ``bytes`` the comment's own size as frozen. The clip keeps the start, so
+    a long issue loses its latest comments, often the final report (2026-11-06..15: 112 whole-issue
+    freezes of 87 issues were cut and left out 71% of their comments). Each can be frozen alone
+    with ``issue:<identifier>#<comment>``; that file opens with the issue header too, so a comment
+    past the file limit, or one behind a description near it, is clipped there as well.
+
+    A freeze that is not cut names nothing, even where a redaction took text out of it (a private
+    key block that opens in one comment and closes in a later one takes the comments between).
     """
     if not file["origin"]["truncated"]:
         return []
