@@ -797,3 +797,38 @@ def test_the_triage_reserve_keeps_the_deadline_s_last_part_for_triage(gate, caps
     code, ended = wiki(capsys, "review", "triage", "next", "--state-dir", state)
     assert (code, ended["stopped"]) == (11, "deadline"), ended
 
+
+def test_a_run_recorded_before_the_reserve_keeps_its_one_deadline(gate, capsys, monkeypatch, tmp_path) -> None:
+    """A run 0.3.31 began (its record has `deadline` only) and begun again after the upgrade must not
+    get a concept deadline counted from now: that would let it take concepts past its own deadline."""
+    from aiwiki.cli import maint
+
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setattr(workspace, "RETRY_DELAYS_S", (0, 0, 0))
+    gate.app(AIWIKI_TRIAGE_EPOCH=EPOCH, AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH="2026-09-20T00:00:00Z")
+    skipped(gate)
+    gate.connect("auditor")
+    state = tmp_path / "auditor-state"
+    start = datetime(2026, 11, 15, 1, 0, tzinfo=UTC)
+    clock = {"now": start}
+    monkeypatch.setattr(maint, "_now", lambda: clock["now"])
+    assert wiki(capsys, "review", "begin", "--run", AUD, "--max", 100, "--state-dir", state)[0] == 0
+    [record] = state.glob("reviews/*/review.json")
+    old = json.loads(record.read_text(encoding="utf-8"))
+    del old["concept_deadline"]  # what 0.3.31 wrote
+    record.write_text(json.dumps(old), encoding="utf-8")
+
+    clock["now"] = start + timedelta(minutes=121)  # not begun again: the one deadline stops concepts too
+    code, stopped = wiki(capsys, "review", "next", "--state-dir", state)
+    assert (code, stopped["stopped"]) == (11, "deadline"), stopped
+    clock["now"] = start + timedelta(minutes=110)
+    code, again = wiki(capsys, "review", "begin", "--run", AUD, "--max", 100, "--state-dir", state)
+    assert code == 0 and again["budget"]["deadline"] == again["triage"]["deadline"] == old["deadline"], again
+    clock["now"] = start + timedelta(minutes=125)
+    code, stopped = wiki(capsys, "review", "next", "--state-dir", state)
+    assert (code, stopped["stopped"]) == (11, "deadline"), stopped
+

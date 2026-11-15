@@ -101,8 +101,8 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
           as_human: bool = False, triage_max: int = TRIAGE_MAX, deadline_s: int = DEADLINE_S,
           triage_reserve_s: int = TRIAGE_RESERVE_S) -> tuple[int, dict]:
     """doctor → auditor lease → workspace pull → the backlog's size. ``as_human`` preflights a
-    human reviewer (design §5.5), whom the writer does not hold to the backlog. ``deadline_s`` from
-    the first begin, the run takes no more (``review next`` and ``triage next`` exit 11)."""
+    human reviewer (design §5.5), whom the writer does not hold to the backlog. From the first begin,
+    ``review next`` exits 11 after ``deadline_s - triage_reserve_s`` and ``triage next`` after ``deadline_s``."""
     from aiwiki.cli import doctor, update, workspace
 
     folder = _folder(state_dir, run)
@@ -111,10 +111,12 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
     if triage_reserve_s >= deadline_s:
         raise MaintError(f"--triage-reserve ({triage_reserve_s} s) must be shorter than --deadline ({deadline_s} s)",
                          USAGE)
-    # A run recorded by an older CLI, or begun again, keeps the deadlines it has (or gets them from now).
-    started = maint._now()
-    state.setdefault("deadline", maint._iso(started + timedelta(seconds=deadline_s)))
-    state.setdefault("concept_deadline", maint._iso(started + timedelta(seconds=deadline_s - triage_reserve_s)))
+    # A begin repeated within the run keeps the deadlines it has. A run 0.3.31 recorded has only the
+    # deadline: its concepts keep that one too, never a later one computed from this begin.
+    now = maint._now()
+    state.setdefault("concept_deadline", state.get("deadline") or
+                     maint._iso(now + timedelta(seconds=deadline_s - triage_reserve_s)))
+    state.setdefault("deadline", maint._iso(now + timedelta(seconds=deadline_s)))
     if state["bundle"] != bundle:
         raise MaintError(f"run {run} reviews bundle {state['bundle']!r}, not {bundle!r}", USAGE)
     state["human"] = as_human
