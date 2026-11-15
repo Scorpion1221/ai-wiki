@@ -1047,8 +1047,11 @@ def test_the_deadline_stops_a_run_that_still_has_budget_and_backlog(gate, capsys
     start = datetime(2026, 11, 15, 1, 0, tzinfo=UTC)
     clock = {"now": start}
     monkeypatch.setattr(maint, "_now", lambda: clock["now"])
-    code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "30m", "--state-dir", state)
-    assert code == 0 and begun["backlog"] == 1 and begun["budget"]["deadline"] == "2026-11-15T01:30:00Z", begun
+    code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "30m", "--triage-reserve",
+                       "10m", "--state-dir", state)
+    assert code == 0 and begun["backlog"] == 1, begun
+    deadlines = (begun["budget"]["deadline"], begun["triage"]["deadline"])
+    assert deadlines == ("2026-11-15T01:20:00Z", "2026-11-15T01:30:00Z"), begun
     code, taken = wiki(capsys, "review", "next", "--state-dir", state)
     assert code == 0 and taken["path"] == AIO_AB, taken
     code, recorded = wiki(capsys, "review", "verdict", AIO_AB, "unverified", "--note", "lift not in S1",
@@ -1061,8 +1064,10 @@ def test_the_deadline_stops_a_run_that_still_has_budget_and_backlog(gate, capsys
     code, triage = wiki(capsys, "review", "triage", "next", "--state-dir", state)
     assert (code, triage["stopped"]) == (11, "deadline"), triage
     # A begin repeated within the run keeps the first deadline: it cannot buy itself more time.
-    code, again = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "3h", "--state-dir", state)
-    assert code == 0 and again["budget"]["deadline"] == begun["budget"]["deadline"], again
+    code, again = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--deadline", "3h", "--triage-reserve",
+                       "1h", "--state-dir", state)
+    assert code == 0 and (again["budget"], again["triage"]["deadline"]) == (
+        {**begun["budget"], "taken": 1}, begun["triage"]["deadline"]), again
     # Past the deadline the run still submits what it holds and ends.
     code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
     assert code == 0 and sent["pending"] == 0, sent
