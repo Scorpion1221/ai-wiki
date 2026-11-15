@@ -52,7 +52,12 @@ elif a[:2] == ["pr", "merge"]:
     head = a[a.index("--match-head-commit") + 1]
     if head != s["pr"]["headRefOid"] or s.get("merge_refused"):
         sys.exit("merge refused")
-    subprocess.run(["git", "--git-dir", s["origin"], "update-ref", "refs/heads/main", head], check=True)
+    # As GitHub does for --merge: a merge commit on main with the head's tree, never a fast-forward.
+    g = ["git", "--git-dir", s["origin"], "-c", "user.name=gh", "-c", "user.email=gh@example.com"]
+    out = lambda *c: subprocess.run([*g, *c], capture_output=True, text=True, check=True).stdout.strip()
+    merge = out("commit-tree", out("rev-parse", head + "^{tree}"), "-p", out("rev-parse", "refs/heads/main"),
+                "-p", head, "-m", "Merge pull request")
+    out("update-ref", "refs/heads/main", merge)
     s["pr"]["state"] = "MERGED"; json.dump(s, open(p, "w"))
 else:
     sys.exit("unexpected gh " + " ".join(a))
@@ -119,12 +124,14 @@ class World:
             (self.bin / name).chmod(0o755)
         self.head = self.propose({"src/aiwiki/cli/search.py": "RETRIES = 3\n"})
 
-    def propose(self, files: dict[str, str]) -> str:
-        """A release head on top of main, and the world as a green, reviewed, open PR would leave it."""
+    def propose(self, files: dict[str, str], serving: str | None = None) -> str:
+        """A release head on top of main, and the world as a green, reviewed, open PR would leave it.
+        ``serving`` is the commit production runs: main itself at first, afterwards the last release's head."""
+        git(self.repo, "fetch", "-q", "origin")
         git(self.repo, "checkout", "-q", "-B", "release", self.main)
         head = commit(self.repo, files, "release")
         git(self.repo, "push", "-q", "-f", "origin", "release")
-        self.write({"origin": str(self.origin), "writer": self.main, "mirror": self.main,
+        self.write({"origin": str(self.origin), "writer": serving or self.main, "mirror": serving or self.main,
                     "pr": {"state": "OPEN", "baseRefName": "main", "headRefOid": head, "mergeable": "MERGEABLE",
                            "isDraft": False},
                     "checks": [run("test (3.11)"), run("test (3.12)")]})
@@ -173,8 +180,9 @@ def test_a_low_risk_reviewed_green_release_is_merged_deployed_and_verified(world
     assert done.returncode == 0, done.stderr + done.stdout
     assert f"released: production is healthy on {world.head[:7]} (previous {world.main[:7]})" in done.stdout
     state = world.read()
-    assert world.main_now() == world.head and state["writer"] == state["mirror"] == world.head
-    assert state["deploys"] == [world.head]
+    merge = world.main_now()  # main holds a merge commit of the head; production serves the head itself
+    assert merge != world.head and git(world.repo, "rev-parse", f"{merge}^2") == world.head
+    assert state["writer"] == state["mirror"] == world.head and state["deploys"] == [world.head]
     lines = world.log.read_text().splitlines()
     assert [line.split()[-1] for line in lines] == ["merged", "deployed"]
     assert f"head={world.head} previous={world.main}" in lines[0]
@@ -189,8 +197,8 @@ def test_a_low_risk_reviewed_green_release_is_merged_deployed_and_verified(world
     ({"checks": [run("test (3.11)"), run("test (3.12)", "in_progress", None)]}, "test (3.12) in_progress/None"),
     ({"checks": [run("test (3.11)")]}, "1 check(s) ran, 2 expected"),  # one job never ran
     ({"checks": []}, "0 check(s) ran, 2 expected"),
-    ({"writer": "0" * 40}, "is not on main"),  # something else is half-deployed
-    ({"mirror": "0" * 40}, "is not on main"),
+    ({"writer": "0" * 40}, "does not serve main's code"),  # something else is half-deployed
+    ({"mirror": "0" * 40}, "does not serve main's code"),
 ])
 def test_a_condition_that_does_not_hold_stops_before_the_merge(world: World, change, why) -> None:
     world.patch(**change)
@@ -230,12 +238,15 @@ def test_main_ahead_of_the_release_stops(world: World) -> None:
 
 def test_one_release_a_day(world: World) -> None:
     assert world.run("release").returncode == 0
-    world.main = world.head
-    world.propose({"src/aiwiki/cli/search.py": "RETRIES = 4\n"})
+    # The next day's state: main is the merge commit, production serves the release head (the same tree).
+    first, world.main = world.head, world.main_now()
+    second = world.propose({"src/aiwiki/cli/search.py": "RETRIES = 4\n"}, serving=first)
     done = world.run("release")
     assert done.returncode == 3 and "in the last 24 h (limit 1)" in done.stderr
     assert world.main_now() == world.main
     assert world.run("release", AUTO_RELEASE_PER_DAY="5").returncode == 0  # the owner's knob
+    assert world.read()["deploys"] == [second] and world.read()["writer"] == second
+    assert f"previous={first} deployed" in world.log.read_text().splitlines()[-1]  # what a rollback would restore
 
 
 def test_a_busy_writer_past_the_wait_leaves_the_merge_undeployed(world: World) -> None:
@@ -243,7 +254,8 @@ def test_a_busy_writer_past_the_wait_leaves_the_merge_undeployed(world: World) -
     done = world.run("release")
     assert done.returncode == 4 and "stayed busy" in done.stderr
     state = world.read()
-    assert world.main_now() == world.head and state["writer"] == world.main  # merged, not deployed
+    assert git(world.repo, "rev-parse", f"{world.main_now()}^2") == world.head  # merged,
+    assert state["writer"] == world.main  # not deployed
     assert [line.split()[-1] for line in world.log.read_text().splitlines()] == ["merged"]
 
 
@@ -280,7 +292,7 @@ def test_a_deploy_that_fails_and_restores_itself_reports_the_previous_build(worl
     world.patch(deploy_fails=[world.head])  # deploy_bwg.sh rolled its own part back and exited non-zero
     done = world.run("release")
     assert done.returncode == 5 and f"healthy on the previous {world.main[:7]}" in done.stderr
-    assert world.read()["writer"] == world.main and world.main_now() == world.head
+    assert world.read()["writer"] == world.main and world.main_now() != world.main  # main holds the merge
 
 
 def test_an_unreachable_host_changes_nothing(world: World) -> None:

@@ -27,7 +27,7 @@
 #     exactly this head. Without it `release` refuses: a release nobody reviewed never goes by itself.
 #     scripts/review_covers.py <reviews-dir> <repo-dir> <repo-id> is such a command: the latest round approved,
 #     nothing blocking open, and the commit it reviewed has the head's tree;
-#   - production serves the commit main is at (nothing else is half-deployed), and no deploy is running;
+#   - production serves main's code (the deployed commit has main's tree: nothing else is half-deployed);
 #   - fewer than AUTO_RELEASE_PER_DAY (default 1) releases went out by this script in the last 24 h.
 #
 # Env: AIWIKI_HOST_ALIAS (default bwg-9router), AIWIKI_URL (default the public read URL in the CLI's config),
@@ -130,10 +130,14 @@ else
   say "review: not checked (set AUTO_RELEASE_REVIEW; release refuses without it)"
 fi
 
+# Production serves the commit that was deployed (a release head); main holds the merge commit of that release.
+# The two differ as commits and agree as trees, so the code is what is compared.
+tree_of() { git -C "$REPO" rev-parse --verify --quiet "$1^{tree}" 2>/dev/null || true; }
 state=$(production) || stop 2 "the host $HOST did not answer"
 PREV=$(field writer "$state")
-[ "$PREV" = "$MAIN" ] && [ "$(field mirror "$state")" = "$MAIN" ] \
-  || stop 3 "production (writer ${PREV:0:7}, mirror $(field mirror "$state" | cut -c1-7)) is not on main (${MAIN:0:7}): something else is being released"
+main_tree=$(tree_of "$MAIN")
+[ -n "$main_tree" ] && [ "$(tree_of "$PREV")" = "$main_tree" ] && [ "$(tree_of "$(field mirror "$state")")" = "$main_tree" ] \
+  || stop 3 "production (writer ${PREV:0:7}, mirror $(field mirror "$state" | cut -c1-7)) does not serve main's code (${MAIN:0:7}): something else is being released"
 recent=0
 [ -f "$LOG" ] && recent=$(python3 -I -c '
 import sys, datetime
