@@ -48,6 +48,9 @@ OK, FAILED, USAGE, PREFLIGHT, DROPPED, TRANSIENT, EMPTY, BUDGET = 0, 1, 2, 4, 6,
 BATCH = 5  # reviews per audit changeset (design §2.3)
 TRIAGE_MAX = 20  # triage items a run takes unless begin says otherwise
 DEADLINE_S = 120 * 60  # after this, a run takes no more concepts or triage items: it submits and ends in time
+# The deadline's last part is the triage review's: concepts stop taking this long before it. 2026-11-15:
+# the first two runs with max 100 spent the whole deadline on concepts and re-checked no skip.
+TRIAGE_RESERVE_S = 30 * 60
 # Related evidence: the concept's distinctive identifiers (backticked names, file paths, camelCase,
 # snake_case, UPPER_CASE and dotted names) found in frozen sources it does not cite. An audit that
 # reads only the cited sources re-verified graph-jsx while a newer uncited source showed
@@ -95,7 +98,8 @@ def _backlog(bundle: str) -> dict:
 
 
 def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace_dir: Path | None,
-          as_human: bool = False, triage_max: int = TRIAGE_MAX, deadline_s: int = DEADLINE_S) -> tuple[int, dict]:
+          as_human: bool = False, triage_max: int = TRIAGE_MAX, deadline_s: int = DEADLINE_S,
+          triage_reserve_s: int = TRIAGE_RESERVE_S) -> tuple[int, dict]:
     """doctor → auditor lease → workspace pull → the backlog's size. ``as_human`` preflights a
     human reviewer (design §5.5), whom the writer does not hold to the backlog. ``deadline_s`` from
     the first begin, the run takes no more (``review next`` and ``triage next`` exit 11)."""
@@ -104,8 +108,13 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
     folder = _folder(state_dir, run)
     state = maint._read(folder / "review.json") or {  # a begin repeated within the run keeps its record
         "run": run, "bundle": bundle, "max": max_reviews, "taken": [], "pending": {}, "submitted": [], "dropped": []}
-    # A run recorded by an older CLI, or begun again, keeps the deadline it has (or gets one from now).
-    state.setdefault("deadline", maint._iso(maint._now() + timedelta(seconds=deadline_s)))
+    if triage_reserve_s >= deadline_s:
+        raise MaintError(f"--triage-reserve ({triage_reserve_s} s) must be shorter than --deadline ({deadline_s} s)",
+                         USAGE)
+    # A run recorded by an older CLI, or begun again, keeps the deadlines it has (or gets them from now).
+    started = maint._now()
+    state.setdefault("deadline", maint._iso(started + timedelta(seconds=deadline_s)))
+    state.setdefault("concept_deadline", maint._iso(started + timedelta(seconds=deadline_s - triage_reserve_s)))
     if state["bundle"] != bundle:
         raise MaintError(f"run {run} reviews bundle {state['bundle']!r}, not {bundle!r}", USAGE)
     state["human"] = as_human
@@ -148,9 +157,10 @@ def begin(bundle: str, *, run: str, state_dir: Path, max_reviews: int, workspace
     return OK, {"run": run, "bundle": bundle, "workspace": state["workspace"], "base_revision": pulled["base_revision"],
                 "lease_expires_at": lease.get("expires_at"), "mode": found.get("mode"), "epoch": found.get("epoch"),
                 "backlog": found.get("total"), "seed": found.get("seed"),
-                "budget": {"max": state["max"], "taken": len(state["taken"]), "deadline": state["deadline"]},
+                "budget": {"max": state["max"], "taken": len(state["taken"]), "deadline": state["concept_deadline"]},
                 "triage": {"backlog": triaged and triaged.get("total"), "epoch": triaged and triaged.get("epoch"),
-                           "max": _triage(state)["max"], "taken": len(_triage(state)["taken"])},
+                           "max": _triage(state)["max"], "taken": len(_triage(state)["taken"]),
+                           "deadline": state["deadline"]},
                 "next": f"ai-wiki -b {bundle} review next --json"}
 
 
@@ -179,7 +189,7 @@ def next_concept(state_dir: Path, bundle: str | None, path: str | None = None) -
     state = _load(state_dir, bundle)
     if path is not None and not state.get("human"):
         raise MaintError("--path takes a concept outside the backlog: only a run begun --as-human may", USAGE)
-    spent = _spent(state, len(state["taken"]), state["max"])
+    spent = _spent(state, len(state["taken"]), state["max"], "concept_deadline")
     if spent:
         return BUDGET, {"stopped": spent, "taken": len(state["taken"]), "pending": len(state["pending"]),
                         "next": f"ai-wiki -b {state['bundle']} review submit" if state["pending"] else
@@ -212,7 +222,7 @@ def next_concept(state_dir: Path, bundle: str | None, path: str | None = None) -
         "title": entry.get("title"), "generated": entry.get("generated"),
         "concept": str(root / path), "evidence": [str(root / rel) for rel in entry.get("sources") or []],
         "budget": {"taken": len(state["taken"]), "max": state["max"], "pending": len(state["pending"]),
-                   "deadline": state.get("deadline")},
+                   "deadline": state.get("concept_deadline") or state.get("deadline")},
         "commands": [f"ai-wiki -b {state['bundle']} review evidence {path}",
                      f"ai-wiki -b {state['bundle']} review verdict {path} verified|corrected|unverified "
                      "--note '<why>'"],
@@ -441,11 +451,13 @@ def submit(state_dir: Path, bundle: str | None, *, dry_run: bool, wait: float) -
 # --- triage review: the maintainer's skips and duplicates (service/triage.py) -----------------------
 
 
-def _spent(state: dict, taken: int, limit: int) -> str | None:
-    """Why the run may take nothing more: ``budget`` (its count) or ``deadline`` (its time), else None."""
+def _spent(state: dict, taken: int, limit: int, key: str = "deadline") -> str | None:
+    """Why the run may take nothing more: ``budget`` (its count) or ``deadline`` (its time), else None.
+    Concepts use ``concept_deadline`` (the triage reserve before the deadline), triage the deadline;
+    a run recorded before the reserve has only the deadline, for both."""
     if taken >= limit:
         return "budget"
-    deadline = state.get("deadline")
+    deadline = state.get(key) or state.get("deadline")
     return "deadline" if deadline and maint._iso(maint._now()) >= deadline else None
 
 
@@ -698,6 +710,8 @@ def add_parser(sub, common: dict) -> None:
     begin_.add_argument("--max", type=cli._positive, default=20, help="concepts this run may take (default: 20)")
     begin_.add_argument("--deadline", type=maint._duration, default=DEADLINE_S,
                         help="take no concept or triage item after this, from the first begin (default: 120m)")
+    begin_.add_argument("--triage-reserve", type=maint._duration, default=TRIAGE_RESERVE_S,
+                        help="stop taking concepts this long before --deadline, for the triage review (default: 30m)")
     begin_.add_argument("--dir", type=Path, help="the workspace (default: <state-dir>/reviews/<run>/ws)")
     begin_.add_argument("--as-human", action="store_true",
                         help="a human reviewer (human: principal with human_verify): verdicts are human-reviewed")
@@ -760,7 +774,7 @@ def command(a: argparse.Namespace, selected: str | None) -> int:
         if a.action == "begin":
             code, result = begin(maint._bundle(selected), run=a.run, state_dir=state_dir, max_reviews=a.max,
                                  workspace_dir=a.dir, as_human=a.as_human, triage_max=a.triage_max,
-                                 deadline_s=a.deadline)
+                                 deadline_s=a.deadline, triage_reserve_s=a.triage_reserve)
         elif a.action == "next":
             code, result = next_concept(state_dir, selected, a.path)
         elif a.action == "evidence":

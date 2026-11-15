@@ -485,7 +485,8 @@ def test_the_review_triage_verbs_end_to_end(gate, capsys, monkeypatch, tmp_path)
     state = tmp_path / "auditor-state"
 
     code, begun = wiki(capsys, "review", "begin", "--run", AUD, "--triage-max", 2, "--state-dir", state)
-    assert code == 0 and begun["triage"] == {"backlog": 3, "epoch": EPOCH, "max": 2, "taken": 0}, begun
+    assert code == 0 and begun["triage"] | {"deadline": None} == {"backlog": 3, "epoch": EPOCH, "max": 2, "taken": 0,
+                                                                  "deadline": None}, begun
 
     code, taken = wiki(capsys, "review", "triage", "next", "--state-dir", state)
     assert code == 0 and (taken["item"], taken["status"], taken["reason"]) == (first, "skipped",
@@ -755,3 +756,44 @@ def test_review_triage_next_passes_over_an_item_it_cannot_fetch(gate, capsys, mo
     assert code == 6 and sent["dropped"] == [{"item": second, "code": "triage_off"}] and sent["pending"] == 0, sent
     report = wiki(capsys, "review", "end", "--run", AUD, "--state-dir", state)[1]["triage"]
     assert report["unfetched"][0]["item"] == first and report["unsubmitted"] == []
+
+
+def test_the_triage_reserve_keeps_the_deadline_s_last_part_for_triage(gate, capsys, monkeypatch, tmp_path) -> None:
+    """2026-11-15: the first two audit runs with max 100 spent the whole deadline on concepts and
+    re-checked no skip (28 waiting). Concepts stop --triage-reserve before the deadline; triage takes
+    until the deadline itself; and a reserve that leaves concepts no time is refused at begin."""
+    from aiwiki.cli import maint
+
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setattr(workspace, "RETRY_DELAYS_S", (0, 0, 0))
+    gate.app(AIWIKI_TRIAGE_EPOCH=EPOCH, AIWIKI_AUDIT="external", AIWIKI_BACKLOG_EPOCH="2026-09-20T00:00:00Z")
+    first = skipped(gate)
+    gate.connect("auditor")
+    state = tmp_path / "auditor-state"
+    start = datetime(2026, 11, 15, 1, 0, tzinfo=UTC)
+    clock = {"now": start}
+    monkeypatch.setattr(maint, "_now", lambda: clock["now"])
+
+    code, refused = wiki(capsys, "review", "begin", "--run", "AUD-X", "--deadline", "30m", "--triage-reserve", "30m",
+                         "--state-dir", state)
+    assert code == 2 and "--triage-reserve" in refused["error"], refused
+    code, begun = wiki(capsys, "review", "begin", "--run", AUD, "--max", 100, "--deadline", "60m",
+                       "--triage-reserve", "20m", "--state-dir", state)
+    assert code == 0, begun
+    deadlines = (begun["budget"]["deadline"], begun["triage"]["deadline"])
+    assert deadlines == ("2026-11-15T01:40:00Z", "2026-11-15T02:00:00Z"), begun
+
+    clock["now"] = start + timedelta(minutes=41)  # inside the reserve: concepts stop, triage goes on
+    code, stopped = wiki(capsys, "review", "next", "--state-dir", state)
+    assert (code, stopped["stopped"]) == (11, "deadline"), stopped
+    code, taken = wiki(capsys, "review", "triage", "next", "--state-dir", state)
+    assert code == 0 and taken["item"] == first, taken
+
+    clock["now"] = start + timedelta(minutes=61)  # past the deadline: triage stops too
+    code, ended = wiki(capsys, "review", "triage", "next", "--state-dir", state)
+    assert (code, ended["stopped"]) == (11, "deadline"), ended
+
