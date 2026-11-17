@@ -740,7 +740,9 @@ or legacy corrections.
 The Auditor runs once a day (07:00 CST, after the maintainer's 02:00 run) and reviews up to
 20 concepts a run (cutover sizing; since 0.3.7 it runs after each maintainer run, `max=100`, and from
 0.3.31 `review begin` stops it taking after a 2-hour `--deadline`; from 0.3.32 concepts stop 30 minutes
-earlier, `--triage-reserve`, so the skip and duplicate re-check keeps that time). New work comes first in its backlog, so 30 seed a day releases a seed of
+earlier, `--triage-reserve`, so the skip and duplicate re-check keeps that time; from 0.3.34 the deadline
+is 150 minutes, still inside the 3 h task timeout, because at 2 hours six runs a day reviewed fewer
+concepts than the maintainer wrote). New work comes first in its backlog, so 30 seed a day releases a seed of
 about 70 to 80 concepts (the unverified count `ai-wiki health` shows, plus verifications
 older than their version) within three days, and the Auditor reviews it over about four days,
 longer on a day of heavy new work.
