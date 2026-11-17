@@ -47,9 +47,9 @@ from aiwiki.runtime.changeset import VERDICTS
 OK, FAILED, USAGE, PREFLIGHT, DROPPED, TRANSIENT, EMPTY, BUDGET = 0, 1, 2, 4, 6, 8, 10, 11
 BATCH = 5  # reviews per audit changeset (design §2.3)
 TRIAGE_MAX = 20  # triage items a run takes unless begin says otherwise
-# After this, a run takes no more concepts or triage items: it submits and ends in time, inside Multica's 3 h
-# task timeout. 2026-11-16: at 120 minutes, concepts had 90 a run (33-45 reviewed, 0.45-0.5 a minute) and six
-# runs a day reviewed fewer concepts than the maintainer wrote; the audit backlog went 269 -> 345.
+# After this, a run takes no more concepts or triage items: it submits and ends in time, inside Multica's
+# 3 h task timeout. 2026-11-16: at 120 minutes, concepts had 90 minutes a run (33-45 reviewed, 0.4-0.55 a
+# minute) and six runs a day reviewed fewer concepts than the maintainer wrote; the backlog went 269 -> 345.
 DEADLINE_S = 150 * 60
 # The deadline's last part is the triage review's: concepts stop taking this long before it. 2026-11-15:
 # the first two runs with max 100 spent the whole deadline on concepts and re-checked no skip.
