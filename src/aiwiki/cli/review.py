@@ -47,7 +47,10 @@ from aiwiki.runtime.changeset import VERDICTS
 OK, FAILED, USAGE, PREFLIGHT, DROPPED, TRANSIENT, EMPTY, BUDGET = 0, 1, 2, 4, 6, 8, 10, 11
 BATCH = 5  # reviews per audit changeset (design §2.3)
 TRIAGE_MAX = 20  # triage items a run takes unless begin says otherwise
-DEADLINE_S = 120 * 60  # after this, a run takes no more concepts or triage items: it submits and ends in time
+# After this, a run takes no more concepts or triage items: it submits and ends in time, inside Multica's 3 h
+# task timeout. 2026-11-16: at 120 minutes, concepts had 90 a run (33-45 reviewed, 0.45-0.5 a minute) and six
+# runs a day reviewed fewer concepts than the maintainer wrote; the audit backlog went 269 -> 345.
+DEADLINE_S = 150 * 60
 # The deadline's last part is the triage review's: concepts stop taking this long before it. 2026-11-15:
 # the first two runs with max 100 spent the whole deadline on concepts and re-checked no skip.
 TRIAGE_RESERVE_S = 30 * 60
@@ -711,7 +714,7 @@ def add_parser(sub, common: dict) -> None:
     begin_.add_argument("--run", required=True, type=cli._run, help="the run id (X-AIWiki-Run)")
     begin_.add_argument("--max", type=cli._positive, default=20, help="concepts this run may take (default: 20)")
     begin_.add_argument("--deadline", type=maint._duration, default=DEADLINE_S,
-                        help="take no concept or triage item after this, from the first begin (default: 120m)")
+                        help="take no concept or triage item after this, from the first begin (default: 150m)")
     begin_.add_argument("--triage-reserve", type=maint._duration, default=TRIAGE_RESERVE_S,
                         help="stop taking concepts this long before --deadline, for the triage review (default: 30m)")
     begin_.add_argument("--dir", type=Path, help="the workspace (default: <state-dir>/reviews/<run>/ws)")
