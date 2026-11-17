@@ -21,6 +21,7 @@ from gate_fixture import AI_STUDY, AIO_AB, METRIC, Gate, cite, clone, concept, g
 
 from aiwiki.cli import main as cli
 from aiwiki.cli import maint, workspace
+from aiwiki.cli import review as review_cli
 from aiwiki.engine.document import parse_document
 from aiwiki.engine.validate import body_spill_errors
 from aiwiki.runtime import audit, changeset
@@ -1072,6 +1073,26 @@ def test_the_deadline_stops_a_run_that_still_has_budget_and_backlog(gate, capsys
     code, sent = wiki(capsys, "review", "submit", "--state-dir", state)
     assert code == 0 and sent["pending"] == 0, sent
     assert wiki(capsys, "review", "end", "--run", RUN, "--state-dir", state)[0] == 0
+
+
+def test_the_default_deadline_gives_concepts_two_hours_and_triage_the_last_half_hour(gate, capsys, monkeypatch) -> None:
+    """2026-11-16: at a 120-minute deadline concepts had 90 minutes a run (33-45 reviewed) and six runs a
+    day reviewed fewer concepts than the maintainer wrote (backlog 269 -> 345). 0.3.34: 150 minutes, the
+    triage reserve unchanged, still well inside Multica's 3 h task timeout for the submit, end and report."""
+    tools = gate.tmp / "bin"
+    tools.mkdir()
+    (tools / "uv").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (tools / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    monkeypatch.setattr(workspace, "RETRY_DELAYS_S", (0, 0, 0))
+    gate.connect("auditor")
+    start = datetime(2026, 11, 17, 4, 0, tzinfo=UTC)
+    monkeypatch.setattr(maint, "_now", lambda: start)
+    code, begun = wiki(capsys, "review", "begin", "--run", RUN, "--max", 100, "--state-dir", gate.tmp / "auditor-state")
+    assert code == 0, begun
+    assert (begun["budget"]["deadline"], begun["triage"]["deadline"]) == (
+        "2026-11-17T06:00:00Z", "2026-11-17T06:30:00Z"), begun
+    assert review_cli.DEADLINE_S + 20 * 60 <= 3 * 3600, "leave the run time to submit, end and report"
 
 
 def test_review_verbs_keep_the_workspace_clean_and_drop_what_the_writer_refuses(gate, capsys, monkeypatch) -> None:

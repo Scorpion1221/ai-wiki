@@ -816,7 +816,9 @@ def test_a_run_recorded_before_the_reserve_keeps_its_one_deadline(gate, capsys, 
     start = datetime(2026, 11, 15, 1, 0, tzinfo=UTC)
     clock = {"now": start}
     monkeypatch.setattr(maint, "_now", lambda: clock["now"])
-    assert wiki(capsys, "review", "begin", "--run", AUD, "--max", 100, "--state-dir", state)[0] == 0
+    # 0.3.31's default deadline was 120 minutes: the clock below is set against it, not today's default.
+    assert wiki(capsys, "review", "begin", "--run", AUD, "--max", 100, "--deadline", "120m", "--state-dir",
+                state)[0] == 0
     [record] = state.glob("reviews/*/review.json")
     old = json.loads(record.read_text(encoding="utf-8"))
     del old["concept_deadline"]  # what 0.3.31 wrote
