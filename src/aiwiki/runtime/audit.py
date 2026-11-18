@@ -1164,8 +1164,10 @@ def published_frozen(root: Path, revision: str) -> Callable[[str], bool] | None:
                               timeout=curate.GIT_TIMEOUT_S)
 
     listing = git("-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", revision, "--", "sources")
-    autocrlf = git("config", "--get", "core.autocrlf").stdout.strip().lower()
-    if listing.returncode != 0 or autocrlf not in (b"", b"false", b"input", b"no", b"off", b"0"):
+    # git's own reading: a bare `autocrlf` line is true (R1-2); unset exits 1 with nothing printed
+    autocrlf = git("config", "--type=bool-or-str", "--get", "core.autocrlf")
+    if listing.returncode != 0 or (autocrlf.returncode, autocrlf.stdout.strip()) not in (
+            (1, b""), (0, b"false"), (0, b"input")):
         return None
     blobs: dict[str, str] = {}
     kinds: dict[str, tuple[str, str]] = {}
@@ -1182,8 +1184,16 @@ def published_frozen(root: Path, revision: str) -> Callable[[str], bool] | None:
     if any(path.endswith(".md") for path in kinds):
         return None  # a concept walk of a tree without sources/ would miss it
     if blobs:
+        # A directory's export-ignore leaves out everything under it, yet a file below it reports
+        # `unspecified` (R1-1): ask about each blob and each of its directories, as `dir` and `dir/`.
+        asked = set(blobs)
+        for path in blobs:
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                directory = "/".join(parts[:depth])
+                asked.update((directory, directory + "/"))
         attributes = git("check-attr", f"--source={revision}", "-z", "--stdin", *_EXPORT_ATTRIBUTES,
-                         data=b"\0".join(path.encode("utf-8", "surrogateescape") for path in blobs) + b"\0")
+                         data=b"\0".join(path.encode("utf-8", "surrogateescape") for path in sorted(asked)) + b"\0")
         if attributes.returncode != 0 or any(value != b"unspecified" for value in attributes.stdout.split(b"\0")[2::3]):
             return None
     ledger_oid = blobs.get("sources/.hashes.yaml")
@@ -1196,7 +1206,7 @@ def published_frozen(root: Path, revision: str) -> Callable[[str], bool] | None:
     recorded = {path: oid for path, oid in blobs.items() if path in ledger}
     try:
         hashes = _blob_hashes(root, set(recorded.values()))
-    except (OSError, RuntimeError, subprocess.SubprocessError):
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
         return None
     return lambda target: target in recorded and hashes.get(recorded[target]) == ledger[target]
 
@@ -1210,23 +1220,33 @@ def _blob_hashes(root: Path, oids: set[str]) -> dict[str, str]:
         found: dict[str, str] = {}
         with subprocess.Popen(["git", *curate._NO_AUTO_GC, "-C", str(root), "cat-file", "--batch"],
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as batch:
-            feeder = threading.Thread(target=_feed, args=(batch.stdin, wanted), daemon=True)
-            feeder.start()
-            for oid in wanted:  # answers come in the order asked
-                header = batch.stdout.readline().split()
-                if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
-                    batch.kill()
-                    raise RuntimeError(f"git cat-file --batch did not answer blob {oid}")
-                digest, left = hashlib.sha256(), int(header[2])
-                while left:
-                    chunk = batch.stdout.read(min(left, 1 << 20))
-                    if not chunk:
-                        raise RuntimeError(f"git cat-file --batch ended inside blob {oid}")
-                    digest.update(chunk)
-                    left -= len(chunk)
-                batch.stdout.read(1)  # the newline after the contents
-                found[oid] = digest.hexdigest()
-            feeder.join()
+            # As every other git call, within GIT_TIMEOUT_S (R1-3): the kill ends a stalled read with EOF.
+            watchdog = threading.Timer(curate.GIT_TIMEOUT_S, batch.kill)
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                feeder = threading.Thread(target=_feed, args=(batch.stdin, wanted), daemon=True)
+                feeder.start()
+                for oid in wanted:  # answers come in the order asked
+                    header = batch.stdout.readline().split()
+                    if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+                        batch.kill()
+                        raise RuntimeError(f"git cat-file --batch did not answer blob {oid}")
+                    digest, left = hashlib.sha256(), int(header[2])
+                    while left:
+                        chunk = batch.stdout.read(min(left, 1 << 20))
+                        if not chunk:
+                            raise RuntimeError(f"git cat-file --batch ended inside blob {oid}")
+                        digest.update(chunk)
+                        left -= len(chunk)
+                    batch.stdout.read(1)  # the newline after the contents
+                    found[oid] = digest.hexdigest()
+                feeder.join()
+            except BaseException:
+                batch.kill()
+                raise
+            finally:
+                watchdog.cancel()
         with _BLOB_LOCK:
             if len(_BLOB_SHA256) + len(found) > _BLOB_SHA256_CAP:
                 _BLOB_SHA256.clear()

@@ -1435,14 +1435,28 @@ def test_the_published_sources_are_judged_from_the_object_store(gate, monkeypatc
     assert next(entry for entry in served["concepts"] if entry["path"] == METRIC)["sources"] == []
 
 
-@pytest.mark.parametrize("case", ["attribute", "link", "concept"])
+@pytest.mark.parametrize("case", ["attribute", "directory", "directory-slash", "nested", "autocrlf", "link",
+                                  "concept"])
 def test_a_bundle_the_object_store_cannot_answer_for_unpacks_its_sources(gate, case) -> None:
-    """An export attribute on a source (git archive would write other bytes or none), a ledger that
-    is a link, or a .md under sources/ (the concept walk reads it): published_frozen declines and
-    the backlog judges the whole published tree, as before."""
+    """An export attribute on a source or on a directory above it (git archive would write other
+    bytes or none; a file below an export-ignored directory reports `unspecified`), core.autocrlf
+    on (a bare line is true), a ledger that is a link, or a .md under sources/ (the concept walk
+    reads it): published_frozen declines and the backlog judges the whole published tree."""
     other = clone(gate.remote, gate.tmp / f"other-{case}")
+    cited = parse_document(gate.read(METRIC)).frontmatter["sources"][0]["resource"].lstrip("/")
+    directory = cited.rsplit("/", 1)[0]
     if case == "attribute":
         (other / ".gitattributes").write_text("sources/** export-subst\n", encoding="utf-8")
+    elif case == "directory":
+        (other / ".gitattributes").write_text(f"{directory} export-ignore\n", encoding="utf-8")
+    elif case == "directory-slash":
+        (other / ".gitattributes").write_text(f"{directory}/ export-ignore\n", encoding="utf-8")
+    elif case == "nested":
+        (other / "sources" / ".gitattributes").write_text("* export-ignore\n", encoding="utf-8")
+    elif case == "autocrlf":
+        with (gate.writer / ".git" / "config").open("a", encoding="utf-8") as config:
+            config.write("[core]\n\tautocrlf\n")  # no value: git reads it as true
+        (other / "notes.md").write_text("notes\n", encoding="utf-8")
     elif case == "link":
         (other / "sources" / ".hashes.yaml").rename(other / "ledger.yaml")
         (other / "sources" / ".hashes.yaml").symlink_to("../ledger.yaml")
@@ -1457,5 +1471,7 @@ def test_a_bundle_the_object_store_cannot_answer_for_unpacks_its_sources(gate, c
     gate.appmod._unpack(gate.appmod._published(gate.writer)[2], whole)
 
     assert audit.published_frozen(gate.writer, revision) is None
+    if case.startswith("directory") or case == "nested":
+        assert not audit._frozen(whole)(cited)  # what the old path answers: the source is not in the tree
     assert backlog(gate)["concepts"] == audit.backlog(
         gate.writer, tree=whole, revision=revision, auditors=gate.appmod._auditors(), now=datetime.now(UTC))["concepts"]
