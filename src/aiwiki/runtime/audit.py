@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unicodedata
 from collections import Counter
@@ -37,6 +38,7 @@ from ..engine.document import (
     current_verified,
     generated_fields,
     has_symlink_component,
+    load_yaml,
     normalize_verified,
     parse_document,
 )
@@ -1036,23 +1038,24 @@ def hold_after(environ: Mapping[str, str] = os.environ) -> int:
     return int(raw)
 
 
-def _audit_jobs(bundle: Path, jobs: list[dict] | None = None) -> list[dict]:
+def _audit_jobs(bundle: Path, jobs: list[dict] | None = None, reverted: Mapping[str, str] | None = None) -> list[dict]:
     """The done audit changesets no admin reverted, oldest first, as ``review_records`` orders them."""
-    reverted = I.reverted_by(bundle)
+    reverted = I.reverted_by(bundle) if reverted is None else reverted
     return sorted((job for job in (I.changeset_jobs(bundle) if jobs is None else jobs) if job.get("kind") == "audit"
                    and job.get("status") == "done" and job.get("id") not in reverted),
                   key=lambda job: (str(job.get("finished") or ""), int(job.get("finished_ns") or 0),
                                    str(job.get("started") or ""), str(job.get("id") or "")))
 
 
-def refusals(bundle: Path, *, after: int, jobs: list[dict] | None = None) -> dict[str, list[dict]]:
+def refusals(bundle: Path, *, after: int, jobs: list[dict] | None = None,
+             reverted: Mapping[str, str] | None = None) -> dict[str, list[dict]]:
     """Concepts whose last ``after`` or more reviewed versions all ended unverified: path -> those
     reviews, oldest first, each ``{base, review, at, note}``. A repeated review of one version
     counts once; a verified or corrected outcome ends the run of refusals."""
     if after <= 0:
         return {}
     history: dict[str, list[dict]] = {}
-    for job in _audit_jobs(bundle, jobs):
+    for job in _audit_jobs(bundle, jobs, reverted):
         for review in job.get("reviews") or []:
             if not isinstance(review, dict) or not isinstance(review.get("path"), str) \
                     or not isinstance(review.get("base"), str):
@@ -1115,7 +1118,8 @@ def _frozen(tree: Path) -> Callable[[str], bool]:
     """Whether a bundle file holds the bytes ``sources/.hashes.yaml`` recorded for it. Only the
     service's ledger makes a file frozen evidence, never its presence: a push can add any file."""
     try:
-        ledger = yaml.safe_load((tree / "sources" / ".hashes.yaml").read_text(encoding="utf-8"))
+        # ~6,500 lines on the writer: pure-Python safe_load took 7 s of each backlog (2026-11-18)
+        ledger = load_yaml((tree / "sources" / ".hashes.yaml").read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError):
         ledger = None
     ledger = ledger if isinstance(ledger, dict) else {}
@@ -1128,6 +1132,136 @@ def _frozen(tree: Path) -> Callable[[str], bool]:
                 and hashlib.sha256(path.read_bytes()).hexdigest() == str(ledger.get(target))
         return checked[target]
     return frozen
+
+
+# sha256 of a source blob by object id: a blob's bytes never change, so each is hashed once per
+# process. Bounded (6,500 sources in the bundle on 2026-11-18): past the cap it is cleared, which
+# costs one batch of hashing.
+_BLOB_SHA256: dict[str, str] = {}
+_BLOB_SHA256_CAP = 50_000
+_BLOB_LOCK = threading.Lock()
+# What could make ``git archive`` write other bytes than the blob's (eol conversion, a filter,
+# ident, an encoding) or leave a path out (export-ignore, export-subst rewrites it).
+_EXPORT_ATTRIBUTES = ("text", "eol", "crlf", "ident", "filter", "working-tree-encoding", "export-ignore",
+                      "export-subst")
+
+
+def published_frozen(root: Path, revision: str) -> Callable[[str], bool] | None:
+    """``_frozen`` of the tree ``git archive <revision>`` unpacks (``sources/inbox/`` left out, as
+    a published tree leaves it), answered from the object store: a source is frozen evidence when
+    it is a regular file of the revision whose blob hashes to the entry the revision's
+    ``sources/.hashes.yaml`` records. So the writer's backlog and attention plan need no
+    ``sources/`` on disk: the published tree held 6,500 sources (195 MB of 246 MB, 2026-11-18),
+    and unpacking them took ~15 s of each call.
+
+    None when this cannot promise ``_frozen``'s answer, and the caller unpacks ``sources/``: the
+    ledger is not a regular file, ``core.autocrlf`` is on, a source path has an attribute in
+    ``_EXPORT_ATTRIBUTES``, a path under ``sources/`` ends in ``.md`` (a concept walk would read
+    it), or git cannot answer. ``revision`` names a commit whose root is the bundle.
+    """
+    def git(*args: str, data: bytes | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *curate._NO_AUTO_GC, "-C", str(root), *args], input=data, capture_output=True,
+                              timeout=curate.GIT_TIMEOUT_S)
+
+    listing = git("-c", "core.quotepath=false", "ls-tree", "-r", "-z", "--full-tree", revision, "--", "sources")
+    # git's own reading: a bare `autocrlf` line is true (R1-2); unset exits 1 with nothing printed
+    autocrlf = git("config", "--type=bool-or-str", "--get", "core.autocrlf")
+    if listing.returncode != 0 or (autocrlf.returncode, autocrlf.stdout.strip()) not in (
+            (1, b""), (0, b"false"), (0, b"input")):
+        return None
+    blobs: dict[str, str] = {}
+    kinds: dict[str, tuple[str, str]] = {}
+    for entry in filter(None, listing.stdout.split(b"\0")):
+        meta, _tab, raw = entry.partition(b"\t")
+        mode, kind, oid = meta.decode().split()
+        path = raw.decode("utf-8", "surrogateescape")
+        if path.split("/")[:2] != ["sources", "inbox"]:
+            kinds[path] = (mode, kind)
+            if kind == "blob" and mode in ("100644", "100755"):
+                blobs[path] = oid
+    if "sources/.hashes.yaml" in kinds and "sources/.hashes.yaml" not in blobs:
+        return None  # a link or a tree: what an unpack reads through it is _frozen's to judge
+    if any(path.endswith(".md") for path in kinds):
+        return None  # a concept walk of a tree without sources/ would miss it
+    if blobs:
+        # A directory's export-ignore leaves out everything under it, yet a file below it reports
+        # `unspecified` (R1-1): ask about each blob and each of its directories, as `dir` and `dir/`.
+        asked = set(blobs)
+        for path in blobs:
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                directory = "/".join(parts[:depth])
+                asked.update((directory, directory + "/"))
+        attributes = git("check-attr", f"--source={revision}", "-z", "--stdin", *_EXPORT_ATTRIBUTES,
+                         data=b"\0".join(path.encode("utf-8", "surrogateescape") for path in sorted(asked)) + b"\0")
+        if attributes.returncode != 0 or any(value != b"unspecified" for value in attributes.stdout.split(b"\0")[2::3]):
+            return None
+    ledger_oid = blobs.get("sources/.hashes.yaml")
+    try:
+        ledger = load_yaml(git("cat-file", "blob", ledger_oid).stdout.decode("utf-8")) if ledger_oid else None
+    except (UnicodeError, yaml.YAMLError):
+        ledger = None
+    ledger = {key: str(value) for key, value in ledger.items() if isinstance(key, str) and value is not None} \
+        if isinstance(ledger, dict) else {}
+    recorded = {path: oid for path, oid in blobs.items() if path in ledger}
+    try:
+        hashes = _blob_hashes(root, set(recorded.values()))
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        return None
+    return lambda target: target in recorded and hashes.get(recorded[target]) == ledger[target]
+
+
+def _blob_hashes(root: Path, oids: set[str]) -> dict[str, str]:
+    """sha256 of each blob, those not hashed before read in one ``git cat-file --batch``."""
+    with _BLOB_LOCK:
+        known = {oid: _BLOB_SHA256[oid] for oid in oids if oid in _BLOB_SHA256}
+    wanted = sorted(oids - set(known))
+    if wanted:
+        found: dict[str, str] = {}
+        with subprocess.Popen(["git", *curate._NO_AUTO_GC, "-C", str(root), "cat-file", "--batch"],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as batch:
+            # As every other git call, within GIT_TIMEOUT_S (R1-3): the kill ends a stalled read with EOF.
+            watchdog = threading.Timer(curate.GIT_TIMEOUT_S, batch.kill)
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                feeder = threading.Thread(target=_feed, args=(batch.stdin, wanted), daemon=True)
+                feeder.start()
+                for oid in wanted:  # answers come in the order asked
+                    header = batch.stdout.readline().split()
+                    if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+                        batch.kill()
+                        raise RuntimeError(f"git cat-file --batch did not answer blob {oid}")
+                    digest, left = hashlib.sha256(), int(header[2])
+                    while left:
+                        chunk = batch.stdout.read(min(left, 1 << 20))
+                        if not chunk:
+                            raise RuntimeError(f"git cat-file --batch ended inside blob {oid}")
+                        digest.update(chunk)
+                        left -= len(chunk)
+                    batch.stdout.read(1)  # the newline after the contents
+                    found[oid] = digest.hexdigest()
+                feeder.join()
+            except BaseException:
+                batch.kill()
+                raise
+            finally:
+                watchdog.cancel()
+        with _BLOB_LOCK:
+            if len(_BLOB_SHA256) + len(found) > _BLOB_SHA256_CAP:
+                _BLOB_SHA256.clear()
+            _BLOB_SHA256.update(found)
+        known.update(found)
+    return known
+
+
+def _feed(stream, oids: list[str]) -> None:
+    try:
+        for oid in oids:
+            stream.write(f"{oid}\n".encode())
+        stream.close()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
 
 
 def _cited(rel: str, frontmatter: Mapping) -> set[str]:
@@ -1146,7 +1280,8 @@ def _local_sources(frozen: Callable[[str], bool], rel: str, frontmatter: Mapping
     return sorted(target for target in _cited(rel, frontmatter) if frozen(target))
 
 
-def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], dict[tuple[str, str], dict]]:
+def review_records(bundle: Path, jobs: list[dict] | None = None, reverted: Mapping[str, str] | None = None,
+                   ) -> tuple[dict[tuple[str, str], int], set[str], dict[tuple[str, str], dict]]:
     """For each ``(path, content hash)`` a done audit changeset judged, the order of its newest
     judgement; the seed paths among them; and the newest correction that wrote each, ``{run,
     at, order, legacy}``. Jobs are ordered by finish (to the second, then ``finished_ns``), then
@@ -1162,7 +1297,8 @@ def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], 
     seeded: set[str] = set()
     corrected: dict[tuple[str, str], dict] = {}
     receipted: set[tuple[str, str]] = set()
-    for order, job in enumerate(_audit_jobs(bundle)):  # oldest first: the newest record of a version wins
+    # oldest first: the newest record of a version wins
+    for order, job in enumerate(_audit_jobs(bundle, jobs, reverted)):
         for review in job.get("reviews") or []:
             if not isinstance(review, dict) or not isinstance(review.get("path"), str):
                 continue
@@ -1185,6 +1321,33 @@ def review_records(bundle: Path) -> tuple[dict[tuple[str, str], int], set[str], 
     return reviewed, seeded, corrected
 
 
+# external_changes' last answer per repository, epoch and caller: {(root, since, ref): (span base, head,
+# touched)}. The walk since the epoch re-read every first-parent commit (8,000 by 2026-11-18, ~30 s of
+# git on the writer) for each backlog, attention plan and audit changeset; the next call reads only the
+# commits above the head it read last. The published revision (GET /audit/backlog, the attention plan)
+# and the live HEAD (/maint/status, an audit changeset) keep one entry each, so a HEAD ahead of the
+# published one inside a transaction costs neither a full walk; four entries with the shadow bundle.
+_EXTERNAL: dict[tuple[str, float, str], tuple[str | None, str, dict[str, tuple[int, str, bool]]]] = {}
+_EXTERNAL_LOCK = threading.Lock()
+
+
+def _external_records(root: Path, span: str, since: datetime) -> list[tuple[str, bool, list[str]]]:
+    """``(time, external, paths)`` of each first-parent commit of ``span``, newest first."""
+    log = curate._git(root, "-c", "core.quotepath=false", "log", "--first-parent", "-m", "--no-renames",
+                      "--name-only", "--format=%x1e%ct%x1f%B%x1f", span, "--")
+    if log.returncode != 0:
+        raise RuntimeError(f"cannot read the history since {since.isoformat()}: {log.stderr.strip()[-200:]}")
+    records = []
+    for record in log.stdout.split("\x1e")[1:]:  # one per first-parent commit, a merge included
+        stamp, _separator, rest = record.partition("\x1f")
+        message, _separator, names = rest.partition("\x1f")
+        outside = not (_SERVICE_TRAILER.search(message)
+                       or _SERVICE_SUBJECT.fullmatch(message.split("\n", 1)[0].strip()))
+        when = datetime.fromtimestamp(int(stamp), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        records.append((when, outside, [name for name in (name.strip() for name in names.splitlines()) if name]))
+    return records
+
+
 def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> dict[str, tuple[int, str, bool]]:
     """The newest commit since ``since`` that changed each path: ``(order, time, external)``, order
     0 the newest, external when the service did not write it (§5.3). A push past the service may
@@ -1194,6 +1357,11 @@ def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> d
     "Since" follows ancestry, not dates: the walk covers every first-parent commit above the
     oldest one dated at or after ``since``, so a later commit with a skewed older date cannot
     hide the commits below it, and a merge counts what it brings in against its first parent.
+
+    The answer for a head is kept (``_EXTERNAL``): when the next revision has that head among its
+    first-parent commits above the same span base, only the commits above it are read and the
+    kept orders shift by their number. Anything else (a rewound or rewritten branch, a moved
+    base) reads the whole span again, so the answer is always the one a full walk gives.
     """
     root = curate._repo_root(bundle)
     if root is None or root.resolve() != bundle.resolve():
@@ -1205,25 +1373,34 @@ def external_changes(bundle: Path, since: datetime, revision: str = "HEAD") -> d
     after = [index for index, (_sha, stamp) in enumerate(commits) if int(stamp) >= since.timestamp()]
     if not after:
         return {}
-    span = revision if after[-1] == len(commits) - 1 else f"{commits[after[-1] + 1][0]}..{revision}"
-    log = curate._git(root, "-c", "core.quotepath=false", "log", "--first-parent", "-m", "--no-renames",
-                      "--name-only", "--format=%x1e%ct%x1f%B%x1f", span, "--")
-    if log.returncode != 0:
-        raise RuntimeError(f"cannot read the history since {since.isoformat()}: {log.stderr.strip()[-200:]}")
-    touched: dict[str, tuple[int, str, bool]] = {}
-    for order, record in enumerate(log.stdout.split("\x1e")[1:]):  # newest first
-        stamp, _separator, rest = record.partition("\x1f")
-        message, _separator, names = rest.partition("\x1f")
-        outside = not (_SERVICE_TRAILER.search(message)
-                       or _SERVICE_SUBJECT.fullmatch(message.split("\n", 1)[0].strip()))
-        when = datetime.fromtimestamp(int(stamp), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for name in filter(None, (name.strip() for name in names.splitlines())):
-            touched.setdefault(name, (order, when, outside))
-    return touched
+    head, base = commits[0][0], None if after[-1] == len(commits) - 1 else commits[after[-1] + 1][0]
+    above = {sha: index for index, (sha, _stamp) in enumerate(commits[:after[-1] + 1])}
+    key = (str(root.resolve()), since.timestamp(), "HEAD" if revision == "HEAD" else "published")
+    with _EXTERNAL_LOCK:
+        kept = _EXTERNAL.get(key)
+    records, touched = None, {}
+    if kept is not None and kept[0] == base and kept[1] in above:
+        new = above[kept[1]]  # first-parent commits above the head read last time
+        records = _external_records(root, f"{kept[1]}..{head}", since) if new else []
+        if len(records) == new:
+            touched = {name: (order + new, when, outside) for name, (order, when, outside) in kept[2].items()}
+        else:  # not the walk this relies on: read it all
+            records = None
+    if records is None:
+        records = _external_records(root, head if base is None else f"{base}..{head}", since)
+    newest: dict[str, tuple[int, str, bool]] = {}
+    for order, (when, outside, names) in enumerate(records):  # newest first: the first record of a path wins
+        for name in names:
+            newest.setdefault(name, (order, when, outside))
+    touched.update(newest)
+    with _EXTERNAL_LOCK:
+        _EXTERNAL[key] = (base, head, touched)
+    return dict(touched)
 
 
 def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path | None = None,
-            revision: str = "HEAD", settings: tuple[datetime | None, int] | None = None) -> dict:
+            revision: str = "HEAD", settings: tuple[datetime | None, int] | None = None,
+            frozen: Callable[[str], bool] | None = None) -> dict:
     """The audit backlog (design §5.3): derived, never stored, so it can be rebuilt at any time.
 
     A concept is due when it is not deprecated, no done audit changeset reviewed its current
@@ -1241,7 +1418,9 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     New work (a receipted correction among it) comes first, then ``legacy`` corrections (no
     receipt under A4's rule: the self-verified and Codex corrections from before it), then
     seeds, each part oldest first. ``tree`` is the checkout read (the bundle by default); the
-    review receipts and the history are the bundle's.
+    review receipts and the history are the bundle's. ``frozen`` answers whether a cited source
+    is frozen evidence instead of ``_frozen(tree)``: the writer reads the published sources from
+    its object store (``published_frozen``), so a published tree needs no ``sources/``.
 
     A ``generation`` whose last ``AIWIKI_AUDIT_HOLD_AFTER`` reviewed versions all ended unverified
     is ``held`` instead of due, unless the version is the maintainer's answer to that concept's
@@ -1251,11 +1430,11 @@ def backlog(bundle: Path, *, auditors: frozenset[str], now: datetime, tree: Path
     """
     epoch, per_day = settings or backlog_settings()
     tree = tree or bundle
-    reviewed, seeded, corrected = review_records(bundle)
+    jobs, reverted = I.changesets_and_reverts(bundle)  # one read of the job files for the receipts and holds
+    reviewed, seeded, corrected = review_records(bundle, jobs, reverted)
     latest = external_changes(bundle, epoch, revision) if epoch else {}
-    frozen = _frozen(tree)
-    jobs = I.changeset_jobs(bundle)
-    refused = refusals(bundle, after=hold_after(), jobs=jobs)
+    frozen = frozen or _frozen(tree)
+    refused = refusals(bundle, after=hold_after(), jobs=jobs, reverted=reverted)
     answered = answers(bundle, set(refused), jobs) if refused else set()
     fresh, legacy, older, held = [], [], [], []
     for rel, text in _concepts(tree):
