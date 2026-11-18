@@ -183,6 +183,35 @@ def test_update_check_reports_without_installing(monkeypatch, capsys) -> None:
     assert not called
 
 
+def test_the_home_view_shows_what_the_last_check_saw_without_the_network(monkeypatch, capsys, tmp_path) -> None:
+    from aiwiki.cli import update
+
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "config.json")         # not configured: no server either
+    installed = {"commit": "a" * 40}
+    monkeypatch.setattr(update, "_receipt", lambda: installed)
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **k: pytest.fail("the home view never runs git"))
+
+    def home() -> str:
+        assert cli.main([]) == 0
+        return capsys.readouterr().out
+
+    assert "update:" not in home()                                         # no check yet: nothing to say
+    monkeypatch.setattr(update, "_latest", lambda: "f" * 40)
+    assert cli.main(["update", "--check"]) == 0
+    capsys.readouterr()
+    line = next(line for line in home().splitlines() if line.startswith("update:"))
+    assert "main ffffffffffff is newer than this install (aaaaaaaaaaaa)" in line and "ai-wiki update" in line
+
+    installed["commit"] = "f" * 40                                         # updated since that check
+    assert "update:" not in home()
+    monkeypatch.setattr(update, "_latest", lambda: "f" * 40)
+    assert cli.main(["update", "--check"]) == 0                            # main is what is installed
+    capsys.readouterr()
+    assert "update:" not in home()
+    update._seen_path().write_text("not json")                             # a damaged record is no notice
+    assert "update:" not in home()
+
+
 @pytest.fixture
 def updater(monkeypatch, tmp_path):
     """`ai-wiki update` against a temp state dir, with main ahead and every subprocess recorded, never run."""

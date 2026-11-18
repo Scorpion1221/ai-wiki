@@ -530,17 +530,14 @@ def test_json_errors_are_one_object_like_the_other_json_errors(server, capsys, m
 
 
 @pytest.mark.parametrize("flag", ["--j", "--js", "--jso"])
-def test_an_abbreviated_json_flag_makes_errors_json_too(server, capsys, monkeypatch, flag) -> None:
-    """argparse takes --js for --json: the answer is JSON, and so is the error."""
-    server.script["/search"] = [SEARCH, 502]
-    monkeypatch.setenv("AIWIKI_RETRY_S", "0")
-
+def test_an_abbreviated_json_flag_is_refused_as_json(server, capsys, flag) -> None:
+    """Since 0.3.37 abbreviations are refused (`--top` was silently `--top-k`); the caller asked for JSON, so the
+    usage error is JSON, and it names the real flag."""
     code, out, _err = run(capsys, "search", "x", flag)
-    assert code == 0 and json.loads(out)["shown"] == 1
-    code, out, _err = run(capsys, "search", "x", flag)
-    assert code == 1 and json.loads(out)["error"] == "server rejected the request (status 502): unavailable"
-    code, out, _err = run(capsys, "search", "x", flag, "--stat")
-    assert code == 2 and json.loads(out)["kind"] == "usage"
+    error = json.loads(out)
+    assert code == 2 and error["kind"] == "usage" and f"unrecognized arguments: {flag}" in error["error"]
+    assert "--json" in error["valid_flags"] and error["help"] == "ai-wiki search --help"
+    assert server.requests == []
 
 
 def test_a_malformed_timeout_is_a_usage_error(server, capsys, monkeypatch) -> None:
@@ -711,8 +708,9 @@ def test_a_missing_directory_is_an_error_not_an_empty_success(server, capsys, ve
     assert code == 1 and "metrics/x.md: not a directory" in out and '"ai-wiki ls metrics"' in out
 
     server.script["/ls"] = [*listed, {"items": [{"path": "metrics/", "kind": "dir"}]}]
-    code, out, _err = run(capsys, *args, "metrics")  # empty, but a directory: an empty success
-    assert code == 0 and out.startswith("count:\n  shown: 0")
+    code, out, _err = run(capsys, *args, "metrics")  # empty, but a directory: an empty success that says so
+    zero = '0 entries in metrics' if verb == "ls" else '0 lines match \\"x\\" under metrics'
+    assert code == 0 and out.startswith(f'{verb}:\n  result: "{zero}"')
 
     server.script["/ls"] = [{"items": [{"path": "metrics/x.md", "kind": "concept"}]}]
     server.script["/grep"] = [{"hits": [{"path": "metrics/x.md", "line": 1, "text": "x"}]}]
