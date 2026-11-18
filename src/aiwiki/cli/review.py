@@ -674,8 +674,13 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
     verdicts = [(row.get("verdict"), row.get("status")) for row in record["submitted"]]
     if (maint._read(_pointer(state_dir, state["bundle"])) or {}).get("run") == run:
         _pointer(state_dir, state["bundle"]).unlink()
+    try:  # disk housekeeping never fails the run's summary
+        pruned = maint.prune_workspaces(state_dir, "reviews")
+    except OSError:
+        pruned = None
     return OK, {"run": run, "bundle": state["bundle"], "shadow": state.get("mode") == "codex",
-                "reviewed": len(state["submitted"]), **{name: outcomes.count(name) for name in VERDICTS},
+                "workspaces_pruned": pruned, "reviewed": len(state["submitted"]),
+                **{name: outcomes.count(name) for name in VERDICTS},
                 "downgraded": sorted({row["downgrade"] for row in state["submitted"] if row.get("downgrade")}),
                 "dropped": state["dropped"], "unsubmitted": sorted(state["pending"]), "backlog_remaining": remaining,
                 "lease": released, "jobs": sorted({row["job"] for row in state["submitted"] if row.get("job")}),
