@@ -263,6 +263,21 @@ def changeset_jobs(bundle: Path, principal: str | None = None) -> list[dict]:
     return jobs
 
 
+def changesets_and_reverts(bundle: Path) -> tuple[list[dict], dict[str, str]]:
+    """``changeset_jobs(bundle)`` and ``reverted_by(bundle)`` from one read of the job files, for
+    a caller that needs both (the audit backlog read them four times: 7,484 files, ~20 s on the
+    writer, 2026-11-18)."""
+    jobs = []
+    for path in (bundle / ".okf" / "jobs").glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(job, dict):
+            jobs.append(job)
+    return [job for job in jobs if job.get("mode") == "changeset"], _reverted(jobs)
+
+
 def find_changeset_job(bundle: Path, principal: str, digest: str) -> dict | None:
     """The principal's queued, running or done changeset with this idempotency key (§2.7).
 
