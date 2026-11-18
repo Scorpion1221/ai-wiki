@@ -111,26 +111,34 @@ class _AxiParser(argparse.ArgumentParser):
                       and not isinstance(action, argparse._HelpAction))
 
     def leaf(self, args: list[str]) -> _AxiParser:
-        """The (sub)command parser ``args`` names: argparse reports a subcommand's unknown flag from the root."""
-        parser, skip = self, False
-        for arg in args:
-            if skip:
-                skip = False
-                continue
+        """The (sub)command parser ``args`` names: argparse reports a subcommand's unknown flag from the root.
+
+        It stops where argparse would fail at the current level: at ``--``, or at an option missing its value
+        (``--bundle --json``), so a root error keeps the root's flags and help."""
+        parser, i = self, 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                break
             if arg.startswith("-"):
                 action = parser._option_string_actions.get(arg)
-                skip = action is not None and action.nargs != 0  # `-b kb`: kb is a value, not a command
+                if action is not None and action.nargs != 0:  # `-b kb`: kb is a value, not a command
+                    if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                        break
+                    i += 1
+                i += 1
                 continue
             choices = next((action.choices for action in parser._actions
                             if isinstance(action, argparse._SubParsersAction)), None)
             if not choices or arg not in choices:
                 break
-            parser = choices[arg]
+            parser, i = choices[arg], i + 1
         return parser
 
     def error(self, message: str) -> None:
         owner = getattr(self, "owner", self)  # the root names the subcommand it was parsing
-        commands = [f"{owner.command_path} --help"]
+        # The root's own command_path guesses a subcommand for later failures; a root usage error is the root's.
+        commands = [f"{'ai-wiki' if owner is self and hasattr(self, 'owner') else owner.command_path} --help"]
         flags = owner.flags()
         wrong = re.search(r"invalid choice: '([^']+)'", message)
         if wrong and owner.prog == "ai-wiki":  # an unknown command has no help of its own

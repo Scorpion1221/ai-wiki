@@ -319,6 +319,19 @@ def test_abbreviated_flags_are_refused_with_the_commands_own_flags(monkeypatch, 
     assert f'"{valid}"' in valid_line and '"--help"' not in valid_line
 
 
+@pytest.mark.parametrize("argv", [
+    ["--bundle", "--json", "cat", "x.md"],   # the root's --bundle has no value: a root error, not cat's
+    ["-b"],
+])
+def test_a_root_usage_error_keeps_the_roots_flags_and_help(monkeypatch, capsys, argv) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("a usage error is decided before any request"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    out = capsys.readouterr().out
+    assert exc.value.code == 2 and '"ai-wiki --help"' in out and "cat --help" not in out
+    assert "search --help" not in out and '"--max-chars"' not in out and '"--top-k"' not in out
+
+
 def test_an_unknown_command_names_no_flags_and_points_at_the_root_help(capsys) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["serach", "x"])
