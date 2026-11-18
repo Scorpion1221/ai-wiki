@@ -194,6 +194,11 @@ the Multica registry).
   cursors, receipts), so a run can move to another host or model between any two runs.
 - Auditor: its own schedule, never the maintainer's credential, never the maintainer's
   hand-off text: it reads only the backlog and the evidence the server serves.
+- Disk: each run pulls a full bundle checkout into `~/.ai-wiki/state/{runs,reviews}/<run>/ws/`
+  (~340 MB in 2026-11). `maint end` and `review end` delete the `ws/` of finished runs of their
+  kind, keeping the newest `AIWIKI_KEEP_WORKSPACES` (default 3; `-1` keeps all). A run a
+  `current-*.json` pointer names, or one written to within the lease TTL, is never touched, and
+  run records (`run.json`, reports, proposals) always stay.
 - Member: `ai-wiki ingest <file|text|link>`. The writer commits the submission's copy (text
   redacted of secrets, an image as sent; nothing of a `needs-conversion` file such as a PDF) to
   `sources/inbox/intake/` and pushes it before it answers, in a commit

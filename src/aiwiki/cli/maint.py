@@ -42,6 +42,7 @@ import io
 import json
 import os
 import re
+import shutil
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -183,6 +184,49 @@ def run_dir(state_dir: Path, run: str) -> Path:
 
 def _pointer(state_dir: Path, bundle: str) -> Path:
     return state_dir / "runs" / f"current-{_slug(bundle)}.json"
+
+
+KEEP_WORKSPACES = 3  # finished runs of a kind whose workspace (a full bundle checkout, ~340 MB) stays for a look
+
+
+def prune_workspaces(state_dir: Path, folder: str, keep: int | None = None) -> dict:
+    """Delete the ``ws/`` of finished runs under ``state_dir/folder`` (``runs`` or ``reviews``), newest
+    ``keep`` kept (``AIWIKI_KEEP_WORKSPACES``, default ``KEEP_WORKSPACES``; a negative value keeps all).
+
+    Each run left a full checkout there, about 340 MB, which no later run reads: a run pulls into its
+    own folder. 2026-11-18 on the Multica runtime they were 26 of 28 GB of state and grew ~2.5 GB a
+    day. A run a ``current-*.json`` pointer names, or one any file of which changed within the lease
+    TTL, is never touched; its records (run.json, report, proposals) always stay.
+    """
+    from aiwiki.service.maint_state import LEASE_TTL
+
+    if keep is None:
+        raw = os.environ.get("AIWIKI_KEEP_WORKSPACES", "").strip()
+        keep = int(raw) if raw.lstrip("-").isdigit() else KEEP_WORKSPACES
+    root = state_dir / folder
+    if keep < 0 or not root.is_dir():
+        return {"removed": 0, "freed_mb": 0}
+    live = {_slug(str(current["run"])) for path in root.glob("current-*.json")
+            if isinstance(current := _read(path) or {}, dict) and isinstance(current.get("run"), str)}
+    now, done = time.time(), []
+    for run in root.iterdir():
+        ws = run / "ws"
+        if run.name in live or not ws.is_dir() or ws.is_symlink():
+            continue
+        try:
+            touched = max(path.stat().st_mtime for path in run.iterdir())
+        except (OSError, ValueError):
+            continue
+        if now - touched >= LEASE_TTL.total_seconds():
+            done.append((touched, run.name, ws))
+    done.sort(reverse=True)
+    removed, freed = 0, 0
+    for _touched, _name, ws in done[keep:]:
+        size = sum(path.stat().st_size for path in ws.rglob("*") if path.is_file() and not path.is_symlink())
+        shutil.rmtree(ws, ignore_errors=True)
+        if not ws.exists():
+            removed, freed = removed + 1, freed + size
+    return {"removed": removed, "freed_mb": freed // (1024 * 1024)}
 
 
 def _currents(state_dir: Path) -> list[dict]:
@@ -867,6 +911,8 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict, str]:
     (folder / "report.md").write_text(markdown, encoding="utf-8")
     if bundle and (_read(_pointer(state_dir, bundle)) or {}).get("run") == run:
         _pointer(state_dir, bundle).unlink()
+    with contextlib.suppress(OSError):  # disk housekeeping never fails the run's report
+        built["workspaces_pruned"] = prune_workspaces(state_dir, "runs")
     code = PREFLIGHT if "collect" not in state else NEEDS_HUMAN if built["needs_human"] else OK
     return code, built, markdown
 

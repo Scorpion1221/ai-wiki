@@ -308,6 +308,9 @@ def test_a_run_collects_triages_proposes_and_reports(loop, capsys) -> None:
     assert report["changesets"][0]["id"] == loop["changeset"]
     assert report["cursors"]["repos"]["value"] == repos["value"]  # the off-site copy admin cursor import reads
     assert report["lease"]["released"] is True
+    # The run just ended wrote within the lease TTL: its workspace stays for a look; older ones go.
+    assert report["workspaces_pruned"] == {"removed": 0, "freed_mb": 0}
+    assert (maint.run_dir(Path(st), RUN) / "ws").is_dir()
     if os.environ.get("AIWIKI_WRITE_GOLDEN"):
         GOLDEN.write_text(normalized(report["report"], loop["tmp"]), encoding="utf-8")
     assert normalized(report["report"], loop["tmp"]) == GOLDEN.read_text(encoding="utf-8")
