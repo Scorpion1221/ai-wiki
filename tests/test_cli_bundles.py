@@ -295,6 +295,91 @@ def test_usage_errors_are_structured_on_stdout(capsys) -> None:
     assert 'kind: "usage"' in captured.out
     assert "unrecognized arguments: --stat" in captured.out
     assert '"ai-wiki search --help"' in captured.out
+    assert 'valid_flags[3]: "--fields","--json","--top-k"' in captured.out  # --limit is hidden, --help implied
+
+
+@pytest.mark.parametrize(("argv", "flag", "help_command", "valid"), [
+    (["search", "x", "--top", "2"], "--top", "ai-wiki search --help", "--top-k"),        # was --top-k 2
+    (["grep", "x", "--lim", "0"], "--lim", "ai-wiki grep --help", "--limit"),           # was --limit 0
+    (["-b", "kb", "ls", "--rec"], "--rec", "ai-wiki ls --help", "--recursive"),
+    (["cat", "x.md", "--fu"], "--fu", "ai-wiki cat --help", "--full"),
+    (["admin", "changesets", "--lim", "3"], "--lim", "ai-wiki admin changesets --help", "--limit"),
+    (["review", "triage", "next", "--state"], "--state", "ai-wiki review triage next --help", "--state-dir"),
+])
+def test_abbreviated_flags_are_refused_with_the_commands_own_flags(monkeypatch, capsys, argv, flag, help_command,
+                                                                  valid) -> None:
+    """argparse took any unambiguous prefix: `--top 2` ran as `--top-k 2`, a flag the caller never wrote."""
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("a usage error is decided before any request"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    out = capsys.readouterr().out
+    assert exc.value.code == 2 and 'kind: "usage"' in out and flag in out
+    assert f'"{help_command}"' in out
+    valid_line = next(line for line in out.splitlines() if line.strip().startswith("valid_flags["))
+    assert f'"{valid}"' in valid_line and '"--help"' not in valid_line
+
+
+@pytest.mark.parametrize("argv", [
+    ["--bundle", "--json", "cat", "x.md"],   # the root's --bundle has no value: a root error, not cat's
+    ["-b"],
+])
+def test_a_root_usage_error_keeps_the_roots_flags_and_help(monkeypatch, capsys, argv) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("a usage error is decided before any request"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    out = capsys.readouterr().out
+    assert exc.value.code == 2 and '"ai-wiki --help"' in out and "cat --help" not in out
+    assert "search --help" not in out and '"--max-chars"' not in out and '"--top-k"' not in out
+
+
+def test_an_unknown_command_names_no_flags_and_points_at_the_root_help(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["serach", "x"])
+    out = capsys.readouterr().out
+    assert exc.value.code == 2 and "invalid choice: 'serach'" in out
+    assert "valid_flags" not in out and '"ai-wiki --help"' in out and "serach --help" not in out
+
+
+@pytest.mark.parametrize(("argv", "message"), [
+    (["search", "x", "--fields", "path,nope"], "unknown field(s) for ai-wiki search: nope"),
+    (["search", "x", "--fields", " , "], "unknown field(s) for ai-wiki search: (none given)"),
+    (["ls", "--fields", "score"], "unknown field(s) for ai-wiki ls: score"),       # a search-only column
+    (["search", "x", "--fields", "path", "--json"], "--json already returns complete rows"),
+])
+def test_fields_are_checked_before_any_request(monkeypatch, capsys, argv, message) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("checked before any request"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    out = capsys.readouterr().out
+    assert exc.value.code == 2 and message in out
+
+
+def test_fields_pick_columns_in_the_order_given_and_carry_into_the_more_hint(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_api", lambda *a, **kw: {
+        "results": [{"path": "x.md", "title": "X", "score": 2.5, "status": "stable"}], "total": 3})
+    assert cli.main(["search", "x", "--fields", "score, path,score"]) == 0
+    out = capsys.readouterr().out
+    assert 'results[1]{score,path}:\n  2.5,"x.md"' in out
+    assert '"ai-wiki search \\"x\\" --top-k 3 --fields score,path"' in out
+
+
+def test_empty_results_state_the_zero(monkeypatch, capsys) -> None:
+    """An empty table header made agents rerun the same command to confirm "nothing"."""
+    routes = {"/search": {"results": [], "total": 0, "retrieval": {"mode": "hybrid"}}, "/grep": {"hits": []},
+              "/ls": {"items": []}}
+    monkeypatch.setattr(cli, "_api", lambda route, **kw: routes[route])
+    assert cli.main(["search", "订阅 率"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith('search:\n  result: "0 concepts match \\"订阅 率\\""') and "results[" not in out
+    assert 'mode: "hybrid"' in out and "grep" in out and "--fixed" in out
+    assert cli.main(["grep", "x"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith('grep:\n  result: "0 lines match \\"x\\""') and "hits[" not in out
+    assert cli.main(["ls"]) == 0
+    out = capsys.readouterr().out
+    assert out == 'ls:\n  result: "0 entries in the bundle root"\n'
+    assert cli.main(["search", "x", "--json"]) == 0  # JSON stays the envelope with its counts
+    assert json.loads(capsys.readouterr().out)["total"] == 0
 
 
 def test_bundle_rm_requires_flag_without_prompt_or_api(monkeypatch, capsys) -> None:
@@ -360,14 +445,19 @@ def test_cat_json_and_read_tables_surface_okf_metadata(monkeypatch, capsys) -> N
     assert cli.main(["ls"]) == 0
     ls_out = capsys.readouterr().out
     assert "concepts[1]{path,status,trust,freshness,verification_current" in ls_out
-    assert "generated_at,verified_at,current_verified_at,stale_on,basis,summary" in ls_out
+    assert "generated_at,verified_at,stale_on,basis,summary}" in ls_out  # the evidence gate's columns
     assert '"machine-confirmed","stale",true' in ls_out and '"2026-11-11","default","stable — X"' in ls_out
+    assert cli.main(["ls", "--fields", "all"]) == 0
+    assert "generated_at,verified_at,current_verified_at,stale_on,basis,summary}" in capsys.readouterr().out
 
     assert cli.main(["search", "x"]) == 0
     search_out = capsys.readouterr().out
+    assert "verification_current,generated_at,verified_at,stale_on,basis,retrieval,coverage,terms}" in search_out
+    assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z","2026-11-11","default","lexical",1.0,"x"' in search_out
+    assert cli.main(["search", "x", "--fields", "all"]) == 0
+    search_out = capsys.readouterr().out
     assert "verification_current,generated_at,verified_at,current_verified_at,stale_on,basis,score" in search_out
     assert '"2026-11-11","default",8' in search_out
-    assert '"2026-08-13T10:00:00Z","2026-08-13T11:00:00Z"' in search_out
     assert "score,retrieval,phrase,coverage,fields,terms,context" in search_out
     assert '8,"lexical",true,1.0,"title|body","x"' in search_out
 

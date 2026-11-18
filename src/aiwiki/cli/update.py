@@ -132,6 +132,34 @@ def _latest() -> str:
     return sha
 
 
+def _seen_path() -> Path:
+    return _default_state_dir() / "update-seen.json"
+
+
+def _remember(installed: str | None, latest: str) -> None:
+    """What this check read from ``main``, for the home view (which never touches the network)."""
+    try:
+        path = _seen_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"installed": installed, "latest": latest}))
+    except OSError:
+        pass  # a read-only state directory: the home view just shows no notice
+
+
+def cached_notice() -> str | None:
+    """A one-line notice when the last check saw ``main`` ahead of the commit installed now, else None."""
+    try:
+        seen = json.loads(_seen_path().read_text())
+    except (OSError, ValueError):
+        return None
+    installed = _receipt().get("commit")
+    if not isinstance(seen, dict) or not isinstance(seen.get("latest"), str) or not installed:
+        return None
+    if seen.get("installed") != installed or seen["latest"] == installed:
+        return None  # updated since that check, or nothing newer: never a stale nag
+    return f"main {seen['latest'][:12]} is newer than this install ({installed[:12]}), as of the last check"
+
+
 def _summary(rows: list[dict]) -> str:
     states = {row["status"] for row in rows}
     return "current" if states == {"current"} else "foreign" if "foreign" in states else "stale"
@@ -248,6 +276,7 @@ def update_command(args) -> int:
 def _status() -> tuple[dict, str, list[dict]]:
     installed = _receipt()
     latest = _latest()
+    _remember(installed.get("commit"), latest)
     rows = skills.status()
     data = {"installed": f"{VERSION} ({(installed.get('commit') or 'unknown')[:12]})", "latest": latest[:12],
             "available": installed.get("commit") != latest, "skills": _summary(rows)}
