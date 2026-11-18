@@ -79,20 +79,62 @@ _COMMAND_HABITS = {
 }
 _STATE_DIR = Path("~/.ai-wiki/state")  # expanded when used, so help and tests never pin a home
 _JSON_ERRORS = False  # set per command line: under --json an error is one JSON object, not TOON
+# TOON search/ls rows: every column a command can show, in display order, and the default subset: what the
+# Skill's evidence gate reads (status, trust, freshness, current verification and its dates) plus, for search,
+# what says why a row matched. `--fields a,b|all` asks for others; --json always returns complete rows.
+_SEARCH_FIELDS = ("path", "title", "status", "trust", "freshness", "verification_current", "generated_at",
+                  "verified_at", "current_verified_at", "stale_on", "basis", "score", "retrieval", "phrase",
+                  "coverage", "fields", "terms", "context")
+_SEARCH_DEFAULT = ("path", "title", "status", "trust", "freshness", "verification_current", "generated_at",
+                   "verified_at", "stale_on", "basis", "retrieval", "coverage", "terms")
+_LS_FIELDS = ("path", "status", "trust", "freshness", "verification_current", "generated_at", "verified_at",
+              "current_verified_at", "stale_on", "basis", "summary")
+_LS_DEFAULT = ("path", "status", "trust", "freshness", "verification_current", "generated_at", "verified_at",
+               "stale_on", "basis", "summary")
 
 
 class _AxiParser(argparse.ArgumentParser):
-    """Argparse with agent-readable usage failures on stdout."""
+    """Argparse with agent-readable usage failures on stdout.
+
+    Abbreviated flags are refused (``--top`` is not ``--top-k``): a guessed flag returns plausible output for
+    a flag the caller never meant. A usage error lists the failing command's flags, so one turn corrects it."""
 
     def __init__(self, *args, command_path: str = "ai-wiki", **kwargs):
         self.command_path = command_path
+        kwargs.setdefault("allow_abbrev", False)
         super().__init__(*args, **kwargs)
 
+    def flags(self) -> list[str]:
+        """One spelling per visible option (the long one when it has one); ``--help`` always passes."""
+        return sorted(max(action.option_strings, key=len) for action in self._actions
+                      if action.option_strings and action.help is not argparse.SUPPRESS
+                      and not isinstance(action, argparse._HelpAction))
+
+    def leaf(self, args: list[str]) -> _AxiParser:
+        """The (sub)command parser ``args`` names: argparse reports a subcommand's unknown flag from the root."""
+        parser, skip = self, False
+        for arg in args:
+            if skip:
+                skip = False
+                continue
+            if arg.startswith("-"):
+                action = parser._option_string_actions.get(arg)
+                skip = action is not None and action.nargs != 0  # `-b kb`: kb is a value, not a command
+                continue
+            choices = next((action.choices for action in parser._actions
+                            if isinstance(action, argparse._SubParsersAction)), None)
+            if not choices or arg not in choices:
+                break
+            parser = choices[arg]
+        return parser
+
     def error(self, message: str) -> None:
-        commands = [f"{self.command_path} --help"]
+        owner = getattr(self, "owner", self)  # the root names the subcommand it was parsing
+        commands = [f"{owner.command_path} --help"]
+        flags = owner.flags()
         wrong = re.search(r"invalid choice: '([^']+)'", message)
-        if wrong and self.prog == "ai-wiki":  # an unknown command has no help of its own
-            word, commands = wrong.group(1), ["ai-wiki --help"]
+        if wrong and owner.prog == "ai-wiki":  # an unknown command has no help of its own
+            word, commands, flags = wrong.group(1), ["ai-wiki --help"], []
             # Agents reach for filesystem/kubectl verbs; name the command they meant.
             meant = _COMMAND_HABITS.get(word)
             if meant:
@@ -105,19 +147,21 @@ class _AxiParser(argparse.ArgumentParser):
         _error(
             message,
             kind="usage",
-            usage=self.format_usage(),
+            usage=owner.format_usage(),
+            flags=flags,
             commands=tuple(commands),
         )
         raise SystemExit(2)
 
 
-def _error(message: str, *, kind: str, usage: str | None = None, commands: Sequence[str] = ()) -> None:
+def _error(message: str, *, kind: str, usage: str | None = None, flags: Sequence[str] = (),
+           commands: Sequence[str] = ()) -> None:
     """The standard error on stdout: TOON, or under --json one object shaped like the other JSON errors."""
     if _JSON_ERRORS:
-        print(json.dumps({"error": message, "kind": kind, **({"help": commands[0]} if commands else {})},
-                         ensure_ascii=False))
+        print(json.dumps({"error": message, "kind": kind, **({"valid_flags": list(flags)} if flags else {}),
+                          **({"help": commands[0]} if commands else {})}, ensure_ascii=False))
     else:
-        emit_error(message, kind=kind, usage=usage, commands=commands)
+        emit_error(message, kind=kind, usage=usage, flags=flags, commands=commands)
 
 
 def _fail(message: str, *, help_command: str | None = None, code: int = 1) -> None:
@@ -666,6 +710,24 @@ def _count_lines(shown: int, total: int | None = None) -> list[str]:
     return object_lines("count", values)
 
 
+def _fields(raw: str | None, default: tuple[str, ...], valid: tuple[str, ...], command: str,
+            as_json: bool) -> tuple[str, ...]:
+    """``--fields a,b`` / ``--fields all`` -> the TOON columns, checked before any request (exit 2 if wrong)."""
+    if raw is None:
+        return default
+    if as_json:
+        _fail(f"--fields picks TOON columns; {command} --json already returns complete rows: drop one of them",
+              help_command=f"{command} --help", code=2)
+    if raw.strip() == "all":
+        return valid
+    chosen = tuple(dict.fromkeys(name.strip() for name in raw.split(",") if name.strip()))
+    unknown = [name for name in chosen if name not in valid]
+    if unknown or not chosen:
+        _fail(f"unknown field(s) for {command}: {', '.join(unknown) or '(none given)'}; "
+              f"valid: {','.join(valid)} or all", help_command=f"{command} --help", code=2)
+    return chosen
+
+
 LARK_TIMEOUT = "lark-cli timed out"
 
 
@@ -698,7 +760,11 @@ def _lark_fetch(url: str, identity: str | None = None) -> tuple[dict | None, str
 
 
 def _home() -> int:
-    identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION})
+    from aiwiki.cli.update import cached_notice
+
+    notice = cached_notice()  # what the last `ai-wiki update [--check]` saw; no network here
+    identity = object_lines(None, {"bin": _executable(), "description": _DESCRIPTION,
+                                   **({"update": f"{notice}: run `ai-wiki update && hash -r`"} if notice else {})})
     print("\n".join(identity))
     cfg = _normalize(_load())
     if not cfg.get("endpoint") or not _token(cfg):
@@ -740,7 +806,7 @@ def _home() -> int:
 def main(argv=None) -> int:
     global _JSON_ERRORS
     args = list(sys.argv[1:] if argv is None else argv)
-    # argparse takes any unambiguous prefix of an option, and no other option starts with --j.
+    # A prefix of --json is a usage error (abbreviations are refused), but the caller asked for JSON: so is the error.
     _JSON_ERRORS = any(len(arg) > 2 and "--json".startswith(arg) for arg in args)
     args = _drop_unused_bundle(args)
     if len(args) == 1 and args[0] in _VERSION_FLAGS:
@@ -831,12 +897,15 @@ def main(argv=None) -> int:
     p_health.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
     p_ls = sub.add_parser(
         "ls", help="list a level (like ls); -R recurse, -a hidden", command_path="ai-wiki ls",
-        epilog=_examples("ai-wiki ls", "ai-wiki ls metrics", "ai-wiki ls -R -a"), **common,
+        epilog=_examples("ai-wiki ls", "ai-wiki ls metrics", "ai-wiki ls -R -a",
+                         "ai-wiki ls metrics --fields path,status,current_verified_at"), **common,
     )
     p_ls.add_argument("dir", nargs="?")
     p_ls.add_argument("-R", "--recursive", action="store_true", help="recurse, flat (like ls -R)")
     p_ls.add_argument("-a", "--all", action="store_true", help="include dotfiles (like ls -a)")
     p_ls.add_argument("--json", action="store_true", help="emit the complete entry array as JSON")
+    p_ls.add_argument("--fields", metavar="A,B|all",
+                      help=f"concept columns (default: {','.join(_LS_DEFAULT)}; all: {','.join(_LS_FIELDS)})")
     p_cat = sub.add_parser(
         "cat", aliases=_CAT_ALIASES, help="print a concept; large files are previewed by default",
         command_path="ai-wiki cat",
@@ -873,7 +942,8 @@ def main(argv=None) -> int:
     p_grep.add_argument("--json", action="store_true", help="emit hits and truncation counts as JSON")
     p_search = sub.add_parser(
         "search", help="ranked lexical search (CJK-aware)", command_path="ai-wiki search",
-        epilog=_examples("ai-wiki search \"subscription rate\"", "ai-wiki search \"订阅率\" --top-k 20"),
+        epilog=_examples("ai-wiki search \"subscription rate\"", "ai-wiki search \"订阅率\" --top-k 20",
+                         "ai-wiki search \"订阅率\" --fields path,title,score,phrase,context"),
         **common,
     )
     p_search.add_argument("query")
@@ -882,6 +952,9 @@ def main(argv=None) -> int:
     # head/SQL habit: --limit N is --top-k N.
     p_search.add_argument("--limit", dest="top_k", type=_top_k, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_search.add_argument("--json", action="store_true", help="emit results and truncation counts as JSON")
+    p_search.add_argument("--fields", metavar="A,B|all",
+                          help=f"result columns (default: {','.join(_SEARCH_DEFAULT)}; "
+                               f"all: {','.join(_SEARCH_FIELDS)})")
     p_links = sub.add_parser(
         "links", help="link graph of a concept: outbound + inbound (backlinks)", command_path="ai-wiki links",
         epilog=_examples("ai-wiki links metrics/subscription-rate.md"), **common,
@@ -1069,6 +1142,7 @@ def main(argv=None) -> int:
         parser.add_argument("--json", action="store_true", help="emit JSON instead of TOON")
 
     ap.command_path = _command_path(args)
+    ap.owner = ap.leaf(args)  # an unknown flag is reported by the root; name the subcommand's own flags
     a = ap.parse_args(args)
 
     if a.cmd in ("skill", "update"):
@@ -1188,6 +1262,7 @@ def main(argv=None) -> int:
                             ("name", "count")),
             )
     elif a.cmd == "ls":
+        columns = _fields(a.fields, _LS_DEFAULT, _LS_FIELDS, "ai-wiki ls", a.json)
         directory = _bundle_path(a.dir)
         d = _api("/ls", bundle=bsel, dir=directory or None,
                  recursive=("true" if a.recursive else None), show_all=("true" if a.all else None))
@@ -1196,6 +1271,12 @@ def main(argv=None) -> int:
             _require_dir(directory, bsel)
         if a.json:
             print(json.dumps(items, ensure_ascii=False, indent=2))
+        elif not items:  # an empty directory (a missing one failed above): the zero is the answer
+            groups = [object_lines("ls", {"result": f"0 entries in {directory or 'the bundle root'}"})]
+            if directory:
+                groups.append(table_lines("help", ({"command": "ai-wiki ls", "purpose": "list the bundle root"},),
+                                          ("command", "purpose")))
+            emit(*groups)
         else:
             concepts = [item for item in items if item.get("kind") == "concept"]
             entries = [item for item in items if item.get("kind") != "concept"]
@@ -1217,8 +1298,7 @@ def main(argv=None) -> int:
                         "basis": item.get("freshness_basis") or "",
                         "summary": _ls_summary(item),
                     } for item in concepts),
-                    ("path", "status", "trust", "freshness", "verification_current",
-                     "generated_at", "verified_at", "current_verified_at", "stale_on", "basis", "summary"),
+                    columns,
                 ))
             if entries:
                 groups.append(table_lines(
@@ -1264,6 +1344,11 @@ def main(argv=None) -> int:
                 "total": len(hits),
                 "truncated": len(shown) < len(hits),
             }, ensure_ascii=False, indent=2))
+        elif not hits:
+            scope = f" under {directory}" if directory else ""
+            emit(object_lines("grep", {"result": f"0 lines match {json.dumps(a.pattern, ensure_ascii=False)}{scope}"}),
+                 table_lines("help", ({"command": 'ai-wiki search "<words>"',
+                                       "purpose": "ranked search tolerates other wording"},), ("command", "purpose")))
         else:
             groups = [_count_lines(len(shown), len(hits)), table_lines("hits", shown, ("path", "line", "text"))]
             if len(shown) < len(hits):
@@ -1273,6 +1358,7 @@ def main(argv=None) -> int:
                 },), ("command", "purpose")))
             emit(*groups)
     elif a.cmd == "search":
+        columns = _fields(a.fields, _SEARCH_DEFAULT, _SEARCH_FIELDS, "ai-wiki search", a.json)
         d = _api("/search", bundle=bsel, q=a.query, top_k=a.top_k)
         results = d.get("results") or []
         total = d.get("total") if isinstance(d.get("total"), int) else len(results)
@@ -1285,25 +1371,27 @@ def main(argv=None) -> int:
                 **({"retrieval": d["retrieval"]} if isinstance(d.get("retrieval"), dict) else {}),
             }, ensure_ascii=False, indent=2))
         else:
-            rows = (_search_row(result) for result in results)
-            groups = [_count_lines(len(results), total)]
+            query = json.dumps(a.query, ensure_ascii=False)
+            groups = [object_lines("search", {"result": f"0 concepts match {query}"})] if not results \
+                else [_count_lines(len(results), total)]
             retrieval = d.get("retrieval") if isinstance(d.get("retrieval"), dict) else None
             if retrieval and (retrieval.get("mode") == "hybrid" or retrieval.get("reason")):
                 mode = {"mode": retrieval.get("mode")}
                 if retrieval.get("reason"):
                     mode["reason"] = retrieval["reason"]
                 groups.append(object_lines("retrieval", mode))
-            groups.append(table_lines(
-                          "results", rows,
-                          ("path", "title", "status", "trust", "freshness", "verification_current",
-                           "generated_at", "verified_at", "current_verified_at", "stale_on", "basis", "score",
-                           "retrieval", "phrase",
-                           "coverage", "fields", "terms", "context"),
-                      ))
-            if isinstance(total, int) and len(results) < total:
+            if not results:
+                groups.append(table_lines("help", (
+                    {"command": 'ai-wiki search "<other wording or language>"', "purpose": "rewrite the query once"},
+                    {"command": 'ai-wiki grep "<table, event or field name>" --fixed', "purpose": "an exact name"},
+                ), ("command", "purpose")))
+            else:
+                groups.append(table_lines("results", (_search_row(result) for result in results), columns))
+            if results and isinstance(total, int) and len(results) < total:
                 top = min(total, _TOP_K_MAX)
+                more = f" --fields {','.join(columns)}" if a.fields else ""
                 groups.append(table_lines("help", ({
-                    "command": f'ai-wiki search {json.dumps(a.query, ensure_ascii=False)} --top-k {top}',
+                    "command": f'ai-wiki search {query} --top-k {top}{more}',
                     "purpose": f"show all {total} matches" if top == total
                     else f"show the top {top} of {total} matches",
                 },), ("command", "purpose")))

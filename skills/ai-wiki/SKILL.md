@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.35 -->
+<!-- ai-wiki:version 0.3.37 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -24,7 +24,8 @@ ai-wiki bundle list        # bundles hosted by this server
 
 If the binary is missing, install it once with
 `uv tool install --force git+https://github.com/Scorpion1221/ai-wiki && hash -r && ai-wiki skill install`.
-Before the first lookup of a task, run `ai-wiki update --check` (one read of `main`). A `help` row
+Before the first lookup of a task, run `ai-wiki update --check` (one read of `main`; the home view
+`ai-wiki` then shows an `update:` line while `main` is ahead of this install). A `help` row
 (`available: true` or `skills` not `current`) → run `ai-wiki update && hash -r`. Then, updated or
 not, compare this file's `<!-- ai-wiki:version X -->` with `ai-wiki --version`: if they differ, read
 the installed copy at the path `ai-wiki skill` lists; if you cannot, stop blocked:
@@ -67,7 +68,9 @@ ai-wiki search "<fuzzy keywords>"        # ranked, CJK-aware discovery
 
 TOON list output separates semantic `concepts` from structural `entries`; only concepts carry
 `status`, `trust`, `freshness`, `generated_at`, `verified_at`, `verification_current`, `stale_on`
-and `basis` (`freshness_basis` in JSON). `ls --json` returns the complete raw entry array. Search
+and `basis` (`freshness_basis` in JSON). These gate columns are in the default `ls` and `search`
+rows; `--fields a,b` or `--fields all` adds `current_verified_at`, and for search `score`, `phrase`,
+`fields` and `context`. `ls --json` returns the complete raw entry array. Search
 covers every concept at any depth and ranks an exact phrase first, then by score: rare terms count
 most and CJK bigrams that straddle words count little, so filler bigrams of a question do not lift
 a long unrelated concept (`phrase`, `coverage`, `fields` and `terms` explain each match; coverage
@@ -79,12 +82,14 @@ Run one well-formed search and read the top candidates; when the top hits' `term
 query's distinctive words went unmatched, rewrite it once (the user's other wording,
 a paraphrase, the other language). Most concepts are written in Chinese, so an English question
 whose distinctive words went unmatched is rewritten once, with Chinese keywords or the event,
-table or field name. Zero hits is not "nothing": retry with synonyms or the table,
-event or field name (`grep --fixed`) before saying the wiki has nothing. Do not fan out further.
+table or field name. Zero hits (`0 concepts match …`, `0 lines match …`) is not "nothing": retry
+with synonyms or the table, event or field name (`grep --fixed`) before saying the wiki has
+nothing. Do not fan out further.
 JSON `search`/`grep`/`log` output carries `shown`, `total` and `truncated`: check them before
 treating bounded output as complete. Never rerun an identical command to confirm an empty answer.
 Reads already retry a restarting server for about 20 s (`$AIWIKI_RETRY_S`): an error after that is
-final for this run; report it in one line, never loop on it.
+final for this run; report it in one line, never loop on it. Flags are never abbreviated (`--top`
+is not `--top-k`); a usage error (exit 2) lists the command's `valid_flags`: fix the flag from it.
 
 ### 3. Read the concept, then trace one hop
 

@@ -59,6 +59,9 @@ raw entry array. JSON `search`/`grep`/`log` output is an envelope containing the
 
 Structured results expose `status`, derived `trust` and `freshness`, `generated_at`,
 `verified_at`, `verification_current`, `stale_on` and `freshness_basis` (TOON tables: `basis`).
+Default TOON `search`/`ls` rows carry these gate columns (search adds `retrieval`, `coverage`,
+`terms`); `--fields a,b|all` asks for `current_verified_at`, `score`, `phrase`, `fields` and
+`context`. An empty search, grep or ls states the zero (`0 concepts match "<query>"`).
 Trust follows OKF §5.3 across all verification history; `verification_current` separately says
 whether an event confirms the current generated revision (an event by the concept's own
 `process:` generator counts only 12 h after the generation). For current-fact decisions, treat
