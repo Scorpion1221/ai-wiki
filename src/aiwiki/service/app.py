@@ -56,6 +56,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -743,13 +744,14 @@ class _Rejected(Exception):
 _REVISION = re.compile(r"[0-9a-f]{7,64}")
 
 
-def _published(bundle: Path, at: str | None = None) -> tuple[Path, str, bytes]:
+def _published(bundle: Path, at: str | None = None, paths: tuple[str, ...] = ()) -> tuple[Path, str, bytes]:
     """The repository, the published revision and its bundle tree as a tar (design §2.1).
 
     That is the pushed commit (origin/<branch>, or HEAD without a remote) read from the
     object store, so no lock is needed and no transaction in progress is ever seen. ``at``
     names an earlier published revision instead (the base of ``admin compare``); anything
-    that is not an ancestor of the published one is a 404.
+    that is not an ancestor of the published one is a 404. ``paths`` are git pathspecs, relative
+    to the bundle, that narrow the tar (``_PUBLISHED``, ``_CONCEPTS``).
     """
     root = curate_runtime._repo_root(bundle)
     if root is None:
@@ -766,13 +768,26 @@ def _published(bundle: Path, at: str | None = None) -> tuple[Path, str, bytes]:
             raise HTTPException(status_code=404, detail=f"{at} is not a published revision of this bundle")
         revision = earlier
     prefix = os.path.relpath(bundle.resolve(), root.resolve())
+    tree = revision if prefix == "." else f"{revision}:{prefix}"
     archive = subprocess.run(
-        ["git", "-C", str(root), "archive", "--format=tar", revision if prefix == "." else f"{revision}:{prefix}"],
+        ["git", "-C", str(root), "archive", "--format=tar", tree, *(("--", *paths) if paths else ())],
         capture_output=True, timeout=curate_runtime.GIT_TIMEOUT_S,
     ) if revision else None
+    if archive is not None and archive.returncode != 0 and paths and b"did not match any files" in archive.stderr:
+        archive = subprocess.CompletedProcess(archive.args, 0, stdout=_EMPTY_TAR)  # nothing but what paths leave out
     if archive is None or archive.returncode != 0:
         raise HTTPException(status_code=503, detail="the published revision could not be read; retry")
     return root, revision, archive.stdout
+
+
+_EMPTY_TAR = bytes(10240)  # what git archive writes for an empty tree
+# A workspace: the published tree but viz.html, generated on the writer, and the intake copies of
+# member submissions, which no curation reads (a maintainer reads an item's files from its work item).
+_PUBLISHED = (".", ":(exclude,literal)viz.html", ":(exclude,literal)sources/inbox")
+# What the backlog and the attention plan read from a published tree when
+# audit_runtime.published_frozen answers for its sources from the object store: no sources/
+# (195 MB of 246 MB on 2026-11-18, ~15 s to unpack for each call).
+_CONCEPTS = (".", ":(exclude,literal)viz.html", ":(exclude,literal)sources")
 
 
 def _tree(archive: bytes) -> tarfile.TarFile:
@@ -805,17 +820,14 @@ def workspace(bundle: str | None = None, revision: str | None = None, if_none_ma
             raise HTTPException(status_code=403, detail=f"{principal.id} has no actor; an earlier revision "
                                                         "needs a named admin principal")
     _name, path = _resolve(bundle, principal)
-    _root, revision, archive = _published(path, revision)
+    _root, revision, archive = _published(path, revision, _PUBLISHED)
     headers = {"X-AIWiki-Revision": revision, "ETag": f'"{revision}"'}
     if if_none_match and revision in {tag.strip().removeprefix("W/").strip('"') for tag in if_none_match.split(",")}:
         return Response(status_code=304, headers=headers)
-    out = io.BytesIO()
-    with gzip.GzipFile(fileobj=out, mode="wb", mtime=0) as packed, tarfile.open(fileobj=packed, mode="w") as target, \
-            _tree(archive) as source:
-        for member in source:
-            if not _unpublished(member):
-                target.addfile(member, source.extractfile(member) if member.isfile() else None)
-    return Response(content=out.getvalue(), media_type="application/gzip", headers=headers)
+    # git leaves out what _unpublished names; one zlib pass at level 6 (a Python tar copy of the
+    # whole archive at level 9 took ~30 s of the writer's CPU a pull, 2026-11-18, for 0.3% less).
+    return Response(content=gzip.compress(archive, compresslevel=6, mtime=0), media_type="application/gzip",
+                    headers=headers)
 
 
 def _evidence(path: Path, request: dict) -> list[changeset.EvidenceFile]:
@@ -917,6 +929,22 @@ def _check_items(path: Path, request: dict, principal: str, run: str | None) -> 
                 from None
     else:
         M.renew(path, principal=principal, run=run)
+
+
+def _published_tree(path: Path, tree: Path) -> tuple[str, Callable[[str], bool] | None]:
+    """Unpack the published revision into ``tree`` for the backlog or the attention plan; answer
+    the revision and the frozen check to judge it with. That check reads the sources from the
+    object store (``audit_runtime.published_frozen``), so ``tree`` holds no ``sources/``; where
+    it cannot promise the same answer (a bundle below its repository's root, a link, an export
+    attribute, a ``.md`` under ``sources/``), the whole published tree is unpacked and the check
+    is None (``_frozen(tree)``)."""
+    root, revision, archive = _published(path, None, _CONCEPTS)
+    frozen = audit_runtime.published_frozen(root, revision) \
+        if os.path.relpath(path.resolve(), root.resolve()) == "." else None
+    if frozen is None:
+        root, revision, archive = _published(path, revision)  # the whole tree, at the same revision
+    _unpack(archive, tree)
+    return revision, frozen
 
 
 def _unpack(archive: bytes, tree: Path) -> None:
@@ -1150,20 +1178,19 @@ def _attention(path: Path) -> list[dict]:
     if curate_runtime._repo_root(path) is None:
         return attention.plan(path, today=attention.today(), held=_held(path, path),
                               body_chars=changeset.limits()["body_chars"])
-    _root, revision, archive = _published(path)
     with tempfile.TemporaryDirectory(prefix="aiwiki-attention-") as scratch:
         tree = Path(scratch) / "bundle"
-        _unpack(archive, tree)
-        return attention.plan(path, tree=tree, today=attention.today(), held=_held(path, tree, revision),
+        revision, frozen = _published_tree(path, tree)
+        return attention.plan(path, tree=tree, today=attention.today(), held=_held(path, tree, revision, frozen),
                               body_chars=changeset.limits()["body_chars"])
 
 
-def _held(path: Path, tree: Path, revision: str = "HEAD") -> list[dict]:
+def _held(path: Path, tree: Path, revision: str = "HEAD", frozen: Callable[[str], bool] | None = None) -> list[dict]:
     """The versions the audit backlog holds for the maintainer's answer; none without an external audit."""
     if MODES["audit"] != "external":
         return []
     return audit_runtime.backlog(path, tree=tree, revision=revision, auditors=_auditors(),
-                                 now=datetime.now(UTC))["held"]["concepts"]
+                                 now=datetime.now(UTC), frozen=frozen)["held"]["concepts"]
 
 
 def _frozen_sources(path: Path, files: object) -> None:
@@ -1332,13 +1359,12 @@ def audit_backlog(limit: int = Query(default=20, ge=1, le=1000), bundle: str | N
     if not CURATE_ON:  # the review receipts live on the writer
         raise HTTPException(status_code=403, detail="/audit/backlog requires the writer (AIWIKI_CURATE enabled)")
     _name, path = _resolve(bundle, principal)
-    _root, revision, archive = _published(path)
     with tempfile.TemporaryDirectory(prefix="aiwiki-backlog-") as scratch:
         tree = Path(scratch) / "bundle"
-        _unpack(archive, tree)
         try:
+            revision, frozen = _published_tree(path, tree)
             found = audit_runtime.backlog(path, tree=tree, revision=revision, auditors=_auditors(),
-                                          now=datetime.now(UTC))
+                                          now=datetime.now(UTC), frozen=frozen)
         except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             raise HTTPException(status_code=503, detail=f"the audit backlog cannot be derived: {exc}") from None
     concepts = found["concepts"]
