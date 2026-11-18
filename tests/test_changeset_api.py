@@ -26,6 +26,7 @@ from gate_fixture import (
     Gate,
     cite,
     cited,
+    clone,
     concept,
     git,
     wait_for,
@@ -607,3 +608,34 @@ def test_workspace_serves_the_published_tree_without_viz(gate) -> None:
         **gate.headers(), "If-None-Match": f'"{published}"'}).status_code == 304
     denied = gate.client.get("/workspace", params={"bundle": "kb-c"}, headers=gate.headers())
     assert denied.status_code == 403
+
+
+def test_workspace_is_the_published_tree_but_viz_and_the_intake_copies(gate) -> None:
+    """git leaves out viz.html and sources/inbox/ (not sources/inboxes/, nor a nested viz.html):
+    the same names, kinds, modes and bytes the Python tar copy served before 0.3.35."""
+    other = clone(gate.remote, gate.tmp / "other-workspace")
+    for rel, data in (("sources/inbox/intake/a.md.source", "intake copy\n"), ("tools/run.sh", "#!/bin/sh\n"),
+                      ("sources/inboxes/b.source", "kept\n"), ("metrics/viz.html", "kept\n")):
+        (other / rel).parent.mkdir(parents=True, exist_ok=True)
+        (other / rel).write_text(data, encoding="utf-8")
+    (other / "tools" / "run.sh").chmod(0o755)
+    git(other, "add", "-f", "-A")
+    git(other, "commit", "-qm", "hand edit")
+    git(other, "push", "-q", "origin", "main")
+    git(gate.writer, "fetch", "-q")
+
+    def tree(tar: tarfile.TarFile) -> dict:
+        return {member.name.rstrip("/"): (member.type, member.mode, member.linkname,
+                                          tar.extractfile(member).read() if member.isfile() else b"")
+                for member in tar if member.type != tarfile.XGLTYPE}
+
+    served = gate.client.get("/workspace", params={"bundle": "kb-a"}, headers=gate.headers("member"))
+    with tarfile.open(fileobj=io.BytesIO(served.content), mode="r:gz") as tar:
+        got = tree(tar)
+    with tarfile.open(fileobj=io.BytesIO(gate.appmod._published(gate.writer)[2])) as tar:
+        expected = {name: value for name, value in tree(tar).items()
+                    if name != "viz.html" and name.split("/")[:2] != ["sources", "inbox"]}
+
+    assert got == expected
+    assert {"sources/inboxes/b.source", "metrics/viz.html", "tools/run.sh"} <= set(got)
+    assert got["tools/run.sh"][1] & 0o111 and "sources/inbox" not in got and "viz.html" not in got

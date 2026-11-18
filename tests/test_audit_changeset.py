@@ -8,10 +8,12 @@ auditor anywhere reads GET /audit/backlog and proposes verdicts; the service sta
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import subprocess
+import tarfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1329,3 +1331,131 @@ def test_a_run_against_a_codex_writer_shadows_and_keeps_its_verdicts(gate, capsy
     assert report["dry_run"] == [{"path": AIO_AB, "base": taken["base"], "verdict": "unverified",
                                   "outcome": "unverified", "downgrade": None}]
     assert gate.remote_head() == head and gate.jobs() == []
+
+
+# --- deriving it fast (2026-11-18: the writer took ~98 s for a backlog with a maintainer live) --------------
+
+
+def _full_walk(bundle: Path, since: datetime, revision: str) -> dict:
+    """external_changes as a fresh process answers it: no kept history."""
+    audit._EXTERNAL.clear()
+    return audit.external_changes(bundle, since, revision)
+
+
+def test_the_history_since_the_epoch_is_read_once_then_only_above_it(gate, monkeypatch) -> None:
+    """A second backlog reads only the first-parent commits above the head the first one read, and
+    answers what a full walk does: the orders shift, a path a new commit touches takes it, and a
+    rewound branch (a revert, a force push) is walked in full again."""
+    since = audit._instant(EPOCH)
+    push(gate, "notes.md", "notes\n")  # a path the later commits leave alone: its order must shift
+    push(gate, METRIC, gate.read(METRIC).replace("# Summary", "# Summary\n\nA hand note.", 1))
+    git(gate.writer, "fetch", "-q")
+    first_head = git(gate.writer, "rev-parse", "origin/main")
+    first = _full_walk(gate.writer, since, first_head)
+    assert first["notes.md"][0] == 1 and first[METRIC][0] == 0
+    spans: list[str] = []
+    read = audit._external_records
+    monkeypatch.setattr(audit, "_external_records",
+                        lambda root, span, when: spans.append(span) or read(root, span, when))
+
+    push(gate, AI_STUDY, gate.read(AI_STUDY) + "\nA second hand note.\n")
+    push(gate, METRIC, gate.read(METRIC).replace("A hand note.", "A third hand note."))
+    git(gate.writer, "fetch", "-q")
+    head = git(gate.writer, "rev-parse", "origin/main")
+    kept = audit.external_changes(gate.writer, since, head)
+
+    assert spans == [f"{first_head}..{head}"]  # two commits read, not the whole span
+    assert kept == _full_walk(gate.writer, since, head)
+    assert kept[METRIC][0] == 0 and kept[AI_STUDY][0] == 1 and kept["notes.md"] == (3, *first["notes.md"][1:])
+    spans.clear()
+    audit.external_changes(gate.writer, since, head)
+    assert spans == []  # the same head: nothing to read
+    rewound = audit.external_changes(gate.writer, since, first_head)  # the kept head is not above it
+    assert rewound == first and len(spans) == 1 and not spans[0].startswith(head)  # the whole span again
+
+
+def test_the_backlog_reads_the_job_files_once(gate, monkeypatch) -> None:
+    """One scan of .okf/jobs for the receipts, the holds and the answers (four before: 7,484 files
+    on the writer, ~20 s of each backlog)."""
+    lease(gate)
+    assert submit(gate, review(gate, AIO_AB, "unverified")).status_code == 201
+    expected = audit.backlog(gate.writer, auditors=gate.appmod._auditors(), now=datetime.now(UTC))
+    scans: list[str] = []
+    for name in ("changeset_jobs", "revert_jobs", "changesets_and_reverts"):
+        original = getattr(I, name)
+        monkeypatch.setattr(I, name, lambda *a, _o=original, _n=name, **k: scans.append(_n) or _o(*a, **k))
+
+    found = audit.backlog(gate.writer, auditors=gate.appmod._auditors(), now=datetime.now(UTC))
+
+    assert scans == ["changesets_and_reverts"] and found == expected
+
+
+def test_the_published_sources_are_judged_from_the_object_store(gate, monkeypatch) -> None:
+    """GET /audit/backlog and the attention plan unpack no sources/ (195 MB of 246 MB on the
+    writer): published_frozen reads the cited blobs from the object store and answers what
+    _frozen does on the whole tree, for a frozen source, an unrecorded one, one a push rewrote,
+    and none at all."""
+    cited = parse_document(gate.read(METRIC)).frontmatter["sources"][0]["resource"].lstrip("/")
+    other = clone(gate.remote, gate.tmp / "other-sources")
+    (other / "sources" / "fake-note.md.source").write_text("unrecorded\n", encoding="utf-8")
+    (other / cited).write_text("rewritten by a push\n", encoding="utf-8")
+    intake = "sources/inbox/intake/a.md.source"  # the ledger names it, but no published tree holds it
+    (other / intake).parent.mkdir(parents=True)
+    copy = b"an intake copy\n"
+    (other / intake).write_bytes(copy)
+    with (other / "sources" / ".hashes.yaml").open("a", encoding="utf-8") as ledger:
+        ledger.write(f"{intake}: {hashlib.sha256(copy).hexdigest()}\n")
+    git(other, "add", "-f", "-A")
+    git(other, "commit", "-qm", "hand edit")
+    git(other, "push", "-q", "origin", "main")
+    git(gate.writer, "fetch", "-q")
+    revision = git(gate.writer, "rev-parse", "origin/main")
+    whole = gate.tmp / "whole"
+    gate.appmod._unpack(gate.appmod._published(gate.writer)[2], whole)
+    expected = audit._frozen(whole)
+    frozen = audit.published_frozen(gate.writer, revision)
+    names = git(gate.writer, "ls-tree", "-r", "--name-only", revision, "--", "sources").splitlines()
+
+    assert frozen is not None and names
+    assert {name: frozen(name) for name in [*names, "sources/absent.source", "metrics/x.md"]} == {
+        name: expected(name) for name in [*names, "sources/absent.source", "metrics/x.md"]}
+    assert intake in names and frozen(intake) is False and frozen(cited) is False
+    assert any(frozen(name) for name in names)
+    unpacked: list[int] = []
+    unpack = gate.appmod._unpack
+    monkeypatch.setattr(gate.appmod, "_unpack",
+                        lambda archive, tree: unpacked.append(archive) or unpack(archive, tree))
+    served = backlog(gate)
+
+    assert len(unpacked) == 1
+    with tarfile.open(fileobj=io.BytesIO(unpacked[0])) as tar:
+        assert not any(name == "sources" or name.startswith("sources/") for name in tar.getnames())
+    assert served["concepts"] == audit.backlog(gate.writer, tree=whole, revision=revision,
+                                               auditors=gate.appmod._auditors(), now=datetime.now(UTC))["concepts"]
+    assert next(entry for entry in served["concepts"] if entry["path"] == METRIC)["sources"] == []
+
+
+@pytest.mark.parametrize("case", ["attribute", "link", "concept"])
+def test_a_bundle_the_object_store_cannot_answer_for_unpacks_its_sources(gate, case) -> None:
+    """An export attribute on a source (git archive would write other bytes or none), a ledger that
+    is a link, or a .md under sources/ (the concept walk reads it): published_frozen declines and
+    the backlog judges the whole published tree, as before."""
+    other = clone(gate.remote, gate.tmp / f"other-{case}")
+    if case == "attribute":
+        (other / ".gitattributes").write_text("sources/** export-subst\n", encoding="utf-8")
+    elif case == "link":
+        (other / "sources" / ".hashes.yaml").rename(other / "ledger.yaml")
+        (other / "sources" / ".hashes.yaml").symlink_to("../ledger.yaml")
+    else:
+        (other / "sources" / "stray.md").write_text(concept("Stray"), encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-qm", f"hand edit: {case}")
+    git(other, "push", "-q", "origin", "main")
+    git(gate.writer, "fetch", "-q")
+    revision = git(gate.writer, "rev-parse", "origin/main")
+    whole = gate.tmp / "whole"
+    gate.appmod._unpack(gate.appmod._published(gate.writer)[2], whole)
+
+    assert audit.published_frozen(gate.writer, revision) is None
+    assert backlog(gate)["concepts"] == audit.backlog(
+        gate.writer, tree=whole, revision=revision, auditors=gate.appmod._auditors(), now=datetime.now(UTC))["concepts"]

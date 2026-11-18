@@ -32,6 +32,7 @@ from ..engine.document import (
     OKFDocumentError,
     _instant,
     freshness_basis,
+    load_yaml,
     parse_document,
     stale_date,
 )
@@ -66,7 +67,7 @@ def ledger(bundle: Path) -> dict[str, str]:
     """``sources/.hashes.yaml``, ``{sources/<name>: sha256}``: the record ``runtime.audit._frozen``
     trusts. A file's presence never makes it frozen evidence; its entry here does."""
     try:
-        value = yaml.safe_load((bundle / LEDGER).read_text(encoding="utf-8"))
+        value = load_yaml((bundle / LEDGER).read_text(encoding="utf-8"))  # ~6,500 lines: libyaml
     except (OSError, UnicodeError, yaml.YAMLError):
         return {}
     return {str(key): str(sha) for key, sha in value.items()} if isinstance(value, dict) else {}
