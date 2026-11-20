@@ -133,6 +133,17 @@ def _call(method: str, route: str, *, bundle: str | None, run: str | None = None
     return status, payload
 
 
+def _status(bundle: str | None, unread: list[str]) -> dict | None:
+    """GET /maint/status, or None with its error added to ``unread``: what a run's summary or
+    report reads from it never fails the run, and never keeps the lease (2026-11-18/19: a 524
+    on this one read left the maintainer lease held for hours)."""
+    try:
+        return _call("GET", "/maint/status", bundle=bundle)[1]
+    except MaintError as exc:
+        unread.append(str(exc)[:300])
+        return None
+
+
 def _network(exc: Exception) -> bool:
     """A failure of the connection, never of the answer: ``_call`` raises it for an OSError."""
     return isinstance(exc, OSError) or (isinstance(exc, MaintError) and exc.status is None
@@ -536,7 +547,8 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
     collected = collect(bundle, run=run, work=folder / "collect", state_dir=state_dir, config=settings, only=only)
     state["collect"] = _merged(state.get("collect") or {}, collected)
     _save_run(state_dir, state)
-    queue = _call("GET", "/maint/status", bundle=bundle)[1]
+    unread: list[str] = []
+    queue = _status(bundle, unread)  # only the summary's ready counts: unread, they are null
     # A summary of at most ~2 KB; the lists behind its counts are in run.json.
     return _collect_code(collected), {
         "run": run, "bundle": bundle, "workspace": state["workspace"], "base_revision": pulled["base_revision"],
@@ -547,7 +559,9 @@ def begin(bundle: str, *, run: str, state_dir: Path, config: Path, max_items: in
         "collect": {name: {key: value for key, value in result.items() if key not in ("failures", "noise")}
                     | ({"failures": result["failures"][:3]} if result.get("failures") else {})
                     for name, result in collected.items()},
-        "ready": {kind: group["count"] for kind, group in sorted((queue.get("ready_by_origin") or {}).items())},
+        "ready": None if queue is None else {
+            kind: group["count"] for kind, group in sorted((queue.get("ready_by_origin") or {}).items())},
+        **({"status_error": unread[0]} if unread else {}),
         "budget": {"max_items": state["max_items"], "deadline": state["deadline"], "taken": len(state["taken"])},
         "record": str(folder / "run.json"),
         "next": f"ai-wiki maint next --state-dir {state_dir} --json",
@@ -885,13 +899,16 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict, str]:
         raise MaintError(f"run {run} maintains bundle {state['bundle']!r}, not {bundle!r}", USAGE)
     bundle = state.get("bundle")
     # The backlog as the run leaves it: the Codex audits deferred behind its lease start on release.
-    snapshot = _call("GET", "/maint/status", bundle=bundle)[1]
+    # Neither status read may stop the release: an unread one leaves its fields unknown in the report.
+    unread: list[str] = []
+    snapshot = _status(bundle, unread) or {}
     try:
         released = _call("DELETE", "/maint/lease/maintainer", bundle=bundle, run=run)[1]
     except MaintError as exc:
         released = {"released": False, "error": str(exc)}
     # needs_human as the release leaves it: an interrupted item may reach its attempt cap there.
-    snapshot["needs_human"] = _call("GET", "/maint/status", bundle=bundle)[1].get("needs_human") or []
+    after = _status(bundle, unread)
+    snapshot["needs_human"] = None if after is None else after.get("needs_human") or []
     items = []
     for item_id in state["taken"]:
         status, item = _call("GET", f"/maint/items/{quote(item_id, safe='')}", bundle=bundle, ok=(200, 404))
@@ -904,7 +921,7 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict, str]:
         _call("GET", f"/jobs/{quote(job_id, safe='')}", bundle=bundle, ok=(200, 404))] if status == 200]
     built = report.build(state, items=items, proposals=proposals, jobs=jobs,
                          cursors={name: _cursor(bundle, name) for name in COLLECTORS}, status=snapshot,
-                         released=released, ended_at=_iso(_now()))
+                         released=released, ended_at=_iso(_now()), unread=unread)
     markdown = report.render(built)
     folder = run_dir(state_dir, run)
     _write(folder / "report.json", built)

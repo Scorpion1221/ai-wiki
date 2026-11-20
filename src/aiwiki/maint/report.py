@@ -81,18 +81,22 @@ def _hours(since: str | None, until: str) -> int | None:
 
 
 def build(run: dict, *, items: list[dict], proposals: list[dict], jobs: list[dict], cursors: dict,
-          status: dict, released: dict, ended_at: str) -> dict:
-    """The run's report as JSON; ``render`` prints it."""
+          status: dict, released: dict, ended_at: str, unread: list[str] | None = None) -> dict:
+    """The run's report as JSON; ``render`` prints it.
+
+    ``status`` is the ``/maint/status`` snapshot; a read that failed (its errors in ``unread``)
+    leaves out ``items`` and ``audit`` (read before the release) or sets ``needs_human`` to None
+    (read after it), and the report shows those as unknown rather than as zero or none."""
     collect = run.get("collect") or {}
     blocked = sorted(name for name, result in collect.items() if result.get("status") in BLOCKING)
     rows = sorted((_item(item) for item in items), key=lambda row: (row["topic_key"], row["id"]))
     states = Counter(row["status"] for row in rows)
-    counts = status.get("items") or {}
+    counts = status.get("items")
     started = run.get("started_at") or ""
     since = run.get("acquired_at") or started  # the writer's clock, as needs_human ``since`` is
-    new_needs_human = sorted((entry for entry in status.get("needs_human") or []
-                              if str(entry.get("since") or "") >= since),
-                             key=lambda entry: (entry.get("topic_key") or "", entry.get("id") or ""))
+    new_needs_human = None if status.get("needs_human") is None else sorted(
+        (entry for entry in status["needs_human"] if str(entry.get("since") or "") >= since),
+        key=lambda entry: (entry.get("topic_key") or "", entry.get("id") or ""))
     audit = status.get("audit") or {}
     return {
         "schema": SCHEMA,
@@ -110,7 +114,8 @@ def build(run: dict, *, items: list[dict], proposals: list[dict], jobs: list[dic
             "taken": len(rows), **{state: states[state] for state in (
                 "curated", "skipped", "duplicate", "parked", "split", "needs_human", "in_progress")},
             "returned": states["ready"],  # released mid-item, back in the queue
-            "remaining": sum((counts.get(state) or {}).get("count", 0) for state in ("ready", "parked")),
+            "remaining": None if counts is None else sum((counts.get(state) or {}).get("count", 0)
+                                                         for state in ("ready", "parked")),
             "stopped": run.get("stopped") or "ended",
             "budget": {"max_items": run.get("max_items"), "deadline": run.get("deadline")},
         },
@@ -122,9 +127,11 @@ def build(run: dict, *, items: list[dict], proposals: list[dict], jobs: list[dic
                   "oldest_hours": _hours(audit.get("oldest_finished") or audit.get("oldest_queued"), ended_at),
                   **{key: (run.get("audits") or {}).get(key) or [] for key in ("resubmitted", "needs_human")},
                   **({"error": run["audits"]["error"]} if (run.get("audits") or {}).get("error") else {})},
-        "needs_human": [{"id": entry.get("id"), "topic_key": entry.get("topic_key"),
-                         "reason": (entry.get("resolution") or {}).get("reason")} for entry in new_needs_human],
+        "needs_human": None if new_needs_human is None else [
+            {"id": entry.get("id"), "topic_key": entry.get("topic_key"),
+             "reason": (entry.get("resolution") or {}).get("reason")} for entry in new_needs_human],
         "lease": released,
+        **({"status_unread": list(unread)} if unread else {}),
     }
 
 
@@ -168,19 +175,22 @@ def render(report: dict) -> str:
                                   for name, move in report["cursor_moves"].items()) or "none"),
         f"queue: taken {queue['taken']} | curated {queue['curated']} | skipped {queue['skipped']}"
         f" | duplicate {queue['duplicate']} | parked {queue['parked']}" + (f" ({parked})" if parked else "")
-        + f" | split {queue['split']} | returned {queue['returned']} | remaining {queue['remaining']}"
-        f" ({queue['stopped']})",
+        + f" | split {queue['split']} | returned {queue['returned']} | remaining "
+        + ("unknown" if queue["remaining"] is None else str(queue["remaining"])) + f" ({queue['stopped']})",
         "changesets: " + ("; ".join(
             f"{job['id']} {(job['commit'] or 'noop')[:12]} " + " ".join(job["concept_files"] + [
                 f"{path}(deprecated)" for path in job["deprecated_files"]]) for job in report["changesets"]) or "none"),
         f"gate: first submission passed {gate['first_pass']}/{gate['items']}"
         + "".join(f"; {code} x{count}" for code, count in gate["errors"].items()),
-        f"audit backlog: {audit['pending']} pending, {audit['queued']} queued"
-        + (f", oldest {audit['oldest_hours']}h" if audit["oldest_hours"] is not None else "")
-        + f" ({audit['mode']}); resubmitted {len(audit['resubmitted'])}"
+        ("audit backlog: unknown" if audit["mode"] is None  # GET /maint/status unread: no mode
+         else f"audit backlog: {audit['pending']} pending, {audit['queued']} queued"
+         + (f", oldest {audit['oldest_hours']}h" if audit["oldest_hours"] is not None else "")
+         + f" ({audit['mode']})") + f"; resubmitted {len(audit['resubmitted'])}"
         + (f"; over the retry cap: {', '.join(audit['needs_human'])}" if audit["needs_human"] else ""),
-        "needs human: " + (", ".join(f"{row['id']} {row['topic_key']} ({row['reason']})"
-                                     for row in report["needs_human"]) or "none"),
+        "needs human: " + ("unknown" if report["needs_human"] is None
+                           else ", ".join(f"{row['id']} {row['topic_key']} ({row['reason']})"
+                                          for row in report["needs_human"]) or "none"),
+        *([f"status unread: {error}" for error in report["status_unread"]] if report.get("status_unread") else []),
         "",
         "items:",
         *(f"- {row['id']} {row['topic_key']}: {row['status']}" + (f" ({row['detail']})" if row["detail"] else "")

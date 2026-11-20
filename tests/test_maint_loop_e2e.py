@@ -552,6 +552,86 @@ def test_end_reports_the_items_a_release_or_a_sweep_caps(loop, capsys) -> None:
     assert code == 3 and second["item"] in {row["id"] for row in report["needs_human"]}, report
 
 
+def status_fails(monkeypatch, reads: list[str], *, failing: set[int] | None = None) -> None:
+    """GET /maint/status answers 524 (Cloudflare's 100 s limit) on the reads numbered in ``failing``
+    (all of them when None); every other call goes to the writer."""
+    call = maint._call
+
+    def flaky(method: str, route: str, **kwargs):
+        if (method, route) == ("GET", "/maint/status"):
+            reads.append(route)
+            if failing is None or len(reads) in failing:
+                raise MaintError("GET /maint/status answered 524: error code: 524", status=524)
+        return call(method, route, **kwargs)
+
+    monkeypatch.setattr(maint, "_call", flaky)
+
+
+def test_begin_goes_on_when_its_status_read_fails(loop, capsys, monkeypatch) -> None:
+    # 2026-11-18 11:00Z: the lease was taken and the repos collected, then the summary's status read
+    # got a 524, begin exited 1 and the run stopped holding the lease for three hours.
+    st, reads, writer = loop["st"], [], maint._call
+    status_fails(monkeypatch, reads)
+    code, begun = wiki_json(capsys, "maint", "begin", "--run", RUN, "--only", "repos", "--state-dir", st,
+                            "--config", loop["config"])
+
+    assert code == 0 and reads, begun  # by the collection, as before
+    assert begun["ready"] is None and "524" in begun["status_error"], begun
+    code, brief = wiki_json(capsys, "maint", "next", "--state-dir", st)
+    assert code == 0 and brief["item"], brief
+    monkeypatch.setattr(maint, "_call", writer)  # the writer answers again
+    code, begun = wiki_json(capsys, "maint", "begin", "--run", RUN, "--only", "repos", "--state-dir", st,
+                            "--config", loop["config"])
+    assert code == 0 and isinstance(begun["ready"], dict) and "status_error" not in begun, begun
+
+
+def test_end_releases_the_lease_when_its_status_reads_fail(loop, capsys, monkeypatch) -> None:
+    # 2026-11-19 11:45Z: both `maint end` attempts got a 524 on the status read before the release,
+    # so the lease stayed and the 14:00Z run was refused with lease_held.
+    st, reads = loop["st"], []
+    begin(capsys, loop, "R-1")
+    code, brief = wiki_json(capsys, "maint", "next", "--state-dir", st)
+    assert code == 0
+    status_fails(monkeypatch, reads)
+
+    code, report = wiki_json(capsys, "maint", "end", "--run", "R-1", "--state-dir", st)
+
+    assert code == 0 and len(reads) == 2, report
+    assert report["lease"]["released"] is True and report["lease"]["interrupted"] == [brief["item"]]
+    assert report["queue"]["remaining"] is None and report["needs_human"] is None
+    assert len(report["status_unread"]) == 2 and all("524" in error for error in report["status_unread"])
+    lines = report["report"].splitlines()
+    assert " | remaining unknown (ended)" in lines[3]
+    assert "audit backlog: unknown; resubmitted 0" in report["report"]
+    assert "needs human: unknown" in lines and lines.count("status unread: GET /maint/status answered 524: "
+                                                           "error code: 524") == 2
+    assert (maint.run_dir(Path(st), "R-1") / "report.md").read_text(encoding="utf-8") == report["report"]
+    # The next run takes the lease at once.
+    assert begin(capsys, loop, "R-2")["lease_expires_at"]
+
+
+def test_end_reports_what_it_read_when_one_status_read_fails(loop, capsys, monkeypatch) -> None:
+    st = loop["st"]
+    begin(capsys, loop, "R-1")
+    reads: list[str] = []
+    status_fails(monkeypatch, reads, failing={2})  # the read after the release
+
+    code, report = wiki_json(capsys, "maint", "end", "--run", "R-1", "--state-dir", st)
+
+    assert code == 0 and report["lease"]["released"] is True, report
+    assert isinstance(report["queue"]["remaining"], int) and report["audit"]["mode"] == "codex"
+    assert report["needs_human"] is None and len(report["status_unread"]) == 1
+    begin(capsys, loop, "R-2")
+    reads.clear()
+    status_fails(monkeypatch, reads, failing={1})  # the read before the release
+
+    code, report = wiki_json(capsys, "maint", "end", "--run", "R-2", "--state-dir", st)
+
+    assert code == 0 and report["lease"]["released"] is True and report["needs_human"] == [], report
+    assert report["queue"]["remaining"] is None and "audit backlog: unknown;" in report["report"]
+    assert "needs human: none" in report["report"].splitlines()
+
+
 def test_a_lost_answer_or_an_expired_lease_never_strands_the_workspace(loop, capsys, monkeypatch) -> None:
     st = loop["st"]
     ws = Path(begin(capsys, loop, "R-1")["workspace"])

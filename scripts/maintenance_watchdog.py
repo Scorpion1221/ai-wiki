@@ -63,6 +63,7 @@ STUCK_ISSUE_STATUSES = ("todo", "in_progress")
 LEASE_TTL = timedelta(hours=3)
 LEASE_CLOCK_SKEW = timedelta(minutes=5)
 MAINT_ROLES = ("maintainer", "auditor")
+STATUS_TIMEOUT_S = 120  # GET /maint/status, direct to the writer (no Cloudflare 100 s limit)
 MAINT_CURSORS = ("repos", "issues")
 READY_BUCKETS = (1, 25, 50, 100, 200, 400, 800)  # maint_ready_stale pages again at each
 MEMBER_ORIGIN = "member"  # origin.kind of a member submission (service/inbox.py, AIWIKI_INTAKE=inbox)
@@ -630,7 +631,9 @@ def check_audit(name: str, args: argparse.Namespace, now: datetime) -> tuple[dic
     url = f"{args.writer_url.rstrip('/')}/maint/status?{urllib.parse.urlencode({'bundle': name})}"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {args.writer_token}"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - an operator-set URL
+        # 120 s: the writer derives the backlog per call (21-28 s with a maintainer run live on
+        # 2026-11-20; 30 s timed out on 2026-11-18). The unit's TimeoutStartSec bounds the whole run.
+        with urllib.request.urlopen(request, timeout=STATUS_TIMEOUT_S) as response:  # noqa: S310 - an operator-set URL
             status = json.loads(response.read())
     except (OSError, ValueError) as exc:  # HTTPError and URLError are OSErrors
         raise CheckError(f"GET /maint/status?bundle={name}: {short(exc, 160)}") from None

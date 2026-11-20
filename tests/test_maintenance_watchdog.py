@@ -773,6 +773,23 @@ def test_the_external_audit_backlog_alerts_past_its_slo(tmp_path: Path) -> None:
     assert proc.returncode == 2 and "AIWIKI_WATCHDOG_TOKEN" in proc.stderr
 
 
+def test_the_status_read_waits_for_a_busy_writer(monkeypatch) -> None:
+    # 2026-11-18 23:01Z: with a maintainer run live, GET /maint/status took longer than the 30 s the
+    # watchdog waited, so the night's check failed. Direct to the writer, it may take its time.
+    watchdog = load_script()
+    seen = []
+
+    def urlopen(request, timeout):
+        seen.append(timeout)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(watchdog.urllib.request, "urlopen", urlopen)
+    args = types.SimpleNamespace(writer_url="http://127.0.0.1:1", writer_token="t")
+    with pytest.raises(watchdog.CheckError, match="timed out"):
+        watchdog.check_audit("solvely-wiki", args, datetime.now(UTC))
+    assert seen == [watchdog.STATUS_TIMEOUT_S] and watchdog.STATUS_TIMEOUT_S >= 120
+
+
 # --- Feishu notification and deduplication ----------------------------------------------------
 
 
