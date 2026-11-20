@@ -596,15 +596,16 @@ def test_end_releases_the_lease_when_its_status_reads_fail(loop, capsys, monkeyp
 
     code, report = wiki_json(capsys, "maint", "end", "--run", "R-1", "--state-dir", st)
 
-    assert code == 0 and len(reads) == 2, report
+    # One slow read at most: after a failed one, end skips the read after the release.
+    assert code == 0 and len(reads) == 1, report
     assert report["lease"]["released"] is True and report["lease"]["interrupted"] == [brief["item"]]
     assert report["queue"]["remaining"] is None and report["needs_human"] is None
-    assert len(report["status_unread"]) == 2 and all("524" in error for error in report["status_unread"])
+    assert len(report["status_unread"]) == 1 and "524" in report["status_unread"][0]
     lines = report["report"].splitlines()
     assert " | remaining unknown (ended)" in lines[3]
     assert "audit backlog: unknown; resubmitted 0" in report["report"]
     assert "needs human: unknown" in lines and lines.count("status unread: GET /maint/status answered 524: "
-                                                           "error code: 524") == 2
+                                                           "error code: 524") == 1
     assert (maint.run_dir(Path(st), "R-1") / "report.md").read_text(encoding="utf-8") == report["report"]
     # The next run takes the lease at once.
     assert begin(capsys, loop, "R-2")["lease_expires_at"]
@@ -627,9 +628,10 @@ def test_end_reports_what_it_read_when_one_status_read_fails(loop, capsys, monke
 
     code, report = wiki_json(capsys, "maint", "end", "--run", "R-2", "--state-dir", st)
 
-    assert code == 0 and report["lease"]["released"] is True and report["needs_human"] == [], report
+    # The release is still sent; the read after it is skipped, so needs_human is unknown too.
+    assert code == 0 and report["lease"]["released"] is True and len(reads) == 1, report
     assert report["queue"]["remaining"] is None and "audit backlog: unknown;" in report["report"]
-    assert "needs human: none" in report["report"].splitlines()
+    assert report["needs_human"] is None and "needs human: unknown" in report["report"].splitlines()
 
 
 def test_a_lost_answer_or_an_expired_lease_never_strands_the_workspace(loop, capsys, monkeypatch) -> None:

@@ -907,7 +907,9 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict, str]:
     except MaintError as exc:
         released = {"released": False, "error": str(exc)}
     # needs_human as the release leaves it: an interrupted item may reach its attempt cap there.
-    after = _status(bundle, unread)
+    # Not after a failed read: a writer that just took ~100 s to answer 524 would take as long
+    # again, and the report would wait on it (round-1 review R1-1).
+    after = None if unread else _status(bundle, unread)
     snapshot["needs_human"] = None if after is None else after.get("needs_human") or []
     items = []
     for item_id in state["taken"]:
