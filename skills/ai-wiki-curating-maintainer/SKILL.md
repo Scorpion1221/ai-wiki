@@ -7,7 +7,7 @@ description: >-
   the writer's deterministic gate, and close with the deterministic `maint end` report. Use for
   scheduled or manual curating-maintainer runs; not for the legacy `ai-wiki maintain` ledger flow.
 ---
-<!-- ai-wiki:version 0.3.40 -->
+<!-- ai-wiki:version 0.3.41 -->
 
 # AI Wiki Curating Maintainer
 
@@ -92,9 +92,16 @@ knowledge is a Feature, Decision, Risk, Playbook, metric or data contract, or a 
   `no_durable_knowledge`, `insufficient_evidence`, `out_of_scope` or `duplicate_of:<path>`;
   `--note "<why>"` names the files read. Judge every frozen file, not the brief or commit titles.
   `duplicate_of` only when that concept already states every number, status, date, decision,
-  identifier and caveat of the evidence; otherwise update it. A changed value (image, flag, route,
-  model, status) of something a concept states is a dated update, not `out_of_scope`. Before
-  skipping an issue window holding only a status change, `add-evidence issue:<id>` for its history.
+  identifier and caveat of the evidence; otherwise update it. If it already cites 8 or more sources
+  (`too_many_sources`) or is past 20000 characters (`body_too_long`), write a dated sibling concept
+  (`<topic>-<reading>-<date>`) linking it instead of marking `duplicate_of` — including a later
+  Code Review or QA round adding new P1/P2 findings, boundaries, error codes, telemetry caveats or
+  acceptance results. A changed value (image, flag, route, model, status) of something a concept
+  states is a dated update, not `out_of_scope`. Before `no_durable_knowledge` or `out_of_scope`,
+  check every frozen file against existing concept(s) for new numbers, boundaries, error codes,
+  telemetry caveats, deferred findings or acceptance results; before skipping an issue window
+  holding only a status change, `add-evidence issue:<id>` for its history. Never loosen skip or
+  `duplicate_of` judgment to drain a large `ready` queue: unfinished items wait for the next run.
 - Too large for one pass (too much to read, or more than 20 concept files to change):
   `ai-wiki -b "$bundle" maint split <item> --group <file>,<file> --group <file>`, 2 to 20 groups
   placing every file of the item exactly once.
@@ -164,8 +171,9 @@ Follow okf-knowledge-curator in its remote maintainer mode. One item, one eviden
 - Every concept you write carries the curator's Signals (aliases, `stale_after`, a dated
   description); one the evidence retires or supersedes is deprecated (§3.4), never left stable.
 - Before `validate`, reread each changed sentence, title and description for the auditor's top four
-  refusals: (1) a report stated as fact: the sentence itself says who reported it, a footnote is not enough,
-  and a title or description states no reported claim as fact (a review cannot retitle); (2) merged or
+  refusals: (1) a report or bounded check stated as fact: the sentence itself says who reported it,
+  a footnote is not enough, and a title or description never states a reported claim, a dev/test-only
+  mock or a code-only read as an unqualified production fact (a review cannot retitle); (2) merged or
   done stated as live or effective; (3) a later comment or `related` source that corrects or retracts it; (4) a number whose unit, window or population differs from the evidence.
 
 ### 3.4 Validate, propose, fix

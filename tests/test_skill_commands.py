@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from aiwiki import skills
 from aiwiki.cli import main as cli
 from aiwiki.cli import review
 from aiwiki.maint import issue_delta
@@ -82,7 +83,8 @@ def test_the_skill_covers_the_whole_loop(root) -> None:
     # 2026-10-24 (0.3.4) to 250: the self-update preflight left 229/230, no room for the next small fix.
     # 2026-11-01 (0.3.9) to 260: the batch rule of §3.1 (one changeset curates several items).
     # 2026-11-04 (0.3.14) to 270: the pre-validate self-check of the auditor's top four refusals.
-    assert len(text.splitlines()) <= 270
+    # 2026-11-21 (0.3.41) to 280: capped-target sibling triage, pre-skip check, no backlog skip loosening, title bounds.
+    assert len(text.splitlines()) <= 280
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert {"doctor", "maint begin", "maint next", "maint skip", "maint split", "maint add-evidence",
             "concept new", "validate", "propose", "workspace pull", "maint park", "maint end"} <= verbs
@@ -94,7 +96,8 @@ def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     # A budget, loaded into every audit run. 2026-10-24 (0.3.4) took it from 200 to 220: the
     # self-update preflight left 199/200, no room for the next small fix. 2026-11-01 to 230: the
     # Signals check of §3.3 (aliases, stale_after, supersession) left 226/220.
-    assert len(text.splitlines()) <= 230
+    # 2026-11-21 (0.3.41) to 240: reason: correction convergence rule (§3.1) and single-pass narrowing (§3.4).
+    assert len(text.splitlines()) <= 240
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert verbs == {"update", "skill", "--version", "doctor", "review begin", "review next", "review evidence",
                      "review verdict", "review submit", "review triage next", "review triage verdict",
@@ -167,3 +170,57 @@ def test_the_production_prompt_keeps_the_legacy_parameters_and_leaves_audits_to_
             "<Auditor agent id>"} == set(config["issues"]["exclude_agents"])
     assert re.search(r"^bundle=solvely-wiki\b", production, re.M) and re.search(r"^max_items=\d+", production, re.M)
     assert "--format md" in SKILL.read_text(encoding="utf-8")  # the verbatim report opens the comment
+
+
+def _section(text: str, heading: str, stop_prefix: str) -> str:
+    body = text.split(heading, 1)[1]
+    if stop_prefix in body:
+        body = body.split(stop_prefix, 1)[0]
+    return " ".join(body.split())
+
+
+def test_installed_maintainer_and_curator_skills_guard_capped_triage_and_title_boundaries(tmp_path: Path) -> None:
+    """2026-11-21 (0.3.41): 8-source capped duplicate_of misses (75-87% overturns), bulk skip
+    loosening under backlog pressure, and protected-title overstatements (51% of hard unverified)."""
+    rows = skills.install(tmp_path)
+    assert {row["status"] for row in rows} == {"installed"}
+
+    maint = (tmp_path / "ai-wiki-curating-maintainer" / "SKILL.md").read_text(encoding="utf-8")
+    triage = _section(maint, "### 3.2 Triage", "\n### 3.3 ")
+    assert "`too_many_sources`" in triage and "`body_too_long`" in triage
+    assert "dated sibling concept" in triage and "instead of marking `duplicate_of`" in triage
+    assert "Code Review or QA round" in triage
+    assert "Before `no_durable_knowledge` or `out_of_scope`" in triage
+    assert "telemetry caveats" in triage and "acceptance results" in triage
+    assert "Never loosen skip or `duplicate_of` judgment to drain a large `ready` queue" in triage
+
+    curate = _section(maint, "### 3.3 Curate in the workspace", "\n### 3.4 ")
+    assert "dev/test-only mock" in curate and "code-only read" in curate
+    assert "unqualified production fact" in curate and "a review cannot retitle" in curate
+
+    curator = (tmp_path / "okf-knowledge-curator" / "SKILL.md").read_text(encoding="utf-8")
+    provenance = _section(curator, "## Provenance and per-claim attribution", "\n## ")
+    assert "`title` is identity-locked and cannot be narrowed by audit" in provenance
+    assert "dev/test mocks, code-only reads and reported claims" in provenance
+    assert "unqualified production facts" in provenance
+
+
+def test_installed_auditor_skill_converges_correction_rereviews_and_narrows_in_one_pass(tmp_path: Path) -> None:
+    """2026-11-21 (0.3.41): prevent self-recorrection churn on `reason: correction` (42-77% repeat
+    corrections with 6-line median diffs) while keeping full factual rigor on material claims."""
+    rows = skills.install(tmp_path)
+    assert {row["status"] for row in rows} == {"installed"}
+
+    auditor = (tmp_path / "ai-wiki-auditor" / "SKILL.md").read_text(encoding="utf-8")
+    take = _section(auditor, "### 3.1 Take", "\n### 3.2 ")
+    assert "Judge it like new content" not in take
+    assert "same factual standard" in take
+    assert "On `reason: correction`" in take
+    assert "every material claim in the concept and `description` is already supported and bounded" in take
+    assert "record `verified` even when phrasing could be tighter" in take
+    assert "remaining material defect that could mislead a reader" in take
+    assert "never for wording polish or formatting/style tweaks" in take
+
+    verdict = _section(auditor, "### 3.4 Record a verdict", "\n### 3.5 ")
+    assert "Audit the whole concept and narrow every unsupported or overstated claim in one pass" in verdict
+    assert "rather than stopping after one sentence" in verdict and "12 h cycle" in verdict
