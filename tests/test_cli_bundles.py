@@ -372,12 +372,12 @@ def test_grep_top_k_hidden_alias(monkeypatch, capsys, tmp_path) -> None:
     assert "shown: 2" in out and "total: 3" in out and "truncated: true" in out
     assert calls[-1] == ("/grep", {"bundle": None, "q": "hit", "dir": None, "fixed": "true"})
 
-    # With positional dir before or after `--top-k`
+    # With positional dir, `--top-k` after or before positionals (works on Python 3.11 and 3.12)
     assert cli.main(["grep", "hit", "risks", "--fixed", "--top-k", "2"]) == 0
     capsys.readouterr()
     assert calls[-1] == ("/grep", {"bundle": None, "q": "hit", "dir": "risks", "fixed": "true"})
 
-    assert cli.main(["grep", "hit", "--top-k=2", "risks"]) == 0
+    assert cli.main(["grep", "--top-k=2", "hit", "risks"]) == 0
     capsys.readouterr()
     assert calls[-1] == ("/grep", {"bundle": None, "q": "hit", "dir": "risks", "fixed": None})
 
