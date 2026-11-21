@@ -96,7 +96,7 @@ _LS_DEFAULT = ("path", "status", "trust", "freshness", "verification_current", "
 class _AxiParser(argparse.ArgumentParser):
     """Argparse with agent-readable usage failures on stdout.
 
-    Abbreviated flags are refused (``--top`` is not ``--top-k``): a guessed flag returns plausible output for
+    Abbreviated flags are refused (``--lim`` is not ``--limit``): a guessed flag returns plausible output for
     a flag the caller never meant. A usage error lists the failing command's flags, so one turn corrects it."""
 
     def __init__(self, *args, command_path: str = "ai-wiki", **kwargs):
@@ -946,7 +946,10 @@ def main(argv=None) -> int:
     p_grep.add_argument("-n", "--line-number", action="store_true",
                         help="accepted for grep habit; every hit carries its line number")
     p_grep.add_argument("--limit", type=_limit, default=_DEFAULT_GREP_LIMIT,
-                        help=f"maximum hits to print; 0 means all (default: {_DEFAULT_GREP_LIMIT})")
+                        help=f"maximum hits to print; 0 means all "
+                             f"(default: {_DEFAULT_GREP_LIMIT}; --top-k N is the same)")
+    # search habit: --top-k N is --limit N.
+    p_grep.add_argument("--top-k", dest="limit", type=_limit, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_grep.add_argument("--json", action="store_true", help="emit hits and truncation counts as JSON")
     p_search = sub.add_parser(
         "search", help="ranked lexical search (CJK-aware)", command_path="ai-wiki search",
@@ -956,9 +959,11 @@ def main(argv=None) -> int:
     )
     p_search.add_argument("query")
     p_search.add_argument("--top-k", type=_top_k, default=10,
-                          help=f"maximum results, at most {_TOP_K_MAX} (default: 10; --limit N is the same)")
-    # head/SQL habit: --limit N is --top-k N.
+                          help=f"maximum results, at most {_TOP_K_MAX} "
+                               "(default: 10; --top N and --limit N are the same)")
+    # head/SQL and search habits: --limit N and --top N are --top-k N.
     p_search.add_argument("--limit", dest="top_k", type=_top_k, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    p_search.add_argument("--top", dest="top_k", type=_top_k, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p_search.add_argument("--json", action="store_true", help="emit results and truncation counts as JSON")
     p_search.add_argument("--fields", metavar="A,B|all",
                           help=f"result columns (default: {','.join(_SEARCH_DEFAULT)}; "
