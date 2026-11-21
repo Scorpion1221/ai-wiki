@@ -178,7 +178,6 @@ def test_reads_never_wait_on_a_warmer_pass_that_outlives_warmer_stale_s(tmp_path
     pass holds (the snapshot's derived-build lock while it builds the search index)."""
     root = _bundle(tmp_path / "kb")
     before = _prepared(root, embedder)
-    monkeypatch.setattr(B, "WARMER_STALE_S", 0.2)
     _pull(root)
     building, finish = threading.Event(), threading.Event()
     real_init = B._SearchIndex.__init__
@@ -190,13 +189,12 @@ def test_reads_never_wait_on_a_warmer_pass_that_outlives_warmer_stale_s(tmp_path
         real_init(index, snapshot)
 
     monkeypatch.setattr(B._SearchIndex, "__init__", slow_init)
-    before.checked_at = time.monotonic()                # the warmer's previous pass just looked
     warmer = threading.Thread(target=B.warm, args=(root,), name="slow-warmer")
     warmer.start()
     try:
         assert building.wait(5)                         # the pass scanned the pull and holds the build lock
-        time.sleep(0.4)                                 # past WARMER_STALE_S since the pass began
-        assert B._prepared.get(root) is before
+        assert B._prepared.get(root) is before and before.changed_at is not None
+        before.checked_at -= B.WARMER_STALE_S + 1       # the pass began longer than WARMER_STALE_S ago
         answers: dict = {}
         reader = threading.Thread(target=lambda: answers.update(
             links=B.links(root, "features/tutor-init.md"), grep=B.grep(root, "moonbeam")))
