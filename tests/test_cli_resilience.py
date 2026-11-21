@@ -531,7 +531,7 @@ def test_json_errors_are_one_object_like_the_other_json_errors(server, capsys, m
 
 @pytest.mark.parametrize("flag", ["--j", "--js", "--jso"])
 def test_an_abbreviated_json_flag_is_refused_as_json(server, capsys, flag) -> None:
-    """Since 0.3.37 abbreviations are refused (`--top` was silently `--top-k`); the caller asked for JSON, so the
+    """Since 0.3.37 abbreviations are refused (`--lim` was silently `--limit`); the caller asked for JSON, so the
     usage error is JSON, and it names the real flag."""
     code, out, _err = run(capsys, "search", "x", flag)
     error = json.loads(out)
@@ -618,8 +618,9 @@ def test_top_k_above_the_server_maximum_is_a_usage_error_and_limit_is_top_k(serv
 
     server.script["/search"] = [SEARCH]
     assert run(capsys, "search", "x", "--limit", "3")[0] == 0
+    assert run(capsys, "search", "x", "--top", "4")[0] == 0
     assert run(capsys, "search", "x")[0] == 0
-    assert [query["top_k"] for _method, _path, query in server.requests] == ["3", "10"]
+    assert [query["top_k"] for _method, _path, query in server.requests] == ["3", "4", "10"]
 
 
 @pytest.mark.parametrize("word,first", [

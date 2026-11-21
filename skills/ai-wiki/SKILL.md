@@ -7,7 +7,7 @@ description: >-
   Cite concept paths, enforce status/trust/freshness gates, and never invent facts that
   the CLI did not return.
 ---
-<!-- ai-wiki:version 0.3.39 -->
+<!-- ai-wiki:version 0.3.40 -->
 
 # ai-wiki — consult curated team knowledge
 
@@ -88,8 +88,8 @@ nothing. Do not fan out further.
 JSON `search`/`grep`/`log` output carries `shown`, `total` and `truncated`: check them before
 treating bounded output as complete. Never rerun an identical command to confirm an empty answer.
 Reads already retry a restarting server for about 20 s (`$AIWIKI_RETRY_S`): an error after that is
-final for this run; report it in one line, never loop on it. Flags are never abbreviated (`--top`
-is not `--top-k`); a usage error (exit 2) lists the command's `valid_flags`: fix the flag from it.
+final for this run; report it in one line, never loop on it. Flags are never abbreviated (`--lim`
+is not `--limit`); a usage error (exit 2) lists the command's `valid_flags`: fix the flag from it.
 
 ### 3. Read the concept, then trace one hop
 
