@@ -147,6 +147,69 @@ def test_a_change_the_warmer_does_not_prepare_in_time_is_read_as_before(tmp_path
     _builder_idle(root)
 
 
+def test_a_pass_preparing_a_change_past_warmer_stale_s_keeps_the_prepared_snapshot(tmp_path, embedder,
+                                                                                    monkeypatch) -> None:
+    """While the warmer prepares a change it found, only PREPARE_MAX_S bounds the view: a pass longer
+    than WARMER_STALE_S (35-90 s in production's busy hours, 2026-11-19/20) no longer expires it."""
+    root = _bundle(tmp_path / "kb")
+    before = _prepared(root, embedder)
+    _pull(root)
+    release = _hold_chunk_embedding(monkeypatch)
+    try:
+        B.warm(root)                                    # finds the change, cannot hand it over yet
+        view = B._prepared[root]
+        assert view is before and view.changed_at is not None
+        view.checked_at -= B.WARMER_STALE_S + 1         # the warmer's latest look began that long ago
+        view.changed_at -= B.WARMER_STALE_S + 1
+        builds = _Builds(monkeypatch)
+        assert B.grep(root, "moonbeam") == []           # still the prepared snapshot
+        assert B.links(root, "features/tutor-init.md")["path"] == "features/tutor-init.md"
+        assert B.hybrid_search_page(root, QUESTION, 5)[2]["mode"] == "hybrid"
+        assert builds.calls == []
+        view.changed_at -= B.PREPARE_MAX_S              # past PREPARE_MAX_S: reads move on, as before
+        assert B.grep(root, "moonbeam")
+    finally:
+        release.set()
+    _builder_idle(root)
+
+
+def test_reads_never_wait_on_a_warmer_pass_that_outlives_warmer_stale_s(tmp_path, embedder, monkeypatch) -> None:
+    """A read during a long pass answers from the prepared view instead of waiting on the locks the
+    pass holds (the snapshot's derived-build lock while it builds the search index)."""
+    root = _bundle(tmp_path / "kb")
+    before = _prepared(root, embedder)
+    _pull(root)
+    building, finish = threading.Event(), threading.Event()
+    real_init = B._SearchIndex.__init__
+
+    def slow_init(index, snapshot):
+        if threading.current_thread().name == "slow-warmer":
+            building.set()
+            finish.wait(10)
+        real_init(index, snapshot)
+
+    monkeypatch.setattr(B._SearchIndex, "__init__", slow_init)
+    warmer = threading.Thread(target=B.warm, args=(root,), name="slow-warmer")
+    warmer.start()
+    try:
+        assert building.wait(5)                         # the pass scanned the pull and holds the build lock
+        assert B._prepared.get(root) is before and before.changed_at is not None
+        before.checked_at -= B.WARMER_STALE_S + 1       # the pass began longer than WARMER_STALE_S ago
+        answers: dict = {}
+        reader = threading.Thread(target=lambda: answers.update(
+            links=B.links(root, "features/tutor-init.md"), grep=B.grep(root, "moonbeam")))
+        reader.start()
+        reader.join(3)
+        assert not reader.is_alive(), "a read waited on the warmer's pass"
+        assert answers["links"]["path"] == "features/tutor-init.md" and answers["grep"] == []
+    finally:
+        finish.set()
+        warmer.join(10)
+    _builder_idle(root)
+    B.warm(root)                                        # the chunks are in: the pull is handed over
+    assert B._prepared[root].snapshot is B._snapshots[root] and B.grep(root, "moonbeam")
+
+
 def test_without_a_recent_warmer_pass_a_read_scans_as_before(tmp_path, embedder) -> None:
     """A warmer that stopped looking (WARMER_STALE_S) never pins reads to an old snapshot."""
     root = _bundle(tmp_path / "kb")

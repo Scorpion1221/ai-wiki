@@ -134,7 +134,10 @@ _COARSE_TICK_NS = 2_000_000_000
 # right after a pull never waits for the next snapshot's scan, indexes or chunk vectors: on 0.3.27 a
 # search waited 4.8-8.3 s for ~20 s after each production pull while the warmer built them
 # (2026-11-13). The view is bounded: a change the warmer has not prepared within PREPARE_MAX_S, or a
-# warmer that has not looked for WARMER_STALE_S, sends reads back to preparing for themselves.
+# warmer that has not looked for WARMER_STALE_S, sends reads back to preparing for themselves. While
+# the warmer is preparing a change it found, only PREPARE_MAX_S applies: one pass (scan, indexes)
+# took 35-90 s in production's busy hours, and a view it expired itself sent reads to wait on its
+# locks, 30 s client timeouts on 2026-11-19/20 (26-30 of 50 abandons on the mirror).
 PREPARE_MAX_S = 60.0
 WARMER_STALE_S = 30.0
 
@@ -155,10 +158,12 @@ _prepared: dict[Path, _Prepared] = {}
 
 
 def _expired(view: _Prepared, now: float) -> bool:
-    """Whether reads may no longer use ``view``: no warmer pass within WARMER_STALE_S, or a change
-    the warmer found more than PREPARE_MAX_S ago and has not prepared."""
-    return now - view.checked_at > WARMER_STALE_S or (
-        view.changed_at is not None and now - view.changed_at > PREPARE_MAX_S)
+    """Whether reads may no longer use ``view``: a change the warmer found more than PREPARE_MAX_S
+    ago and has not prepared, or, with no change being prepared, no warmer pass within
+    WARMER_STALE_S. A pass preparing a change may outlive WARMER_STALE_S."""
+    if view.changed_at is not None:
+        return now - view.changed_at > PREPARE_MAX_S
+    return now - view.checked_at > WARMER_STALE_S
 
 
 def _ready_view(root: Path) -> _Prepared | None:
