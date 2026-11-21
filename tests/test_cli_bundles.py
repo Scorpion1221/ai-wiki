@@ -295,12 +295,15 @@ def test_usage_errors_are_structured_on_stdout(capsys) -> None:
     assert 'kind: "usage"' in captured.out
     assert "unrecognized arguments: --stat" in captured.out
     assert '"ai-wiki search --help"' in captured.out
-    assert 'valid_flags[3]: "--fields","--json","--top-k"' in captured.out  # --limit is hidden, --help implied
+    assert 'valid_flags[3]: "--fields","--json","--top-k"' in captured.out  # --limit/--top hidden, --help implied
 
 
 @pytest.mark.parametrize(("argv", "flag", "help_command", "valid"), [
-    (["search", "x", "--top", "2"], "--top", "ai-wiki search --help", "--top-k"),        # was --top-k 2
+    (["search", "x", "--to", "2"], "--to", "ai-wiki search --help", "--top-k"),         # prefix of --top / --top-k
+    (["search", "x", "--top-", "2"], "--top-", "ai-wiki search --help", "--top-k"),     # prefix of --top-k
     (["grep", "x", "--lim", "0"], "--lim", "ai-wiki grep --help", "--limit"),           # was --limit 0
+    (["grep", "x", "--top", "2"], "--top", "ai-wiki grep --help", "--limit"),           # prefix of hidden --top-k
+    (["grep", "x", "--top-", "2"], "--top-", "ai-wiki grep --help", "--limit"),         # prefix of hidden --top-k
     (["-b", "kb", "ls", "--rec"], "--rec", "ai-wiki ls --help", "--recursive"),
     (["cat", "x.md", "--fu"], "--fu", "ai-wiki cat --help", "--full"),
     (["admin", "changesets", "--lim", "3"], "--lim", "ai-wiki admin changesets --help", "--limit"),
@@ -308,7 +311,7 @@ def test_usage_errors_are_structured_on_stdout(capsys) -> None:
 ])
 def test_abbreviated_flags_are_refused_with_the_commands_own_flags(monkeypatch, capsys, argv, flag, help_command,
                                                                   valid) -> None:
-    """argparse took any unambiguous prefix: `--top 2` ran as `--top-k 2`, a flag the caller never wrote."""
+    """argparse took any unambiguous prefix: `--lim 0` ran as `--limit 0`, a flag the caller never wrote."""
     monkeypatch.setattr(cli, "_api", lambda *a, **kw: pytest.fail("a usage error is decided before any request"))
     with pytest.raises(SystemExit) as exc:
         cli.main(argv)
@@ -317,6 +320,87 @@ def test_abbreviated_flags_are_refused_with_the_commands_own_flags(monkeypatch, 
     assert f'"{help_command}"' in out
     valid_line = next(line for line in out.splitlines() if line.strip().startswith("valid_flags["))
     assert f'"{valid}"' in valid_line and '"--help"' not in valid_line
+
+
+def test_search_top_hidden_alias(monkeypatch, capsys, tmp_path) -> None:
+    """Explicit full-word `--top` alias on `search` works like `--top-k` while staying hidden from `valid_flags`."""
+    import pytest
+
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "config.json")
+    calls = []
+
+    def fake_api(route, **kw):
+        calls.append((route, kw))
+        return {"results": [{"path": "x.md"}], "total": 1}
+
+    monkeypatch.setattr(cli, "_api", fake_api)
+
+    assert cli.main(["search", "q", "--top", "5"]) == 0
+    capsys.readouterr()
+    assert cli.main(["search", "q", "--top=7", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["shown"] == 1
+    assert cli.main(["search", "q"]) == 0
+    capsys.readouterr()
+    assert [kw["top_k"] for route, kw in calls if route == "/search"] == [5, 7, 10]
+
+    # Enforces _top_k bounds before hitting the server
+    calls.clear()
+    for bad, expected in (("0", "must be > 0"), ("2000", "must be <= 1000"), ("abc", "must be an integer")):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["search", "q", "--top", bad])
+        assert exc.value.code == 2 and expected in capsys.readouterr().out
+    assert calls == []
+
+
+def test_grep_top_k_hidden_alias(monkeypatch, capsys, tmp_path) -> None:
+    """Explicit full-word `--top-k` alias on `grep` works like `--limit` and stays hidden from `valid_flags`."""
+    import pytest
+
+    monkeypatch.setattr(cli, "CONFIG", tmp_path / "config.json")
+    calls = []
+    hits = [{"path": "x.md", "line": i, "text": f"hit {i}"} for i in range(3)]
+
+    def fake_api(route, **kw):
+        calls.append((route, kw))
+        return {"hits": hits}
+
+    monkeypatch.setattr(cli, "_api", fake_api)
+
+    # Without dir, with --fixed: value must not be parsed as positional `dir`
+    assert cli.main(["grep", "hit", "--fixed", "--top-k", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "shown: 2" in out and "total: 3" in out and "truncated: true" in out
+    assert calls[-1] == ("/grep", {"bundle": None, "q": "hit", "dir": None, "fixed": "true"})
+
+    # With positional dir, `--top-k` after or before positionals (works on Python 3.11 and 3.12)
+    assert cli.main(["grep", "hit", "risks", "--fixed", "--top-k", "2"]) == 0
+    capsys.readouterr()
+    assert calls[-1] == ("/grep", {"bundle": None, "q": "hit", "dir": "risks", "fixed": "true"})
+
+    assert cli.main(["grep", "--top-k=2", "hit", "risks"]) == 0
+    capsys.readouterr()
+    assert calls[-1] == ("/grep", {"bundle": None, "q": "hit", "dir": "risks", "fixed": None})
+
+    # 0 means all hits, matching --limit 0
+    assert cli.main(["grep", "hit", "--top-k", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "shown: 3" in out and "total: 3" in out and "truncated: false" in out
+
+    # Enforces _limit bounds before hitting the server
+    calls.clear()
+    for bad, expected in (("-1", "must be >= 0"), ("abc", "must be an integer")):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["grep", "hit", "--top-k", bad])
+        assert exc.value.code == 2 and expected in capsys.readouterr().out
+    assert calls == []
+
+    # Hidden alias stays out of grep's valid_flags
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["grep", "hit", "--stat"])
+    out = capsys.readouterr().out
+    assert exc.value.code == 2
+    assert 'valid_flags[6]: "--fixed","--ignore-case","--json","--limit","--line-number","--recursive"' in out
+    assert '"--top-k"' not in out
 
 
 @pytest.mark.parametrize("argv", [
