@@ -174,9 +174,8 @@ def test_the_production_prompt_keeps_the_legacy_parameters_and_leaves_audits_to_
 
 def _section(text: str, heading: str, stop_prefix: str) -> str:
     body = text.split(heading, 1)[1]
-    if stop_prefix in body:
-        body = body.split(stop_prefix, 1)[0]
-    return " ".join(body.split())
+    assert stop_prefix in body, f"{stop_prefix!r} not found after {heading!r}"
+    return " ".join(body.split(stop_prefix, 1)[0].split())
 
 
 def test_installed_maintainer_and_curator_skills_guard_capped_triage_and_title_boundaries(tmp_path: Path) -> None:
@@ -186,23 +185,34 @@ def test_installed_maintainer_and_curator_skills_guard_capped_triage_and_title_b
     assert {row["status"] for row in rows} == {"installed"}
 
     maint = (tmp_path / "ai-wiki-curating-maintainer" / "SKILL.md").read_text(encoding="utf-8")
-    triage = _section(maint, "### 3.2 Triage", "\n### 3.3 ")
-    assert "`too_many_sources`" in triage and "`body_too_long`" in triage
-    assert "dated sibling concept" in triage and "instead of marking `duplicate_of`" in triage
-    assert "Code Review or QA round" in triage
-    assert "Before `no_durable_knowledge` or `out_of_scope`" in triage
-    assert "telemetry caveats" in triage and "acceptance results" in triage
-    assert "Never loosen skip or `duplicate_of` judgment to drain a large `ready` queue" in triage
+    skip_bullet = _section(maint, "### 3.2 Triage", "\n- Too large for one pass")
+    capped_clause = _section(skip_bullet, "When the evidence adds durable knowledge it lacks", "A changed value")
+    assert "8 or more sources (`too_many_sources`)" in capped_clause
+    assert "its body is past 20000 characters (`body_too_long`)" in capped_clause
+    assert "dated sibling concept (`<topic>-<reading>-<date>`)" in capped_clause
+    assert "instead of marking `duplicate_of`" in capped_clause
+    assert "Code Review or QA round" in capped_clause
+    assert "telemetry caveats" in capped_clause and "acceptance results" in capped_clause
+
+    preskip_clause = _section(skip_bullet, "Before `no_durable_knowledge` or `out_of_scope`", "Never loosen skip")
+    assert "check every frozen file against existing concept(s)" in preskip_clause
+    assert "telemetry caveats" in preskip_clause and "deferred findings" in preskip_clause
+    assert "acceptance results" in preskip_clause
+
+    queue_clause = skip_bullet.split("Never loosen skip", 1)[1]
+    assert "or `duplicate_of` judgment to drain a large `ready` queue" in queue_clause
 
     curate = _section(maint, "### 3.3 Curate in the workspace", "\n### 3.4 ")
-    assert "dev/test-only mock" in curate and "code-only read" in curate
-    assert "unqualified production fact" in curate and "a review cannot retitle" in curate
+    assert "never states a reported claim as bare fact" in curate
+    assert "dev/test-only mock or code-only read as an unqualified production fact" in curate
+    assert "a review cannot retitle" in curate
 
     curator = (tmp_path / "okf-knowledge-curator" / "SKILL.md").read_text(encoding="utf-8")
     provenance = _section(curator, "## Provenance and per-claim attribution", "\n## ")
     assert "`title` is identity-locked and cannot be narrowed by audit" in provenance
     assert "dev/test mocks, code-only reads and reported claims" in provenance
-    assert "unqualified production facts" in provenance
+    assert "prefer a neutral topic title for reported claims" in provenance
+    assert "bare or unqualified production facts" in provenance
 
 
 def test_installed_auditor_skill_converges_correction_rereviews_and_narrows_in_one_pass(tmp_path: Path) -> None:
@@ -216,8 +226,12 @@ def test_installed_auditor_skill_converges_correction_rereviews_and_narrows_in_o
     assert "Judge it like new content" not in take
     assert "same factual standard" in take
     assert "On `reason: correction`" in take
-    assert "every material claim in the concept and `description` is already supported and bounded" in take
+    assert (
+        "every material claim in the concept and `description` is already supported, uncontradicted and bounded" in take
+    )
     assert "record `verified` even when phrasing could be tighter" in take
+    assert "or `unverified` per §3.3/§3.4 when it cannot be narrowed" in take
+    assert "overstated `title` or a `related` contradiction" in take
     assert "remaining material defect that could mislead a reader" in take
     assert "never for wording polish or formatting/style tweaks" in take
 

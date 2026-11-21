@@ -113,8 +113,8 @@ WAIO-68 reported on 2026-08-01 that the redirect runs before analytics initializ
 ```
 
 `title` is identity-locked and cannot be narrowed by audit: keep dev/test mocks, code-only reads
-and reported claims scoped inside `title` (or use a neutral topic title) rather than stating them
-as unqualified production facts.
+and reported claims scoped inside `title` (prefer a neutral topic title for reported claims)
+rather than stating them as bare or unqualified production facts.
 
 Do not use positional citations (`[1]`) or rely on footnote prose as the source key. A
 claim without adequate evidence stays narrowly worded and transiently `draft`, or is

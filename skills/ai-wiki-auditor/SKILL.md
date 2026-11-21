@@ -87,10 +87,12 @@ from `reviewable_at`, by the writer's clock; renaming your run does not help, an
 skips the rest. Check it against its cited evidence with the same factual standard: `verified`
 confirms it, `unverified` leaves it unconfirmed, `corrected` writes a new correction another run
 reviews later. On `reason: correction`, if every material claim in the concept and `description`
-is already supported and bounded, record `verified` even when phrasing could be tighter; record
-`corrected` again only for a remaining material defect that could mislead a reader (wrong number,
-unit, window, population, date or attribution, unsupported or overstated claim, unnoted
-contradiction or removed hedge), never for wording polish or formatting/style tweaks.
+is already supported, uncontradicted and bounded, record `verified` even when phrasing could be
+tighter; record `corrected` again (or `unverified` per §3.3/§3.4 when it cannot be narrowed,
+e.g. overstated `title` or a `related` contradiction) only for a remaining material defect that
+could mislead a reader (wrong number, unit, window, population, date or attribution, unsupported
+or overstated claim, unnoted contradiction or removed hedge), never for wording polish or
+formatting/style tweaks.
 
 ### 3.2 Check the evidence
 
