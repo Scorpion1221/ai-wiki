@@ -7,7 +7,7 @@ description: >-
   leave generated/verified bookkeeping to the service without faking verification, and hand
   concept edits back to deterministic service gates.
 ---
-<!-- ai-wiki:version 0.3.40 -->
+<!-- ai-wiki:version 0.3.41 -->
 
 # OKF Knowledge Curator
 
@@ -111,6 +111,10 @@ issue comment, the sentence itself names the issue as the reporter, with the dat
 ```markdown
 WAIO-68 reported on 2026-08-01 that the redirect runs before analytics initialization.[^waio-68]
 ```
+
+`title` is identity-locked and cannot be narrowed by audit: keep dev/test mocks, code-only reads
+and reported claims scoped inside `title` (prefer a neutral topic title for reported claims)
+rather than stating them as bare or unqualified production facts.
 
 Do not use positional citations (`[1]`) or rely on footnote prose as the source key. A
 claim without adequate evidence stays narrowly worded and transiently `draft`, or is

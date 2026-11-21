@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on a correction your own run wrote.
 ---
-<!-- ai-wiki:version 0.3.40 -->
+<!-- ai-wiki:version 0.3.41 -->
 
 # AI Wiki Auditor
 
@@ -84,8 +84,15 @@ unaudited concept); `correction`: an auditor's narrowing nobody has confirmed ye
 names `corrected_run` (the run that wrote it; `legacy: true` for one from before this rule, which
 any run may review) and `reviewable_at`, 12 h after it. You may review it only in another run and
 from `reviewable_at`, by the writer's clock; renaming your run does not help, and `review next`
-skips the rest. Judge it like new content against its cited evidence: `verified` confirms it,
-`unverified` leaves it unconfirmed, `corrected` writes a new correction another run reviews later.
+skips the rest. Check it against its cited evidence with the same factual standard: `verified`
+confirms it, `unverified` leaves it unconfirmed, `corrected` writes a new correction another run
+reviews later. On `reason: correction`, if every material claim in the concept and `description`
+is already supported, uncontradicted and bounded, record `verified` even when phrasing could be
+tighter; record `corrected` again (or `unverified` per §3.3/§3.4 when it cannot be narrowed,
+e.g. overstated `title` or a `related` contradiction) only for a remaining material defect that
+could mislead a reader (wrong number, unit, window, population, date or attribution, unsupported
+or overstated claim, unnoted contradiction or removed hedge), never for wording polish or
+formatting/style tweaks.
 
 ### 3.2 Check the evidence
 
@@ -144,9 +151,11 @@ Hold each to the evidence boundary:
   `D_CAVEAT_REMOVED`) and keeps the old text. `type`, `title`, `sources`, `generated`, `verified`
   and `status` are restored whatever you write, and `stale_after` unless you move it earlier (that
   narrows: correct a too-late date that way); a correction of only those ends unverified
-  (`D_RESTORED`), so say in the note what is wrong. A correction is your new
-  generation, applied unverified: it returns to the backlog as `correction`, and another run
-  reviews it at least 12 h later.
+  (`D_RESTORED`), so say in the note what is wrong. Audit the whole concept and narrow every
+  unsupported or overstated claim in one pass so the next run can confirm it as `verified`, rather
+  than stopping after one sentence and leaving remaining defects for another 12 h cycle. A
+  correction is your new generation, applied unverified: it returns to the backlog as `correction`,
+  and another run reviews it at least 12 h later.
 - **unverified**: a claim cannot be supported and cannot be narrowed cleanly, the evidence is
   unreliable, or the concept cites no frozen source (`D_NO_EVIDENCE`: a note is never evidence).
   Its verification stops being current and the maintainer gets an attention item to bring new
