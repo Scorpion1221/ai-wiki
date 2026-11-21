@@ -238,3 +238,13 @@ def test_installed_auditor_skill_converges_correction_rereviews_and_narrows_in_o
     verdict = _section(auditor, "### 3.4 Record a verdict", "\n### 3.5 ")
     assert "Audit the whole concept and narrow every unsupported or overstated claim in one pass" in verdict
     assert "rather than stopping after one sentence" in verdict and "12 h cycle" in verdict
+
+    prompt = (PROMPT.parent / "auditor-autopilot-prompt.md").read_text(encoding="utf-8")
+    assert "像审新内容一样" not in prompt
+    narrow_bullet = next(line for line in prompt.splitlines() if line.startswith("- 修正只能收窄："))
+    assert "一次性收窄全部过强或无依据的表述" in narrow_bullet and "不要只改一句留给下一轮" in narrow_bullet
+    corr_bullet = next(line for line in prompt.splitlines() if line.startswith("- `reason: correction` "))
+    assert "按同等事实标准对照它引用的证据" in corr_bullet
+    assert "所有实质主张都已有依据、无矛盾且边界清楚" in corr_bullet and "直接记 verified" in corr_bullet
+    assert "按 Skill §3.3/§3.4 记 unverified" in corr_bullet
+    assert "不要为措辞润色或格式微调再次修正" in corr_bullet
