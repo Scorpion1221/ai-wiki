@@ -136,12 +136,8 @@ def _check_quota(bundle: Path, submitter: str, limit: int) -> None:
     """429 once ``submitter`` queued ``limit`` submissions into this bundle within a day."""
     now = M._now()
     times = []
-    for path in (bundle / ".okf" / "jobs").glob("*.json"):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        created = M._parse(job.get("created")) if isinstance(job, dict) else None
+    for job in I._scan_jobs(bundle):
+        created = M._parse(job.get("created"))
         if created and now - created < _DAY and job.get("via") == "ingest" and job.get("submitter") == submitter:
             times.append(created)
     if len(times) >= limit:
@@ -347,13 +343,11 @@ def pending_intakes(bundle: Path) -> list[Path]:
     """The intake jobs to hand the worker: queued ones, and failed ones whose retry is due,
     queued again. Nothing is lost: a failure the writer cannot retry stays for the watchdog."""
     now, pending = M._now(), []
-    for path in sorted((bundle / ".okf" / "jobs").glob("*.json")):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+    jobs_dir = bundle / ".okf" / "jobs"
+    for stem, job in sorted(I._scan_job_entries(bundle), key=lambda pair: f"{pair[0]}.json"):
+        if job.get("kind") != "intake":
             continue
-        if not isinstance(job, dict) or job.get("kind") != "intake":
-            continue
+        path = jobs_dir / f"{stem}.json"
         cause = job.get("failure") if isinstance(job.get("failure"), dict) else {}
         finished = M._parse(job.get("finished"))
         if job.get("status") == "failed" and cause.get("retryable") and finished is not None \

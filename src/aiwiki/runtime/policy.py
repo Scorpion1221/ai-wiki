@@ -19,6 +19,7 @@ import shutil
 import tempfile
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +51,49 @@ def _isolated_agent_bundle(bundle: Path) -> tuple[Path, Path]:
             ignored.update(name for name in (".git", ".okf") if name in names)
         if base == bundle_resolved / "sources" and "inbox" in names:
             ignored.add("inbox")
+        return ignored
+
+    shutil.copytree(bundle, workspace, symlinks=True, ignore=ignore)
+    return temporary, workspace
+
+
+def _isolated_concept_bundle(
+    bundle: Path,
+    *,
+    keep_sources: frozenset[str] = frozenset(),
+) -> tuple[Path, Path]:
+    """Copy knowledge concepts and structural files into a disposable workspace for deterministic
+    changeset/review evaluation, leaving out ``viz.html`` and unchanged non-markdown files under
+    ``sources/`` (252 MB of immutable ``*.source`` snapshots on the production bundle).
+
+    Symlinks anywhere (including ``viz.html`` and under ``sources/``), stray ``*.md`` files under
+    ``sources/``, and any source named in ``keep_sources`` (e.g. a changeset's own packet path
+    for collision checks) are still copied, so validation, symlink checks and collision checks
+    produce identical results without copying or re-hashing hundreds of megabytes in ``/tmp``.
+    """
+    temporary = Path(tempfile.mkdtemp(prefix="ai-wiki-agent-"))
+    workspace = temporary / "bundle"
+    bundle_resolved = bundle.resolve()
+    sources_root = bundle_resolved / "sources"
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        base = Path(directory).resolve()
+        ignored: set[str] = set()
+        if base == bundle_resolved:
+            ignored.update(name for name in (".git", ".okf") if name in names)
+            if "viz.html" in names and not (base / "viz.html").is_symlink():
+                ignored.add("viz.html")
+        if base == sources_root or sources_root in base.parents:
+            if base == sources_root and "inbox" in names:
+                ignored.add("inbox")
+            for name in names:
+                if name in ignored:
+                    continue
+                entry = base / name
+                rel = entry.relative_to(sources_root).as_posix()
+                if rel in keep_sources or entry.is_symlink() or entry.is_dir() or Path(name).suffix == ".md":
+                    continue
+                ignored.add(name)
         return ignored
 
     shutil.copytree(bundle, workspace, symlinks=True, ignore=ignore)
@@ -310,12 +354,15 @@ def _curation_policy_errors(
     max_generated_at: datetime | None = None,
     *,
     actor: str = CURATOR_ACTOR,
+    resource_exists: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Enforce the write boundary that validation alone cannot infer.
 
     ``actor`` is the writer this pass stamps as ``generated.by``; the Codex curator
-    is the default.
+    is the default. ``resource_exists`` overrides local file checks for ``sources[].resource``
+    when an isolated concept copy intentionally omits immutable ``sources/`` snapshots.
     """
+    exists = resource_exists or (lambda resolved: (bundle / resolved).is_file())
     errors: list[str] = []
     after: set[str] = set()
     for path in _concept_paths(bundle):
@@ -340,7 +387,7 @@ def _curation_policy_errors(
                 resolved = _source_resource_rel(resource.strip(), rel)
                 if resolved is None:
                     errors.append(f"{rel}: sources[{i}].resource escapes the bundle: {resource!r}")
-                elif not (bundle / resolved).is_file():
+                elif not exists(resolved):
                     errors.append(
                         f"{rel}: sources[{i}].resource does not resolve to a local file: "
                         f"{resource!r} -> {resolved!r}"

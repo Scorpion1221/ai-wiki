@@ -20,10 +20,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import posixpath
 import sys
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -31,6 +34,11 @@ import yaml
 
 from .digests import file_sha256
 from .document import load_yaml
+
+_FAST_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+_PREFLIGHT_OK_CACHE: OrderedDict[tuple[str, bytes], None] = OrderedDict()
+_PREFLIGHT_OK_LOCK = threading.Lock()
+_PREFLIGHT_OK_MAX = 16384
 
 SOURCES = "sources"
 HASHES = "sources/.hashes.yaml"
@@ -204,13 +212,24 @@ def _preflight_concepts(root: Path) -> None:
     baseline happens to match while concepts still use v0.1 string sources.
     """
     for p, crel in _concepts(root):
-        text = p.read_text(encoding="utf-8", errors="replace")
+        raw = p.read_bytes()
+        key = (crel, hashlib.sha256(raw).digest())
+        with _PREFLIGHT_OK_LOCK:
+            if key in _PREFLIGHT_OK_CACHE:
+                _PREFLIGHT_OK_CACHE.move_to_end(key)
+                continue
+        text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
         try:
             fm = _frontmatter(text)
             _reject_legacy(fm, text)
             _structured_resources(fm.get("sources"), concept_rel=crel)
         except ValueError as exc:
             raise ValueError(f"{crel}: {exc}") from exc
+        with _PREFLIGHT_OK_LOCK:
+            _PREFLIGHT_OK_CACHE[key] = None
+            _PREFLIGHT_OK_CACHE.move_to_end(key)
+            while len(_PREFLIGHT_OK_CACHE) > _PREFLIGHT_OK_MAX:
+                _PREFLIGHT_OK_CACHE.popitem(last=False)
 
 
 def main(argv=None) -> int:
@@ -284,7 +303,10 @@ def main(argv=None) -> int:
 
     if a.commit:
         hpath.parent.mkdir(parents=True, exist_ok=True)
-        hpath.write_text(yaml.safe_dump(cur, sort_keys=True, allow_unicode=True), encoding="utf-8")
+        hpath.write_text(
+            yaml.dump(cur, Dumper=_FAST_DUMPER, sort_keys=True, allow_unicode=True),
+            encoding="utf-8",
+        )
         print(f"\n✓ committed {len(cur)} source hash(es) to {HASHES}")
     return 0
 

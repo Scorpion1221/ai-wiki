@@ -22,11 +22,13 @@ import io
 import json
 import os
 import shutil
+import stat as stat_mod
 import tarfile
+import threading
 import time
 import unicodedata
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 import yaml
@@ -38,6 +40,10 @@ from aiwiki.runtime import changeset
 
 META = ".ai-wiki"
 MINE = ".mine"
+_STAT_CACHE = "stat-cache.json"
+_LAST_VALIDATED = "last-validated.json"
+_RACY_NS = 2_000_000_000  # 2 s racy-clean guard, like Git: recently written files are always re-hashed
+_VALIDATION_TTL_S = 900
 PLACEHOLDER = b"ai-wiki local validation placeholder\n"  # stands in for a packet only when judging locally
 LOCK_WAIT_S = 900  # longer than a pull holds the lock: GET /workspace gives up within 2 x 300 + 20 s
 RETRY_DELAYS_S = (5, 15, 30)  # resends of the same bytes after an answer that settles nothing
@@ -67,7 +73,7 @@ def _json(body: bytes) -> dict:
 
 def _write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     temporary.write_bytes(data)
     os.replace(temporary, path)
 
@@ -97,8 +103,102 @@ def _files(root: Path, *, workspace: bool) -> dict[str, Path]:
     return found
 
 
-def _hashes(root: Path, *, workspace: bool = False) -> dict[str, str]:
-    return {rel: _sha(path.read_bytes()) for rel, path in sorted(_files(root, workspace=workspace).items())}
+def _load_stat_cache(meta: Path) -> dict[str, dict[str, list]]:
+    try:
+        raw = json.loads((meta / _STAT_CACHE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"work": {}, "base": {}}
+    if not isinstance(raw, dict) or raw.get("v") != 1:
+        return {"work": {}, "base": {}}
+    work = raw.get("work") if isinstance(raw.get("work"), dict) else {}
+    base = raw.get("base") if isinstance(raw.get("base"), dict) else {}
+    return {"work": dict(work), "base": dict(base)}
+
+
+def _save_stat_cache(meta: Path, cache: dict[str, dict[str, list]]) -> None:
+    if not (meta / "workspace.json").is_file():
+        return
+    with contextlib.suppress(OSError):
+        _write(meta / _STAT_CACHE, json.dumps(
+            {"v": 1, "work": cache["work"], "base": cache["base"]}, separators=(",", ":")).encode("utf-8"))
+
+
+def _stat_tuple(st: os.stat_result) -> list[int]:
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def _hashes(root: Path, *, workspace: bool = False, cache: dict[str, list] | None = None,
+            dirty: list[bool] | None = None) -> dict[str, str]:
+    """SHA-256 of every regular non-symlink file under ``root``.
+
+    When backed by a stat cache (automatic for initialized workspaces, or passed explicitly),
+    files older than ``_RACY_NS`` whose ``(dev, ino, size, mtime_ns, ctime_ns)`` match are
+    reused without re-reading disk, avoiding 280 MB+ re-hashes of unchanged ``sources/`` on
+    every verb while always re-hashing recently written or modified files.
+    """
+    auto_cache: dict[str, dict[str, list]] | None = None
+    if cache is None and workspace and (root / META / "workspace.json").is_file():
+        auto_cache = _load_stat_cache(root / META)
+        cache = auto_cache["work"]
+        dirty = [False]
+    now_ns = time.time_ns()
+    found: dict[str, str] = {}
+    if not root.is_dir():
+        if cache:
+            cache.clear()
+            if dirty is not None:
+                dirty[0] = True
+        return found
+    for directory, dirnames, filenames in os.walk(root):
+        base = Path(directory)
+        if workspace and base == root:
+            dirnames[:] = [name for name in dirnames if name not in (META, ".git")]
+        for name in filenames:
+            if workspace and name.endswith(MINE):
+                continue
+            path = base / name
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if stat_mod.S_ISLNK(st.st_mode) or not stat_mod.S_ISREG(st.st_mode):
+                continue
+            rel = path.relative_to(root).as_posix()
+            if cache is not None:
+                key = _stat_tuple(st)
+                cacheable = (now_ns - st.st_ctime_ns) > _RACY_NS
+                cached = cache.get(rel)
+                if cacheable and isinstance(cached, list) and len(cached) == 6 and cached[:5] == key \
+                        and isinstance(cached[5], str):
+                    found[rel] = cached[5]
+                    continue
+                sha = _sha(path.read_bytes())
+                found[rel] = sha
+                if cacheable:
+                    try:
+                        after = _stat_tuple(os.lstat(path))
+                    except OSError:
+                        after = None
+                    if after == key:
+                        cache[rel] = [*key, sha]
+                        if dirty is not None:
+                            dirty[0] = True
+                elif rel in cache:
+                    cache.pop(rel, None)
+                    if dirty is not None:
+                        dirty[0] = True
+            else:
+                found[rel] = _sha(path.read_bytes())
+    if cache is not None:
+        stale = cache.keys() - found.keys()
+        if stale:
+            for rel in stale:
+                cache.pop(rel, None)
+            if dirty is not None:
+                dirty[0] = True
+        if auto_cache is not None and dirty and dirty[0]:
+            _save_stat_cache(root / META, auto_cache)
+    return dict(sorted(found.items()))
 
 
 def load(root: Path) -> dict:
@@ -178,6 +278,106 @@ def _actor() -> str | None:
     return _json(body).get("actor") or None
 
 
+def _prune_empty_dirs(directory: Path, *, stop: Path) -> None:
+    stop_resolved = stop.resolve()
+    current = directory
+    while True:
+        try:
+            if current.resolve() == stop_resolved:
+                return
+        except OSError:
+            return
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _safe_delta_path(rel: object) -> bool:
+    if not isinstance(rel, str) or not rel or rel.startswith("/") or rel.endswith("/"):
+        return False
+    parts = PurePosixPath(rel).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return False
+    return parts[0] not in (META, ".git")
+
+
+def _parse_delta(
+    incoming: Path, expected_base: str, expected_revision: str
+) -> tuple[list[str], list[str], dict[str, str]] | None:
+    manifest_path = incoming / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("version") != 1:
+        return None
+    if manifest.get("base_revision") != expected_base or manifest.get("revision") != expected_revision:
+        return None
+    updated = manifest.get("updated")
+    deleted = manifest.get("deleted")
+    if not isinstance(updated, list) or not isinstance(deleted, list):
+        return None
+    if not all(_safe_delta_path(p) for p in updated) or not all(_safe_delta_path(p) for p in deleted):
+        return None
+    if set(updated) & set(deleted):
+        return None
+    tree_dir = incoming / "tree"
+    delta_hashes = _hashes(tree_dir) if tree_dir.is_dir() else {}
+    if set(delta_hashes) != set(updated):
+        return None
+    return updated, deleted, delta_hashes
+
+
+def _clear_validation(root: Path) -> None:
+    with contextlib.suppress(OSError):
+        (root / META / _LAST_VALIDATED).unlink(missing_ok=True)
+
+
+def _validation_fingerprint(state: dict, request: dict, evidence: Evidence) -> str:
+    payload = {
+        "base_revision": state["base_revision"],
+        "actor": state["actor"],
+        "day": datetime.now(UTC).strftime("%Y-%m-%d"),
+        "request": request,
+        "evidence": [[f.name, _sha(f.data), f.origin] for f in evidence],
+        "answers": sorted(evidence.answers),
+    }
+    return _sha(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+
+def _record_validation(root: Path, state: dict, request: dict, evidence: Evidence, result: dict,
+                       *, cacheable: bool) -> None:
+    if not cacheable or result.get("status") not in ("would_apply", "noop") or not state.get("actor"):
+        _clear_validation(root)
+        return
+    with contextlib.suppress(OSError):
+        _write(root / META / _LAST_VALIDATED, json.dumps({
+            "fingerprint": _validation_fingerprint(state, request, evidence),
+            "at": time.time(),
+            "status": result["status"],
+        }, separators=(",", ":")).encode("utf-8"))
+
+
+def _has_valid_cache(root: Path, state: dict, request: dict, evidence: Evidence) -> bool:
+    if not state.get("actor"):
+        return False
+    try:
+        cached = json.loads((root / META / _LAST_VALIDATED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(cached, dict) or cached.get("status") not in ("would_apply", "noop"):
+        return False
+    try:
+        age = time.time() - float(cached.get("at", 0))
+    except (TypeError, ValueError):
+        return False
+    if not 0 <= age <= _VALIDATION_TTL_S:
+        return False
+    return cached.get("fingerprint") == _validation_fingerprint(state, request, evidence)
+
+
 def pull(root: Path, bundle: str) -> dict:
     """Bring the workspace to the published revision, keeping local edits the server did not touch.
 
@@ -205,54 +405,167 @@ def _pull(root: Path, bundle: str, actor: str | None | object = _ASK) -> dict:
         state = load(root)
         if state["bundle"] != bundle:
             raise WorkspaceError(f"{root} holds bundle {state['bundle']!r}, not {bundle!r}")
-    changed, local = changes(root, state) if state else ({}, {})
+    stat_cache = _load_stat_cache(meta) if state else {"work": {}, "base": {}}
+    cache_dirty = [False]
+    if state:
+        local = _hashes(root, workspace=True, cache=stat_cache["work"], dirty=cache_dirty)
+        old_hashes = state["hashes"]
+        changed = {}
+        for rel in sorted(local.keys() | old_hashes.keys()):
+            if rel not in old_hashes:
+                changed[rel] = "added"
+            elif rel not in local:
+                changed[rel] = "deleted"
+            elif local[rel] != old_hashes[rel]:
+                changed[rel] = "modified"
+    else:
+        changed, local = {}, {}
     discard = (state or {}).get("discard") or {}
-    base = _hashes(meta / "base") if state else {}
+    base = _hashes(meta / "base", cache=stat_cache["base"], dirty=cache_dirty) if state else {}
     intact = state is not None and base == state["hashes"]  # a damaged base is downloaded again
     headers = {"If-None-Match": f'"{state["base_revision"]}"'} if intact else {}
-    status, reply, body = cli._http("GET", "/workspace", bundle=bundle, headers=headers, timeout=300)
+    params = {"since": state["base_revision"]} if intact else None
+    status, reply, body = cli._http("GET", "/workspace", bundle=bundle, params=params, headers=headers, timeout=300)
     incoming = None
+    delta_parsed: tuple[list[str], list[str], dict[str, str]] | None = None
     if status == 304:
         revision, actor, new = state["base_revision"], state["actor"], base
     elif status == 200 and reply.get("X-AIWiki-Revision"):
         actor = _actor() if actor is _ASK else actor  # for local stamping; asked before the workspace changes
         revision, incoming = reply["X-AIWiki-Revision"], meta / "incoming"
+        is_delta = (intact and reply.get("X-AIWiki-Workspace-Mode") == "delta"
+                    and reply.get("X-AIWiki-Base-Revision") == state["base_revision"])
         shutil.rmtree(incoming, ignore_errors=True)
         _extract(body, incoming)
-        new = _hashes(incoming)
+        if is_delta:
+            delta_parsed = _parse_delta(incoming, state["base_revision"], revision)
+            if delta_parsed is None:
+                # Malformed/unexpected delta: fall back transparently to a full pull.
+                shutil.rmtree(incoming, ignore_errors=True)
+                status, reply, body = cli._http("GET", "/workspace", bundle=bundle, timeout=300)
+                if status != 200 or not reply.get("X-AIWiki-Revision"):
+                    raise _failed("GET /workspace", status, body)
+                revision = reply["X-AIWiki-Revision"]
+                _extract(body, incoming)
+                new = _hashes(incoming)
+            else:
+                _upd, deleted_list, delta_hashes = delta_parsed
+                new = dict(state["hashes"])
+                for rel in deleted_list:
+                    new.pop(rel, None)
+                new.update(delta_hashes)
+        else:
+            new = _hashes(incoming)
     else:
         raise _failed("GET /workspace", status, body)
-    tree = incoming or meta / "base"
     old = (state or {}).get("hashes", {})
     updated, kept, conflicted = [], [], []
-    for rel in sorted(old.keys() | new.keys() | changed.keys()):
-        committed = rel in discard and discard[rel] == local.get(rel)
-        edited = rel in changed and not committed and local.get(rel) != new.get(rel)
-        if edited and old.get(rel) == new.get(rel):
-            kept.append(rel)
-            continue
-        if rel not in changed and old.get(rel) == new.get(rel):
-            continue
-        target = root / rel
-        if edited:
-            conflicted.append(rel)
-            if target.is_file():
+    if delta_parsed is not None:
+        updated_list, deleted_list, delta_hashes = delta_parsed
+        tree_dir = incoming / "tree"
+        deletes: list[tuple[str, bool]] = []
+        writes: list[tuple[str, bool]] = []
+        for rel in sorted(delta_hashes.keys() | set(deleted_list) | changed.keys()):
+            committed = rel in discard and discard[rel] == local.get(rel)
+            edited = rel in changed and not committed and local.get(rel) != new.get(rel)
+            if edited and old.get(rel) == new.get(rel):
+                kept.append(rel)
+                continue
+            if rel not in changed and old.get(rel) == new.get(rel):
+                continue
+            if edited:
+                conflicted.append(rel)
+            else:
+                updated.append(rel)
+            if rel in new:
+                writes.append((rel, edited))
+            else:
+                deletes.append((rel, edited))
+        # Apply deletions before writes so file <-> directory transitions succeed cleanly.
+        for rel, edited in deletes:
+            target = root / rel
+            if edited:
+                if target.is_file():
+                    os.replace(target, target.with_name(target.name + MINE))
+            elif target.is_file():
+                target.unlink()
+                _prune_empty_dirs(target.parent, stop=root)
+            stat_cache["work"].pop(rel, None)
+        for rel, edited in writes:
+            target = root / rel
+            if edited and target.is_file():
                 os.replace(target, target.with_name(target.name + MINE))
-        else:
-            updated.append(rel)
-        if rel in new:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            src = (tree_dir / rel) if rel in delta_hashes else (meta / "base" / rel)
+            shutil.copyfile(src, target)
+            stat_cache["work"].pop(rel, None)
+        for rel, sha in discard.items():
+            if local.get(rel) == sha:  # the conflict it resolved is committed
+                (root / (rel + MINE)).unlink(missing_ok=True)
+        base_dir = meta / "base"
+        for rel in deleted_list:
+            bpath = base_dir / rel
+            bpath.unlink(missing_ok=True)
+            _prune_empty_dirs(bpath.parent, stop=base_dir)
+            stat_cache["base"].pop(rel, None)
+        for rel in updated_list:
+            bpath = base_dir / rel
+            bpath.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tree_dir / rel, bpath)
+            stat_cache["base"].pop(rel, None)
+        shutil.rmtree(incoming, ignore_errors=True)
+        cache_dirty[0] = True
+    else:
+        tree = incoming or meta / "base"
+        deletes = []
+        writes = []
+        for rel in sorted(old.keys() | new.keys() | changed.keys()):
+            committed = rel in discard and discard[rel] == local.get(rel)
+            edited = rel in changed and not committed and local.get(rel) != new.get(rel)
+            if edited and old.get(rel) == new.get(rel):
+                kept.append(rel)
+                continue
+            if rel not in changed and old.get(rel) == new.get(rel):
+                continue
+            if edited:
+                conflicted.append(rel)
+            else:
+                updated.append(rel)
+            if rel in new:
+                writes.append((rel, edited))
+            else:
+                deletes.append((rel, edited))
+        for rel, edited in deletes:
+            target = root / rel
+            if edited:
+                if target.is_file():
+                    os.replace(target, target.with_name(target.name + MINE))
+            elif target.is_file():
+                target.unlink()
+                _prune_empty_dirs(target.parent, stop=root)
+            stat_cache["work"].pop(rel, None)
+            cache_dirty[0] = True
+        for rel, edited in writes:
+            target = root / rel
+            if edited and target.is_file():
+                os.replace(target, target.with_name(target.name + MINE))
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(tree / rel, target)
-        elif target.is_file():
-            target.unlink()
-    for rel, sha in discard.items():
-        if local.get(rel) == sha:  # the conflict it resolved is committed
-            (root / (rel + MINE)).unlink(missing_ok=True)
-    if incoming:
-        shutil.rmtree(meta / "base", ignore_errors=True)
-        os.replace(incoming, meta / "base")
+            stat_cache["work"].pop(rel, None)
+            cache_dirty[0] = True
+        for rel, sha in discard.items():
+            if local.get(rel) == sha:  # the conflict it resolved is committed
+                (root / (rel + MINE)).unlink(missing_ok=True)
+        if incoming:
+            shutil.rmtree(meta / "base", ignore_errors=True)
+            os.replace(incoming, meta / "base")
+            stat_cache["base"].clear()
+            cache_dirty[0] = True
     _write(meta / "workspace.json", json.dumps(
         {"bundle": bundle, "base_revision": revision, "actor": actor, "hashes": new}, indent=1).encode())
+    if cache_dirty[0]:
+        _save_stat_cache(meta, stat_cache)
+    _clear_validation(root)
     return {"bundle": bundle, "base_revision": revision, "previous_revision": (state or {}).get("base_revision"),
             "up_to_date": status == 304, "updated": updated, "kept": kept, "conflicts": conflicted}
 
@@ -508,6 +821,7 @@ def _revert(root: Path, files: list[dict]) -> list[str]:
                 target.unlink(missing_ok=True)
             target.with_name(target.name + MINE).unlink(missing_ok=True)
             reverted.append(entry["path"])
+        _clear_validation(root)
     return reverted
 
 
@@ -528,9 +842,16 @@ def propose(root: Path, request: dict, evidence: Evidence, *, dry_run: bool = Fa
         status, result = submit(bundle, data, dry_run=True, wait=wait)
         return _exit(status), result
     with _locked(root):  # never judged on a base a pull is replacing
-        local = judge(root, state, request, evidence)
-    if local["status"] == "rejected":
-        return verdict_code(local), local  # never sent
+        state = load(root)
+        if not state["actor"]:
+            raise WorkspaceError("this token has no actor to stamp as generated.by, so the writer refuses its "
+                                 "changesets; use a process: or human: token", PREFLIGHT)
+        if not _has_valid_cache(root, state, request, evidence):
+            local = judge(root, state, request, evidence)
+            if local["status"] == "rejected":
+                _clear_validation(root)
+                return verdict_code(local), local  # never sent
+        _clear_validation(root)
     status, result = submit(bundle, data, wait=wait)
     code = _exit(status)
     if code == TRANSIENT:
@@ -664,6 +985,7 @@ def run(a, bundle: str | None) -> int:
             return OK
         if a.cmd == "validate":
             result = judge(root, state, request, evidence)
+            _record_validation(root, state, request, evidence, result, cacheable=bool(a.item or a.upload))
             _print(result, a.json, name="validation",
                    fields=("status", "http_status", "validation", "changeset_sha256"))
             return verdict_code(result)

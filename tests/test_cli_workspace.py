@@ -314,6 +314,8 @@ def test_two_pulls_of_one_workspace_never_drop_its_files(gate, ws, capsys, monke
 def test_validate_waits_for_a_pull_replacing_the_base(gate, ws, capsys, monkeypatch) -> None:
     # 2026-11-20: a propose the agent's tool moved to the background committed and pulled; the next
     # validate copied .ai-wiki/base while that pull had removed it, and failed on a missing file.
+    # Force a full-archive pull so .ai-wiki/base is swapped via rmtree+replace (delta pulls update in place).
+    monkeypatch.setattr(gate.appmod, "_DELTA_MAX_PATHS", 0)
     assert gate.post(gate.request(gate.put(VIEWS, cite(gate.read(VIEWS))))).json()["status"] == "done"
     (ws / METRIC).write_text(cited(gate.read(METRIC)), encoding="utf-8")
     rmtree, removed, validated = workspace.shutil.rmtree, threading.Event(), threading.Event()

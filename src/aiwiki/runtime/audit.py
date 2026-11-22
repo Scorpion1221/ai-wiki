@@ -31,6 +31,7 @@ from pathlib import Path
 import yaml
 
 from ..engine import append_log, bookkeeping
+from ..engine.digests import file_sha256
 from ..engine.document import (
     SELF_REVIEW_DELAY,
     OKFDocumentError,
@@ -1129,7 +1130,7 @@ def _frozen(tree: Path) -> Callable[[str], bool]:
         if target not in checked:
             path = tree / target
             checked[target] = path.is_file() and not has_symlink_component(tree, path) \
-                and hashlib.sha256(path.read_bytes()).hexdigest() == str(ledger.get(target))
+                and file_sha256(path) == str(ledger.get(target))
         return checked[target]
     return frozen
 
@@ -1801,7 +1802,9 @@ def _narrowing(before: str, after: str, known: str) -> str | None:
 
 
 def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: datetime,
-                    scope: Mapping[str, Mapping] | None, auditors: frozenset[str]) -> dict:
+                    scope: Mapping[str, Mapping] | None, auditors: frozenset[str],
+                    frozen: Callable[[str], bool] | None = None,
+                    source_reader: Callable[[str], bytes] | None = None) -> dict:
     """Judge one audit changeset against ``base_dir`` without changing it (design §5.4 A2-A8).
 
     ``scope`` is the backlog by path, or None for a human reviewer, whom A2 does not limit.
@@ -1823,17 +1826,23 @@ def evaluate_review(base_dir: Path, request: Mapping, *, actor: str, now: dateti
     if errors:
         return changeset._rejected(result, errors)
     result.update(changeset_sha256=changeset.changeset_sha256(request), kind="audit")
-    temporary, workspace = policy._isolated_agent_bundle(Path(base_dir))
+    base = Path(base_dir)
+    temporary, workspace = policy._isolated_concept_bundle(base)
     try:
-        return _review_in(workspace, request, result, actor=actor, now=now, scope=scope, auditors=auditors)
+        return _review_in(workspace, request, result, actor=actor, now=now, scope=scope, auditors=auditors,
+                          frozen=frozen or _frozen(base),
+                          source_reader=source_reader or (lambda rel: (base / rel).read_bytes()))
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, now: datetime,
-               scope: Mapping[str, Mapping] | None, auditors: frozenset[str]) -> dict:
+               scope: Mapping[str, Mapping] | None, auditors: frozenset[str],
+               frozen: Callable[[str], bool] | None = None,
+               source_reader: Callable[[str], bytes] | None = None) -> dict:
     before_errors = validate_bundle(workspace)
-    frozen = _frozen(workspace)
+    frozen = frozen or _frozen(workspace)
+    read_source = source_reader or (lambda rel: (workspace / rel).read_bytes())
     errors, conflicts, reviews, written, repairs, verified = [], [], [], {}, {}, []
     for review in sorted(request["reviews"], key=lambda item: unicodedata.normalize("NFC", item["path"])):
         rel = unicodedata.normalize("NFC", review["path"])
@@ -1897,7 +1906,7 @@ def _review_in(workspace: Path, request: Mapping, result: dict, *, actor: str, n
             if unreadable:
                 errors.append(unreadable)
                 continue
-            known = "\n".join([before, *((workspace / source).read_bytes().decode("utf-8", errors="replace")
+            known = "\n".join([before, *(read_source(source).decode("utf-8", errors="replace")
                                          for source in sources)])
             try:
                 downgrade = _narrowing(before, content, known)

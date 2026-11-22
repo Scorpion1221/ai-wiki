@@ -165,6 +165,7 @@ def serialized_lifecycle():
 
 def _save_job(path: Path, job: dict) -> None:
     curate._save(path, job)
+    I._invalidate_job(path)
 
 
 def _remote_contains(root: Path, branch: str, commit: str) -> str:
@@ -600,18 +601,7 @@ def ensure_started() -> None:
 
 def _known_shas(bundle: Path) -> set[str]:
     """sha256 of every source any job already tracks (so the sweep never double-enqueues)."""
-    shas: set[str] = set()
-    jdir = bundle / ".okf" / "jobs"
-    if not jdir.is_dir():
-        return shas
-    for jf in jdir.glob("*.json"):
-        try:
-            s = json.loads(jf.read_text(encoding="utf-8")).get("sha256")
-        except (OSError, ValueError):
-            continue
-        if s:
-            shas.add(s)
-    return shas
+    return {s for job in I._scan_jobs(bundle) if (s := job.get("sha256"))}
 
 
 _NAMED_SHA = re.compile(r"-([0-9a-f]{64})\.")

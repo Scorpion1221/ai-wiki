@@ -45,8 +45,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
-from collections import defaultdict
+import threading
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -75,13 +77,32 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
     return {}
 
 
+_META_CACHE: OrderedDict[tuple[str, bytes], tuple[str, str, str]] = OrderedDict()
+_META_CACHE_LOCK = threading.Lock()
+_META_CACHE_MAX = 16384
+
+
 def _meta(path: Path) -> dict[str, str]:
-    fm = _parse_frontmatter(path.read_text(encoding="utf-8"))
-    return {
-        "title": str(fm.get("title") or path.stem),
-        "description": str(fm.get("description") or ""),
-        "type": str(fm.get("type") or "Other"),
-    }
+    raw = path.read_bytes()
+    key = (path.stem, hashlib.sha256(raw).digest())
+    with _META_CACHE_LOCK:
+        hit = _META_CACHE.get(key)
+        if hit is not None:
+            _META_CACHE.move_to_end(key)
+            return {"title": hit[0], "description": hit[1], "type": hit[2]}
+    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    fm = _parse_frontmatter(text)
+    vals = (
+        str(fm.get("title") or path.stem),
+        str(fm.get("description") or ""),
+        str(fm.get("type") or "Other"),
+    )
+    with _META_CACHE_LOCK:
+        _META_CACHE[key] = vals
+        _META_CACHE.move_to_end(key)
+        while len(_META_CACHE) > _META_CACHE_MAX:
+            _META_CACHE.popitem(last=False)
+    return {"title": vals[0], "description": vals[1], "type": vals[2]}
 
 
 def _is_concept(p: Path, root: Path) -> bool:

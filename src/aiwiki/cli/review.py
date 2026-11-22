@@ -318,7 +318,7 @@ def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tu
     A re-read copy lands in the run's ``evidence/``. ``related`` lists frozen sources the concept
     does not cite that state its identifiers: newer evidence may contradict it. The findings are
     for the note only: the writer never trusts a reviewer's word about evidence (design §5.4)."""
-    from aiwiki.engine.document import parse_document
+    from aiwiki.engine.document import load_yaml, parse_document
     from aiwiki.engine.scan_sources import _source_resource_rel
 
     state = _load(state_dir, bundle)
@@ -327,7 +327,7 @@ def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tu
     if path not in state["taken"] or not concept.is_file():
         raise MaintError(f"{path} is not a concept this run took; run ai-wiki review next", USAGE)
     ledger = root / "sources" / ".hashes.yaml"  # {sources/<name>: sha256}, written by the service
-    frozen = yaml.safe_load(ledger.read_text(encoding="utf-8")) if ledger.is_file() else {}
+    frozen = load_yaml(ledger.read_text(encoding="utf-8")) if ledger.is_file() else {}
     frozen = frozen if isinstance(frozen, dict) else {}
     settings = maint._config(config)
     rows, out, cited = [], _folder(state_dir, state["run"]) / "evidence", set()
