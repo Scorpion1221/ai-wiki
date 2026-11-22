@@ -9,14 +9,17 @@ fields, but it may not keep emitting the superseded v0.1 shape.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
+import threading
+from collections import OrderedDict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from .document import OKFDocumentError, load_document
+from .document import OKFDocumentError, load_document, parse_document
 
 OKF_VERSION = "0.2"
 OKF_RESERVED = {"index.md", "log.md"}
@@ -408,21 +411,72 @@ def validate_profile_document(frontmatter: dict[str, Any], body: str) -> list[st
     return errors
 
 
+# Exact-byte validation cache for valid concepts. Every check in ``validate_okf_conformance`` and
+# ``validate_profile`` on a single concept is a pure function of its bytes (no filesystem or clock
+# dependence). Only bytes that pass *both* conformance and strict profile with zero errors are
+# cached, so any invalid or edited file is always parsed and reported fresh.
+_VALID_CONCEPT_CACHE: OrderedDict[bytes, None] = OrderedDict()
+_VALID_CONCEPT_LOCK = threading.Lock()
+_VALID_CONCEPT_MAX = 16384
+_VALID_SENTINEL = object()  # stored in per-call ``documents`` dict when a file hit the valid cache
+
+
+def _cache_has_valid(digest: bytes) -> bool:
+    with _VALID_CONCEPT_LOCK:
+        if digest in _VALID_CONCEPT_CACHE:
+            _VALID_CONCEPT_CACHE.move_to_end(digest)
+            return True
+    return False
+
+
+def _cache_mark_valid(digest: bytes) -> None:
+    with _VALID_CONCEPT_LOCK:
+        _VALID_CONCEPT_CACHE[digest] = None
+        _VALID_CONCEPT_CACHE.move_to_end(digest)
+        while len(_VALID_CONCEPT_CACHE) > _VALID_CONCEPT_MAX:
+            _VALID_CONCEPT_CACHE.popitem(last=False)
+
+
 def _loader(documents: dict | None):
     """``load_document`` for concept files, remembering each result (or its error) in ``documents``
-    when the caller shares one dict between the two checks of a single validate()."""
+    when the caller shares one dict between the two checks of a single validate().
+
+    Returns ``_VALID_SENTINEL`` when ``path``'s exact bytes already passed both conformance and
+    profile validation in ``_VALID_CONCEPT_CACHE``, skipping redundant YAML parsing and regex
+    checks on unchanged concepts.
+    """
     def load(path: Path):
-        if documents is None:
-            return load_document(path)
-        if path not in documents:
-            try:
-                documents[path] = load_document(path)
-            except (OSError, UnicodeError, OKFDocumentError) as exc:
+        if documents is not None and path in documents:
+            result = documents[path]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            if documents is not None:
                 documents[path] = exc
-        result = documents[path]
-        if isinstance(result, Exception):
-            raise result
-        return result
+            raise
+        digest = hashlib.sha256(raw).digest()
+        if _cache_has_valid(digest):
+            if documents is not None:
+                documents[path] = _VALID_SENTINEL
+            return _VALID_SENTINEL
+        try:
+            text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            doc = parse_document(text)
+        except (UnicodeError, OKFDocumentError) as exc:
+            if documents is not None:
+                documents[path] = exc
+            raise
+        if _non_empty(doc.frontmatter.get("type")) and not validate_profile_document(doc.frontmatter, doc.body):
+            _cache_mark_valid(digest)
+            if documents is not None:
+                documents[path] = _VALID_SENTINEL
+            return _VALID_SENTINEL
+        if documents is not None:
+            documents[path] = doc
+        return doc
     return load
 
 
@@ -447,6 +501,8 @@ def validate_okf_conformance(root: Path, walked: tuple[list[Path], list[str]] | 
             document = load(path)
         except (OSError, UnicodeError, OKFDocumentError) as exc:
             errors.append(f"{rel}: {exc}")
+            continue
+        if document is _VALID_SENTINEL:
             continue
         if not _non_empty(document.frontmatter.get("type")):
             errors.append(f"{rel}: missing required frontmatter key type")
@@ -522,6 +578,8 @@ def validate_profile(root: Path, walked: tuple[list[Path], list[str]] | None = N
             document = load(path)
         except (OSError, UnicodeError, OKFDocumentError):
             # Exact conformance reports the more useful parser error.
+            continue
+        if document is _VALID_SENTINEL:
             continue
         frontmatter, body = document.frontmatter, document.body
         errors.extend(f"{rel}: {error}" for error in validate_profile_document(frontmatter, body))

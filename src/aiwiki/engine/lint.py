@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from collections import Counter
+from collections.abc import Collection
 from datetime import date, datetime
 from pathlib import Path
 
@@ -88,6 +90,108 @@ def _schema_tags(root):
     return tags or None
 
 
+def _index_paths(root: Path) -> list[Path]:
+    """Every non-symlink ``index.md`` outside ``.git`` and ``.okf`` in sorted order, without
+    walking the operational ``.okf`` tree (tens of thousands of files on the writer)."""
+    found: list[Path] = []
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        base = Path(directory)
+        dirnames[:] = sorted(
+            name for name in dirnames
+            if name not in (".git", ".okf") and not (base / name).is_symlink()
+        )
+        if "index.md" in filenames:
+            idx = base / "index.md"
+            if not idx.is_symlink() and not has_symlink_component(root, idx):
+                found.append(idx)
+    return sorted(found)
+
+
+def _check_broken_links(root: Path, root_resolved: Path, ids: set[str], norm_index: dict[str, list[str]],
+                        rel: str, body: str, add, inbound: dict[str, int] | None = None) -> None:
+    cdir = (root / rel).parent
+    for m in LINK_RE.finditer(body):
+        target = m.group(1)
+        if "://" in target:
+            continue
+        try:
+            base = root if target.startswith("/") else cdir
+            candidate = base / target.lstrip("/")
+            if has_symlink_component(root, candidate):
+                add("high", "broken-link", rel, f"link traverses symlink: {target}")
+                continue
+            resolved = candidate.resolve().relative_to(root_resolved).as_posix()
+        except ValueError:
+            add("high", "broken-link", rel, f"link escapes bundle: {target}")
+            continue
+        if resolved in ids:
+            if inbound is not None:
+                inbound[resolved] += 1
+        else:
+            hit = norm_index.get(_norm(Path(target).name[:-3]), [])
+            sug = f"did you mean {hit[0]}?" if len(hit) == 1 else ""
+            add("high", "broken-link", rel, f"unresolved link: {target}", sug)
+
+
+def _check_contradictions(root: Path, root_resolved: Path, ids: set[str], rel: str, fm: dict, add) -> tuple[list, list[str]]:
+    c = fm.get("contradictions") or []
+    if isinstance(c, str):
+        c = [c]
+    targets: list[str] = []
+    cdir = (root / rel).parent
+    for t in c:
+        try:
+            candidate = cdir / str(t)
+            if has_symlink_component(root, candidate):
+                add("high", "contradiction", rel,
+                    f"contradictions target traverses symlink: {t}")
+                continue
+            r = candidate.resolve().relative_to(root_resolved).as_posix()
+        except ValueError:
+            r = None
+        if r is None or r not in ids:
+            add("high", "contradiction", rel, f"contradictions target missing: {t}")
+        else:
+            targets.append(r)
+    return c, targets
+
+
+def lint_high_for_paths(root: Path, paths: Collection[str]) -> list[dict]:
+    """High-severity findings for ``paths`` only, matching
+    ``[f for f in lint(root)[0] if f['severity'] == 'high' and f['where'] in paths]``.
+
+    Only broken links and dangling/symlink contradictions have severity ``high``; both depend on
+    the bundle's concept-path set ``ids`` and the parsed contents of ``paths`` alone, so unchanged
+    concepts never need to be read or parsed.
+    """
+    target_set = set(paths)
+    if not target_set:
+        return []
+    concept_entries = list(_concepts(root))
+    ids = {rel for _, rel in concept_entries}
+    selected = [(p, rel) for p, rel in concept_entries if rel in target_set]
+    if not selected:
+        return []
+    norm_index: dict[str, list[str]] = {}
+    for rel in ids:
+        norm_index.setdefault(_norm(Path(rel).name[:-3]), []).append(rel)
+    root_resolved = root.resolve()
+    parsed = {rel: _parse(p.read_text(encoding="utf-8")) for p, rel in selected}
+    findings: list[dict] = []
+
+    def add(sev, check, where, detail, suggestion=""):
+        findings.append({"severity": sev, "check": check, "where": where,
+                         "detail": detail, "suggestion": suggestion})
+
+    for _p, rel in selected:
+        _fm, body = parsed[rel]
+        _check_broken_links(root, root_resolved, ids, norm_index, rel, body, add)
+    for _p, rel in selected:
+        fm, _body = parsed[rel]
+        _check_contradictions(root, root_resolved, ids, rel, fm, add)
+    return findings
+
+
 def lint(root):
     concepts = {}  # rel -> (fm, body, line_count)
     for p, rel in _concepts(root):
@@ -100,6 +204,7 @@ def lint(root):
 
     inbound = {rel: 0 for rel in ids}
     findings = []
+    root_resolved = root.resolve()
 
     def add(sev, check, where, detail, suggestion=""):
         findings.append({"severity": sev, "check": check, "where": where,
@@ -107,27 +212,7 @@ def lint(root):
 
     # --- link graph: broken links + inbound counts (body + Related concepts) ---
     for rel, (_fm, body, _) in concepts.items():
-        cdir = (root / rel).parent
-        for m in LINK_RE.finditer(body):
-            target = m.group(1)
-            if "://" in target:
-                continue
-            try:
-                base = root if target.startswith("/") else cdir
-                candidate = base / target.lstrip("/")
-                if has_symlink_component(root, candidate):
-                    add("high", "broken-link", rel, f"link traverses symlink: {target}")
-                    continue
-                resolved = candidate.resolve().relative_to(root.resolve()).as_posix()
-            except ValueError:
-                add("high", "broken-link", rel, f"link escapes bundle: {target}")
-                continue
-            if resolved in ids:
-                inbound[resolved] += 1
-            else:
-                hit = norm_index.get(_norm(Path(target).name[:-3]), [])
-                sug = f"did you mean {hit[0]}?" if len(hit) == 1 else ""
-                add("high", "broken-link", rel, f"unresolved link: {target}", sug)
+        _check_broken_links(root, root_resolved, ids, norm_index, rel, body, add, inbound)
 
     # --- orphans (no inbound concept link) ---
     for rel in sorted(ids):
@@ -136,19 +221,31 @@ def lint(root):
                 "add a `# Related concepts` link from a related page")
 
     # --- index completeness (concept listed in its dir index; entries resolve) ---
+    index_cache: dict[Path, str | None] = {}
+
+    def _read_index(idx: Path) -> str | None:
+        if idx not in index_cache:
+            if has_symlink_component(root, idx) or not idx.is_file():
+                index_cache[idx] = None
+            else:
+                index_cache[idx] = idx.read_text(encoding="utf-8")
+        return index_cache[idx]
+
     for rel in sorted(ids):
         idx = (root / rel).parent / "index.md"
-        if has_symlink_component(root, idx) or not idx.is_file():
+        text = _read_index(idx)
+        if text is None:
             add("medium", "index", rel, "directory has no index.md",
                 "run gen_indexes.py")
             continue
-        if f"({Path(rel).name})" not in idx.read_text(encoding="utf-8"):
+        if f"({Path(rel).name})" not in text:
             add("medium", "index", rel, "concept not listed in its directory index.md",
                 "run gen_indexes.py")
-    for idx in sorted(root.rglob("index.md")):
-        if has_symlink_component(root, idx) or ".okf" in idx.relative_to(root).parts:
+    for idx in _index_paths(root):
+        text = _read_index(idx)
+        if text is None:
             continue
-        for m in LINK_RE.finditer(idx.read_text(encoding="utf-8")):
+        for m in LINK_RE.finditer(text):
             t = m.group(1)
             if "://" in t:
                 continue
@@ -159,7 +256,7 @@ def lint(root):
                     add("medium", "index", idx.relative_to(root).as_posix(),
                         f"index entry traverses symlink: {t}", "run gen_indexes.py")
                     continue
-                r = candidate.resolve().relative_to(root.resolve()).as_posix()
+                r = candidate.resolve().relative_to(root_resolved).as_posix()
             except ValueError:
                 continue
             if not (root / r).exists():
@@ -169,25 +266,7 @@ def lint(root):
     # --- contradictions consistency (resolve, reciprocity, contested<->contradictions) ---
     contra = {}
     for rel, (fm, _, _) in concepts.items():
-        c = fm.get("contradictions") or []
-        if isinstance(c, str):
-            c = [c]
-        targets = []
-        for t in c:
-            cdir = (root / rel).parent
-            try:
-                candidate = cdir / str(t)
-                if has_symlink_component(root, candidate):
-                    add("high", "contradiction", rel,
-                        f"contradictions target traverses symlink: {t}")
-                    continue
-                r = candidate.resolve().relative_to(root.resolve()).as_posix()
-            except ValueError:
-                r = None
-            if r is None or r not in ids:
-                add("high", "contradiction", rel, f"contradictions target missing: {t}")
-            else:
-                targets.append(r)
+        c, targets = _check_contradictions(root, root_resolved, ids, rel, fm, add)
         contra[rel] = targets
         if fm.get("contested") and not c:
             add("medium", "contradiction", rel,

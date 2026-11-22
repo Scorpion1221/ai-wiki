@@ -17,7 +17,9 @@ import os
 import posixpath
 import re
 import shutil
+import threading
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -33,10 +35,10 @@ from ..engine.document import (
     parse_document,
     stale_date,
 )
-from ..engine.lint import lint
+from ..engine.lint import lint_high_for_paths
 from ..engine.update_concept import SHRINK_RATIO
 from ..engine.validate import OKF_RESERVED, PROFILE_STRUCTURAL, parse_doc, should_check, validate, validate_changed
-from ..service.ingest import MAX_BYTES, write_source
+from ..service.ingest import MAX_BYTES, source_name, write_source
 from . import policy, secrets
 from .failure import failure
 
@@ -664,12 +666,50 @@ def build_packet(
     return Packet(filename=filename, data=data, parts=parts), []
 
 
+_CONCEPT_NAMES_CACHE: OrderedDict[bytes, tuple[bool, tuple[str, ...]]] = OrderedDict()
+_CONCEPT_NAMES_LOCK = threading.Lock()
+_CONCEPT_NAMES_MAX = 16384
+
+
+def _concept_names_for_file(path: Path) -> tuple[bool, tuple[str, ...]] | None:
+    """``(is_live, sorted normalized title/aliases)`` for ``path``, cached by exact bytes."""
+    if path.is_symlink():
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    key = hashlib.sha256(raw).digest()
+    with _CONCEPT_NAMES_LOCK:
+        hit = _CONCEPT_NAMES_CACHE.get(key)
+        if hit is not None:
+            _CONCEPT_NAMES_CACHE.move_to_end(key)
+            return hit
+    try:
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        frontmatter = parse_document(text).frontmatter
+    except (UnicodeError, ValueError):
+        return None
+    entry = (frontmatter.get("status") != "deprecated", tuple(sorted(_names(frontmatter))))
+    with _CONCEPT_NAMES_LOCK:
+        _CONCEPT_NAMES_CACHE[key] = entry
+        _CONCEPT_NAMES_CACHE.move_to_end(key)
+        while len(_CONCEPT_NAMES_CACHE) > _CONCEPT_NAMES_MAX:
+            _CONCEPT_NAMES_CACHE.popitem(last=False)
+    return entry
+
+
 def _concept_names(bundle: Path) -> dict[str, str]:
     """Normalized title/alias -> path for every live (non-deprecated) concept."""
     names: dict[str, str] = {}
-    for rel, frontmatter in _frontmatters(bundle).items():
-        if frontmatter.get("status") != "deprecated":
-            for name in _names(frontmatter):
+    for path in policy._concept_paths(bundle):
+        entry = _concept_names_for_file(path)
+        if entry is None:
+            continue
+        is_live, values = entry
+        if is_live:
+            rel = path.relative_to(bundle).as_posix()
+            for name in values:
                 names.setdefault(name, rel)
     return names
 
@@ -826,6 +866,8 @@ def evaluate(
     now: datetime,
     evidence_files: Sequence[EvidenceFile] = (),
     answers: Sequence[str] = (),
+    before_errors_out: list[str] | None = None,
+    existing_sources: frozenset[str] | None = None,
 ) -> dict:
     """Judge one curate changeset against ``base_dir`` without changing it (G1, G6, G8–G12).
 
@@ -871,10 +913,13 @@ def evaluate(
         if conflicts:
             result["conflicts"] = conflicts
         return _rejected(result, errors)
-    temporary, workspace = policy._isolated_agent_bundle(base)
+    expected_source = source_name(packet.data, packet.filename)
+    temporary, workspace = policy._isolated_concept_bundle(base, keep_sources=frozenset({expected_source}))
     try:
         return _evaluate_in(workspace, files, request, packet, result, actor=actor, now=now, lim=lim,
-                            answers=frozenset(_nfc(path) for path in answers))
+                            answers=frozenset(_nfc(path) for path in answers),
+                            before_errors_out=before_errors_out,
+                            base_dir=base, existing_sources=existing_sources)
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
 
@@ -882,11 +927,16 @@ def evaluate(
 def _evaluate_in(
     workspace: Path, files: list[dict], request: Mapping, packet: Packet, result: dict, *, actor: str, now: datetime,
     lim: dict[str, int], answers: frozenset[str] = frozenset(),
+    before_errors_out: list[str] | None = None,
+    base_dir: Path | None = None,
+    existing_sources: frozenset[str] | None = None,
 ) -> dict:
     evidence_id = request["evidence"]["id"]
     allow = request.get("allow") or {}
     allowed = {name: {_nfc(entry["path"]) for entry in allow.get(name, [])} for name in ("shrink", "retype", "grow")}
     before_errors = validate(workspace)
+    if before_errors_out is not None:
+        before_errors_out[:] = before_errors
     before_concepts = policy._concept_snapshot(workspace)
     sources_before = policy._source_snapshot(workspace)
     tree_before = policy._agent_tree_snapshot(workspace, digests=True)  # only compared, in G10
@@ -1070,10 +1120,25 @@ def _evaluate_in(
     )
 
     # G10 scope, G11 policy and G12 validation judge the whole stamped workspace.
+    def _resource_exists(resolved: str) -> bool:
+        if (workspace / resolved).is_file():
+            return True
+        parts = Path(resolved).parts
+        if not parts or parts[0] != "sources" or "inbox" in parts:
+            return False
+        if existing_sources is not None:
+            return resolved in existing_sources
+        if base_dir is not None:
+            target = base_dir / resolved
+            return target.is_file() and not has_symlink_component(base_dir, target)
+        return False
+
     judged = (
         policy._agent_scope_errors(workspace, tree_before, links_before, packet_rel, packet_sha)
         + policy._source_policy_errors(workspace, sources_before, packet_sha)
-        + policy._curation_policy_errors(workspace, before_concepts, None, actor=actor)
+        + policy._curation_policy_errors(
+            workspace, before_concepts, None, actor=actor, resource_exists=_resource_exists,
+        )
         + policy._curation_provenance_errors(workspace, before_concepts, packet_rel)
     )
     before_keys = {error_key(error) for error in before_errors}
@@ -1089,10 +1154,8 @@ def _evaluate_in(
         else:
             baseline.append(error)
     judged += validate_changed(workspace, sorted(written))
-    findings, _count = lint(workspace)
     judged += [
-        f"{finding['where']}: {finding['detail']}" for finding in findings
-        if finding["severity"] == "high" and finding["where"] in changed
+        f"{finding['where']}: {finding['detail']}" for finding in lint_high_for_paths(workspace, changed)
     ]
     errors += [error for error in map(_from_message, dict.fromkeys(judged)) if error.get("path") not in unparsed]
     result["warnings"] += [

@@ -39,7 +39,7 @@ from ..engine import append_log, bookkeeping, scan_sources
 from ..engine.digests import file_sha256
 from ..engine.document import load_yaml
 from ..engine.gen_indexes import generate_indexes
-from ..engine.lint import lint
+from ..engine.lint import lint, lint_high_for_paths
 from ..engine.render_viz import generate_visualization
 from ..engine.validate import parse_doc as parse_doc  # re-exported: callers use curate.parse_doc
 from ..engine.validate import should_check, validate_changed
@@ -1086,7 +1086,7 @@ class _Pass:
     expected_sha: str
     before_concepts: dict[str, _ConceptState]
     sources_before: dict[str, str]
-    agent_tree_before: dict[str, bytes]
+    agent_tree_before: dict[str, bytes] | None
     agent_links_before: dict[str, str]
     protected_root: Path
     git_metadata_before: dict[str, _MetadataEntry]
@@ -1133,6 +1133,7 @@ def _transaction(
     actor: str = CURATOR_ACTOR,
     agent: dict | None = None,
     strict: bool = False,
+    changeset_mode: bool = False,
 ) -> None:
     """One serialized writer transaction around a producer (design §2.5 G5–G14).
 
@@ -1299,7 +1300,9 @@ def _transaction(
             _stage_recovery_source(bundle, job_path, job, source_bytes)
             before_concepts = _concept_snapshot(bundle)
             sources_before = _source_snapshot(bundle)
-            agent_tree_before = _agent_tree_snapshot(bundle)
+            # In Git-backed changeset mode no untrusted agent runs and rollback uses Git;
+            # reading all ~280 MB of bundle bytes into RAM is unnecessary and spikes worker RSS.
+            agent_tree_before = None if (changeset_mode and root is not None) else _agent_tree_snapshot(bundle)
             agent_links_before = _agent_symlink_snapshot(bundle)
             git_metadata_before = _git_metadata_snapshot(protected_root)
             git_metadata_unsafe = sorted(
@@ -1882,9 +1885,7 @@ def _changeset_recheck(tx: _Pass, bases: list[tuple[str, str | None]], written: 
     as a link whose target moved upstream, in them)."""
     errors = _changeset_conflicts(tx.root, tx.job["base_revision"], bases, written)
     found = _new_errors(validate_bundle(tx.bundle), tx.baseline, written) + validate_changed(tx.bundle, written)
-    findings, _count = lint(tx.bundle)
-    found += [f"{finding['where']}: {finding['detail']}" for finding in findings
-              if finding["severity"] == "high" and finding["where"] in written]
+    found += [f"{finding['where']}: {finding['detail']}" for finding in lint_high_for_paths(tx.bundle, written)]
     return errors + [changeset._from_message(error) for error in dict.fromkeys(found)]
 
 
@@ -1915,8 +1916,9 @@ def _changeset_produce(
         )], warnings=[], validation={"status": "not_run"}))
         tx.rollback()
         return
+    before_errors: list[str] = []
     verdict = changeset.evaluate(tx.bundle, request, actor=actor, now=tx.trusted_now, evidence_files=evidence_files,
-                                 answers=answers)
+                                 answers=answers, before_errors_out=before_errors)
     _record_verdict(job, verdict)
     if verdict["status"] == "rejected":
         job.update(status="rejected", http_status=verdict["http_status"])
@@ -1929,7 +1931,7 @@ def _changeset_produce(
         job.update(status="done", phase="done", noop=True, commit=None, changed_files=[], concept_files=[],
                    git={"committed": False, "pushed": False, "changed_files": [], "note": "no changes"})
         return
-    tx.baseline = frozenset(changeset.error_key(error) for error in validate_bundle(tx.bundle))
+    tx.baseline = frozenset(changeset.error_key(error) for error in before_errors)
     written = sorted(verdict["files"])
     for rel in written:
         target = tx.bundle / rel
@@ -1991,7 +1993,7 @@ def run_changeset(
         lambda tx: _changeset_produce(tx, request, actor=actor, evidence_files=evidence_files,
                                       answers=answers, job_id=job_id,
                                       bases=bases, on_done=on_done),
-        actor=actor, strict=True,
+        actor=actor, strict=True, changeset_mode=True,
     )
     job = json.loads(job_path.read_text(encoding="utf-8"))
     git = job.get("git") or {}

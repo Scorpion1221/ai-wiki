@@ -981,23 +981,70 @@ def _answers(path: Path, request: dict) -> list[str]:
     return changeset.answered_paths(items)
 
 
+def _git_blob(root: Path, revision: str, rel: str) -> bytes:
+    """Read one published file's exact bytes from Git (used by lean dry-run review checks)."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "blob", f"{revision}:{rel}"],
+        capture_output=True, timeout=curate_runtime.GIT_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        raise FileNotFoundError(f"{rel} not found at {revision}")
+    return proc.stdout
+
+
+def _git_source_paths(root: Path, revision: str) -> frozenset[str]:
+    """Regular non-inbox files under ``sources/`` in ``revision`` (used by lean dry-run)."""
+    proc = curate_runtime._git(root, "ls-tree", "-r", "-z", revision, "--", "sources")
+    if proc.returncode != 0:
+        return frozenset()
+    found: set[str] = set()
+    for entry in proc.stdout.split("\0"):
+        if not entry or "\t" not in entry:
+            continue
+        meta, rel = entry.split("\t", 1)
+        mode = meta.split(" ", 1)[0]
+        if mode not in ("100644", "100755"):
+            continue
+        if "inbox" in Path(rel).parts:
+            continue
+        found.add(rel)
+    return frozenset(found)
+
+
 def _dry_run(path: Path, request: dict, actor: str, evidence: list[changeset.EvidenceFile]) -> JSONResponse:
     """Judge the request against the published revision in a scratch copy; write nothing."""
-    root, revision, archive = _published(path)
+    root = curate_runtime._repo_root(path)
+    if root is None:
+        raise HTTPException(status_code=503, detail="the bundle has no Git repository to publish from")
     with tempfile.TemporaryDirectory(prefix="aiwiki-dry-run-") as scratch:
         tree = Path(scratch) / "bundle"
-        _unpack(archive, tree)
+        revision, frozen = _published_tree(path, tree)
         now = datetime.now(UTC)
         if curate_runtime._git(root, "merge-base", "--is-ancestor", request["base_revision"], revision).returncode:
             result = changeset._rejected({"warnings": [], "validation": {"status": "not_run"}}, [changeset._error(
                 "unknown_base", "base_revision is not an ancestor of the published branch",
                 hint="workspace pull, then propose again from the published revision")])
         elif request["kind"] == "audit":
-            result = audit_runtime.evaluate_review(tree, request, actor=actor, now=now, auditors=_auditors(),
-                                                   scope=_scope(path, actor, tree=tree, revision=revision))
+            reader = (lambda rel: _git_blob(root, revision, rel)) if frozen is not None else None
+            result = audit_runtime.evaluate_review(
+                tree, request, actor=actor, now=now, auditors=_auditors(),
+                scope=_scope(path, actor, tree=tree, revision=revision, frozen=frozen),
+                frozen=frozen, source_reader=reader,
+            )
         else:
+            existing_sources = None
+            if frozen is not None:
+                existing_sources = _git_source_paths(root, revision)
+                if not changeset.check_request(request):
+                    packet, pkt_errors = changeset.build_packet(request["evidence"], evidence)
+                    if packet is not None and not pkt_errors:
+                        rel = "sources/" + I.source_name(packet.data, packet.filename)
+                        if rel in existing_sources:
+                            target = tree / rel
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_bytes(_git_blob(root, revision, rel))
             result = changeset.evaluate(tree, request, actor=actor, now=now, evidence_files=evidence,
-                                        answers=_answers(path, request))
+                                        answers=_answers(path, request), existing_sources=existing_sources)
         diffs = {}
         for rel, after in (result.pop("files", None) or {}).items():
             before = (tree / rel).read_text(encoding="utf-8") if (tree / rel).is_file() else ""
