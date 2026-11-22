@@ -8,7 +8,7 @@ description: >-
   Use for scheduled or manual audit runs on a writer with AIWIKI_AUDIT=external; never for
   curation, and never on a correction your own run wrote.
 ---
-<!-- ai-wiki:version 0.3.43 -->
+<!-- ai-wiki:version 0.3.44 -->
 
 # AI Wiki Auditor
 
@@ -130,13 +130,15 @@ Hold each to the evidence boundary:
   together with the claim it bounds; reword it only with an equally strong limit (不足以, 无法,
   没有证据 for 不证明; never 只, 仅, not, only); never flip it to its positive. A hedged footnote
   (its definition and markers) and a hedged heading are hedges too (`D_CAVEAT_REMOVED`).
-- okf-knowledge-curator's Signals are claims too. An alias naming something else or stating a
-  status, number or date: delete it (corrected). Unverified, the note naming the evidence part: a
-  `stale_after` on evidence with no date (a reading would read fresh too long; one later than that
-  skill's date rule gives is corrected to the earlier date); a `description` past the body's
-  latest state or its evidence boundary; a stable concept the body or its evidence records as
-  retired or superseded (the maintainer deprecates it). A missing alias or `stale_after` is no
-  verdict.
+- okf-knowledge-curator's Signals are claims too. An alias stating a status, number, date or
+  unsupported factual claim, or naming a different topic: delete it (corrected); keep a concept's
+  own primary defining identifier grounded in cited evidence, and never mark a concept `corrected`
+  solely to trim a harmless search alias when every material claim is already supported. Unverified,
+  the note naming the evidence part: a `stale_after` on evidence with no date (a reading would read
+  fresh too long; one later than that skill's date rule gives is corrected to the earlier date); a
+  `description` past the body's latest state or its evidence boundary; a stable concept the body or
+  its evidence records as retired or superseded (the maintainer deprecates it). A missing alias or
+  `stale_after` is no verdict.
 
 ### 3.4 Record a verdict
 

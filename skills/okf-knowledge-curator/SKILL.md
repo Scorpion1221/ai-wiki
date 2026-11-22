@@ -7,7 +7,7 @@ description: >-
   leave generated/verified bookkeeping to the service without faking verification, and hand
   concept edits back to deterministic service gates.
 ---
-<!-- ai-wiki:version 0.3.43 -->
+<!-- ai-wiki:version 0.3.44 -->
 
 # OKF Knowledge Curator
 
@@ -190,9 +190,11 @@ edited for its evidence) meets all three; never touch a concept only to add them
 
 - **Aliases.** At least one alias in the other language of the title: English words for a title
   with Chinese characters (an abbreviation alone is not enough), Chinese for an English title.
-  Add the identifiers and abbreviations users type (event, table, flag or experiment key, issue
-  id). Never repeat the title or a tag, and never state a claim (no status, number or date). A new
-  concept whose alias another concept already uses is refused (`duplicate_title`): be specific.
+  Add only the concept's own primary defining identifiers users type (the event, table, flag,
+  experiment key or primary issue id that is this concept's subject), never incidental or proposed
+  code symbols, component names or sub-tickets. Never repeat the title or a tag, and never state a
+  claim (no status, number, count, duration or date). A new concept whose alias another concept
+  already uses is refused (`duplicate_title`): be specific.
 - **`stale_after`.** Required on `Metric`, `Experiment`, `Monetization` and
   `Monetization Strategy` concepts and on any concept whose title or body gives a dated reading
   (a number or state for a window or an as-of date); optional elsewhere, by the same rule. The

@@ -1237,6 +1237,137 @@ def test_review_evidence_lists_related_sources_the_concept_does_not_cite(tmp_pat
                                  "identifiers": ["GraphJsxController", "app/controller/graphJsx.js", "graphJsx"]}]
 
 
+def test_review_evidence_related_uses_incremental_sqlite_index_and_matches_direct_scan(tmp_path, monkeypatch) -> None:
+    """2026-11-22 (0.3.44): `review evidence` caches source tokens in a run-scoped SQLite index so
+    warm calls skip re-reading/re-hashing unchanged sources while staying bit-for-bit identical."""
+    import sqlite3
+    import time
+
+    from aiwiki.cli import maint
+    from aiwiki.cli import review as verbs
+    from aiwiki.engine.document import parse_document
+
+    ws = tmp_path / "ws"
+    (ws / "features").mkdir(parents=True)
+    (ws / "sources" / "inbox").mkdir(parents=True)
+    # Build > COMMON files for `too_common_id` / `common/path.js` (COMMON+1 including cited.md)
+    # and EXACTLY COMMON files for `exact_common_id` / `exact/common.js` (cited.md + match-a + COMMON-2 noise).
+    sources = {
+        "sources/cited.md": "GraphJsxController app/controller/graphJsx.js WAIO-9901 `foo bar` `route_测试` "
+                            "too_common_id common/path.js exact_common_id exact/common.js\n",
+        "sources/match-a.md": "GraphJsxController WAIO-9901 `foo bar` `route_测试` exact_common_id exact/common.js\n",
+        "sources/match-b.md": "GraphJsxController app/controller/graphJsx.js only\n",
+        "sources/untouched.md": "unrelated text with UnrelatedSym only\n",
+        "sources/drifted.md": "GraphJsxController WAIO-9901 app/controller/graphJsx.js\n",
+        "sources/inbox/fresh.md": "GraphJsxController WAIO-9901 `foo bar` `route_测试`\n",
+        **{
+            f"sources/noise-{n:02d}.md": "too_common_id common/path.js"
+            + (" exact_common_id exact/common.js\n" if n < verbs.COMMON - 2 else "\n")
+            for n in range(verbs.COMMON)
+        },
+    }
+    for rel, text in sources.items():
+        (ws / rel).write_text(text, encoding="utf-8")
+    # Symlink under sources/ must always be ignored
+    target_outside = tmp_path / "outside.md"
+    target_outside.write_text("GraphJsxController WAIO-9901 `foo bar`\n", encoding="utf-8")
+    (ws / "sources" / "symlink.md").symlink_to(target_outside)
+
+    ledger = {rel: hashlib.sha256(text.encode()).hexdigest() for rel, text in sources.items()}
+    ledger["sources/drifted.md"] = "0" * 64
+    ledger["sources/symlink.md"] = hashlib.sha256(target_outside.read_bytes()).hexdigest()
+    (ws / "sources" / ".hashes.yaml").write_text("".join(f"{rel}: {sha}\n" for rel, sha in ledger.items()),
+                                                 encoding="utf-8")
+
+    concept_text = (
+        "---\ntype: Feature\ntitle: Graph JSX `WAIO-9901`\naliases: [graphJsx forwarder]\nsources:\n"
+        "- {id: s, resource: /sources/cited.md}\n---\n# Summary\n\n`GraphJsxController` in "
+        "app/controller/graphJsx.js with `foo bar`, `route_测试`, `too_common_id`, common/path.js, "
+        "`exact_common_id`, exact/common.js.\n"
+    )
+    (ws / "features" / "graph.md").write_text(concept_text, encoding="utf-8")
+    doc = parse_document(concept_text)
+    cited = {"sources/cited.md"}
+
+    state = tmp_path / "state"
+    maint._write(verbs._folder(state, RUN) / "review.json",
+                 {"run": RUN, "bundle": "kb", "max": 5, "taken": ["features/graph.md"], "pending": {},
+                  "submitted": [], "dropped": [], "workspace": str(ws)})
+    maint._write(verbs._pointer(state, "kb"), {"run": RUN, "bundle": "kb"})
+
+    # 1. Cold run creates SQLite index and matches direct scan bit-for-bit (including exact COMMON boundary)
+    code, found = verbs.evidence(state, "kb", "features/graph.md", tmp_path / "missing.json")
+    assert code == 0
+    index_db = verbs._folder(state, RUN) / "related-index.sqlite"
+    assert index_db.is_file()
+    expected = verbs._related_direct(ws, doc, ledger, cited)
+    assert found["related"] == expected
+    assert found["related"][0]["source"] == "sources/match-a.md"
+    assert "exact_common_id" in found["related"][0]["identifiers"]
+    assert "exact/common.js" in found["related"][0]["identifiers"]
+    assert "too_common_id" not in found["related"][0]["identifiers"]
+    assert "common/path.js" not in found["related"][0]["identifiers"]
+
+    # 2. Age mtimes past the racy window -> warm run does NOT re-read untouched/unrelated source files
+    old_t = time.time() - 60
+    for p in (ws / "sources").rglob("*.md"):
+        if not p.is_symlink():
+            os.utime(p, (old_t, old_t))
+    # One pass records the aged mtimes
+    assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == expected
+
+    reads: list[str] = []
+    real_read_bytes = Path.read_bytes
+
+    def spy_read_bytes(self: Path) -> bytes:
+        if "sources" in self.parts:
+            reads.append(self.name)
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    warm = verbs._related(ws, doc, ledger, cited, index_path=index_db)
+    monkeypatch.undo()
+    assert warm == expected
+    assert "untouched.md" not in reads  # untouched source was never re-read on warm call
+
+    # 3. Incremental updates: add new source, fix drifted file's ledger entry, delete match-b.md
+    new_text = "GraphJsxController WAIO-9901 app/controller/graphJsx.js `foo bar` `route_测试`\n"
+    (ws / "sources" / "brand-new.md").write_text(new_text, encoding="utf-8")
+    ledger["sources/brand-new.md"] = hashlib.sha256(new_text.encode()).hexdigest()
+    ledger["sources/drifted.md"] = hashlib.sha256(sources["sources/drifted.md"].encode()).hexdigest()
+    (ws / "sources" / "match-b.md").unlink()
+    (ws / "sources" / ".hashes.yaml").write_text("".join(f"{rel}: {sha}\n" for rel, sha in ledger.items()),
+                                                 encoding="utf-8")
+    after_inc = verbs._related(ws, doc, ledger, cited, index_path=index_db)
+    assert after_inc == verbs._related_direct(ws, doc, ledger, cited)
+    # brand-new.md and match-a.md both hit 6 identifiers, so path order puts brand-new before match-a
+    assert [r["source"] for r in after_inc[:3]] == [
+        "sources/brand-new.md", "sources/match-a.md", "sources/drifted.md",
+    ]
+    assert "sources/match-b.md" not in [r["source"] for r in after_inc]
+
+    # 4. Racy-clean guard: same-length rewrite within 2s window with same mtime is still detected
+    # even when the ledger still holds the old hash (cur.sha == recorded -> would falsely stay valid
+    # without the 2s racy window)
+    same_len = "X" * len(new_text.encode())
+    st_before = (ws / "sources" / "brand-new.md").stat()
+    (ws / "sources" / "brand-new.md").write_text(same_len, encoding="utf-8")
+    os.utime(ws / "sources" / "brand-new.md", ns=(st_before.st_atime_ns, st_before.st_mtime_ns))
+    after_racy = verbs._related(ws, doc, ledger, cited, index_path=index_db)
+    assert after_racy == verbs._related_direct(ws, doc, ledger, cited)
+    assert "sources/brand-new.md" not in [r["source"] for r in after_racy]
+
+    # 5. Corrupt SQLite file or unwritable path falls back cleanly without failing
+    index_db.write_bytes(b"not a sqlite database")
+    assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == after_racy
+    # Rebuilt valid SQLite after corrupt file
+    with sqlite3.connect(str(index_db)) as con:
+        assert con.execute("SELECT COUNT(*) FROM files").fetchone()[0] > 0
+    unwritable = tmp_path / "dir-as-db"
+    unwritable.mkdir()
+    assert verbs._related(ws, doc, ledger, cited, index_path=unwritable) == after_racy
+
+
 def test_review_next_skips_the_corrections_its_own_run_wrote(gate, capsys, monkeypatch) -> None:
     tools = gate.tmp / "bin"
     tools.mkdir()

@@ -28,10 +28,17 @@ holds nothing more, 11 the run's budget is spent.
 from __future__ import annotations
 
 import argparse
+import array
+import collections
 import contextlib
 import hashlib
 import json
+import os
 import re
+import sqlite3
+import stat as stat_mod
+import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -65,6 +72,12 @@ _IDENTIFIER = re.compile(
     r"|(?<![\w.])([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+)(?!\w)"
     r"|(?<![\w.])([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)+)(?!\w)")
 _LINK_TARGET = re.compile(r"\]\([^)]*\)")  # a concept link names a concept, not the system
+_RELATED_WORD_B = re.compile(rb"[A-Za-z0-9_]+")
+_RELATED_WORD_S = re.compile(r"[A-Za-z0-9_]+")
+_RELATED_INDEX = "related-index.sqlite"
+_RELATED_SCHEMA = f"1-{sys.byteorder}-{array.array('I').itemsize}"
+_RELATED_RACY_NS = 2_000_000_000  # 2 s racy-clean guard, matching workspace._RACY_NS
+_RELATED_MAX_STALE_IDS = 500
 RELATED, COMMON = 5, 30  # rows shown; an identifier in more sources than this distinguishes nothing
 
 
@@ -287,29 +300,340 @@ def _identifiers(document) -> set[str]:
     return found
 
 
-def _related(root: Path, document, frozen: dict, cited: set[str]) -> list[dict]:
-    """Up to ``RELATED`` frozen sources of the workspace (``sources/`` but its inbox) that the
-    concept does not cite and that state at least two of its identifiers, most first. An
-    identifier that more than ``COMMON`` sources state is dropped. Client-side only: the writer
-    keeps no index, so this reads the workspace the run pulled."""
+def _related_direct(root: Path, document, frozen: dict, cited: set[str]) -> list[dict]:
+    """Direct full-tree scan reference implementation for ``_related`` (also used as fallback)."""
     identifiers = _identifiers(document)
+    if not identifiers:
+        return []
     holds: dict[str, set[str]] = {}
     for rel, recorded in frozen.items():
-        file = root / str(rel)
-        if not str(rel).startswith("sources/") or "inbox" in Path(str(rel)).parts or not file.is_file() \
-                or file.is_symlink():
+        rel_s = str(rel)
+        file = root / rel_s
+        if not rel_s.startswith("sources/") or "inbox" in Path(rel_s).parts:
+            continue
+        try:
+            st = os.lstat(file)
+        except OSError:
+            continue
+        if not stat_mod.S_ISREG(st.st_mode):
             continue
         data = file.read_bytes()
         if hashlib.sha256(data).hexdigest() != recorded:
             continue  # not the bytes the service froze: no evidence
         text = data.decode("utf-8", errors="replace")
-        holds[str(rel)] = {name for name in identifiers if name in text and re.search(
+        holds[rel_s] = {name for name in identifiers if name in text and re.search(
             rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text)}
     stated = {name: sum(name in found for found in holds.values()) for name in identifiers}
     rows = [{"source": rel, "matches": len(names), "identifiers": sorted(names)}
             for rel, found in holds.items() if rel not in cited
             and len(names := {name for name in found if stated[name] <= COMMON}) >= 2]
     return sorted(rows, key=lambda row: (-row["matches"], row["source"]))[:RELATED]
+
+
+def _unlink_sqlite(index_path: Path) -> None:
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(f"{index_path}{suffix}")
+        with contextlib.suppress(OSError):
+            if p.is_file() or p.is_symlink():
+                p.unlink()
+
+
+def _create_related_tables(con: sqlite3.Connection) -> None:
+    con.executescript(
+        "DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS tokens;"
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;"
+        "CREATE TABLE files (id INTEGER PRIMARY KEY, rel TEXT UNIQUE, size INTEGER, "
+        "mtime_ns INTEGER, sha256 TEXT, indexed INTEGER);"
+        "CREATE TABLE tokens (token TEXT PRIMARY KEY, doc_count INTEGER, doc_ids BLOB) WITHOUT ROWID;"
+    )
+    con.executemany(
+        "INSERT INTO meta VALUES (?, ?)",
+        (("schema", _RELATED_SCHEMA), ("max_fid", "0"), ("stale_ids", "0")),
+    )
+    con.commit()
+
+
+def _open_related_index(index_path: Path) -> sqlite3.Connection:
+    if index_path.is_dir():
+        raise OSError(f"{index_path} is a directory")
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(2):
+        con = sqlite3.connect(str(index_path), timeout=30.0)
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+            tables = {
+                r[0]
+                for r in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            row = (
+                con.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+                if {"meta", "files", "tokens"}.issubset(tables)
+                else None
+            )
+            if row is None or row[0] != _RELATED_SCHEMA:
+                _create_related_tables(con)
+            return con
+        except sqlite3.DatabaseError as exc:
+            con.close()
+            msg = str(exc).lower()
+            if attempt == 0 and any(k in msg for k in ("not a database", "malformed", "corrupt")):
+                _unlink_sqlite(index_path)
+                continue
+            raise
+    raise sqlite3.DatabaseError("failed to initialize related index")
+
+
+def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tuple[dict[int, str], set[int]]:
+    now_ns = time.time_ns()
+    meta = dict(con.execute("SELECT key, value FROM meta").fetchall())
+    max_fid = int(meta.get("max_fid", "0"))
+    stale_ids = int(meta.get("stale_ids", "0"))
+    cached = {
+        rel: (fid, size, mtime_ns, sha, indexed)
+        for fid, rel, size, mtime_ns, sha, indexed in con.execute(
+            "SELECT id, rel, size, mtime_ns, sha256, indexed FROM files"
+        )
+    }
+
+    eligible: dict[str, object] = {}
+    for rel, recorded in frozen.items():
+        rel_s = str(rel)
+        if rel_s.startswith("sources/") and "inbox" not in Path(rel_s).parts:
+            eligible[rel_s] = recorded
+
+    id_to_rel: dict[int, str] = {}
+    valid_ids: set[int] = set()
+    delta_postings: dict[str, array.array] = collections.defaultdict(lambda: array.array("I"))
+    upserts: list[tuple[int, str, int, int, str, int]] = []
+    deletes: list[str] = []
+
+    for rel_s in sorted(eligible):
+        recorded = eligible[rel_s]
+        file = root / rel_s
+        try:
+            st = os.lstat(file)
+        except OSError:
+            st = None
+        cur = cached.get(rel_s)
+        if st is None or not stat_mod.S_ISREG(st.st_mode):
+            if cur is not None:
+                deletes.append(rel_s)
+                if cur[4] == 1:
+                    stale_ids += 1
+            continue
+
+        if (
+            cur is not None
+            and cur[1] == st.st_size
+            and cur[2] == st.st_mtime_ns
+            and (now_ns - st.st_mtime_ns) >= _RELATED_RACY_NS
+        ):
+            if cur[3] == recorded:
+                if cur[4] == 1:
+                    id_to_rel[cur[0]] = rel_s
+                    valid_ids.add(cur[0])
+                    continue
+                # Previously drifted, now ledger matches: fall through to tokenize once.
+            else:
+                continue
+
+        data = file.read_bytes()
+        sha = hashlib.sha256(data).hexdigest()
+        if cur is not None and cur[3] == sha:
+            fid, indexed = cur[0], cur[4]
+            if sha == recorded and indexed == 0:
+                for tok in set(_RELATED_WORD_B.findall(data)):
+                    delta_postings[tok.decode("ascii")].append(fid)
+                indexed = 1
+            upserts.append((fid, rel_s, st.st_size, st.st_mtime_ns, sha, indexed))
+            if sha == recorded:
+                id_to_rel[fid] = rel_s
+                valid_ids.add(fid)
+        else:
+            if cur is not None and cur[4] == 1:
+                stale_ids += 1
+            max_fid += 1
+            fid = max_fid
+            indexed = 0
+            if sha == recorded:
+                for tok in set(_RELATED_WORD_B.findall(data)):
+                    delta_postings[tok.decode("ascii")].append(fid)
+                indexed = 1
+                id_to_rel[fid] = rel_s
+                valid_ids.add(fid)
+            upserts.append((fid, rel_s, st.st_size, st.st_mtime_ns, sha, indexed))
+
+    for rel_s, cur in cached.items():
+        if rel_s not in eligible:
+            deletes.append(rel_s)
+            if cur[4] == 1:
+                stale_ids += 1
+
+    if stale_ids > _RELATED_MAX_STALE_IDS:
+        _create_related_tables(con)
+        return _sync_related_index(con, root, frozen)
+
+    if deletes or upserts or delta_postings:
+        with con:
+            if deletes:
+                con.executemany("DELETE FROM files WHERE rel = ?", ((r,) for r in deletes))
+            if upserts:
+                con.executemany(
+                    "INSERT INTO files (id, rel, size, mtime_ns, sha256, indexed) VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(rel) DO UPDATE SET id=excluded.id, size=excluded.size, "
+                    "mtime_ns=excluded.mtime_ns, sha256=excluded.sha256, indexed=excluded.indexed",
+                    upserts,
+                )
+            if delta_postings:
+                existing: dict[str, array.array] = {}
+                tok_keys = list(delta_postings)
+                for off in range(0, len(tok_keys), 500):
+                    chunk = tok_keys[off:off + 500]
+                    q = ",".join("?" * len(chunk))
+                    for tok, blob in con.execute(f"SELECT token, doc_ids FROM tokens WHERE token IN ({q})", chunk):
+                        arr = array.array("I")
+                        arr.frombytes(blob)
+                        existing[tok] = arr
+                tok_upserts = []
+                for tok, add_arr in delta_postings.items():
+                    prev = existing.get(tok)
+                    if prev is None:
+                        merged = add_arr
+                    else:
+                        prev.extend(add_arr)
+                        merged = prev
+                    tok_upserts.append((tok, len(merged), merged.tobytes()))
+                con.executemany(
+                    "INSERT INTO tokens (token, doc_count, doc_ids) VALUES (?, ?, ?) "
+                    "ON CONFLICT(token) DO UPDATE SET doc_count=excluded.doc_count, doc_ids=excluded.doc_ids",
+                    tok_upserts,
+                )
+            con.executemany(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (("max_fid", str(max_fid)), ("stale_ids", str(stale_ids))),
+            )
+
+    return id_to_rel, valid_ids
+
+
+def _related_query(
+    con: sqlite3.Connection,
+    root: Path,
+    document,
+    cited: set[str],
+    id_to_rel: dict[int, str],
+    valid_ids: set[int],
+) -> list[dict]:
+    identifiers = _identifiers(document)
+    if not identifiers:
+        return []
+    needed_toks: set[str] = set()
+    id_parts: dict[str, list[str]] = {}
+    for name in identifiers:
+        parts = _RELATED_WORD_S.findall(name)
+        if parts:
+            id_parts[name] = parts
+            needed_toks.update(parts)
+
+    tok_map: dict[str, tuple[int, array.array]] = {}
+    tok_list = list(needed_toks)
+    for off in range(0, len(tok_list), 500):
+        chunk = tok_list[off:off + 500]
+        q = ",".join("?" * len(chunk))
+        for tok, cnt, blob in con.execute(
+            f"SELECT token, doc_count, doc_ids FROM tokens WHERE token IN ({q})", chunk
+        ):
+            arr = array.array("I")
+            arr.frombytes(blob)
+            tok_map[tok] = (cnt, arr)
+
+    holds: dict[str, set[str]] = collections.defaultdict(set)
+    bytes_cache: dict[str, bytes] = {}
+    for name, parts in id_parts.items():
+        if len(parts) == 1 and parts[0] == name:
+            entry = tok_map.get(name)
+            if not entry:
+                continue
+            valid_docs = [doc_id for doc_id in entry[1] if doc_id in valid_ids]
+            if len(valid_docs) > COMMON:
+                continue  # exact early-out: stated[name] > COMMON is always dropped
+            for doc_id in valid_docs:
+                holds[id_to_rel[doc_id]].add(name)
+        else:
+            uniq = set(parts)
+            if any(tok not in tok_map for tok in uniq):
+                continue
+            cands: set[int] | None = None
+            for tok in sorted(uniq, key=lambda t: tok_map[t][0]):
+                docs = {doc_id for doc_id in tok_map[tok][1] if doc_id in valid_ids}
+                cands = docs if cands is None else (cands & docs)
+                if not cands:
+                    break
+            if not cands:
+                continue
+            use_str = "\ufffd" in name
+            if use_str:
+                spat = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
+            else:
+                bname = name.encode("utf-8")
+                bpat = re.compile(rb"(?<![A-Za-z0-9_])" + re.escape(bname) + rb"(?![A-Za-z0-9_])")
+            matched: list[str] = []
+            too_common = False
+            for doc_id in cands:
+                rel = id_to_rel[doc_id]
+                raw = bytes_cache.get(rel)
+                if raw is None:
+                    raw = (root / rel).read_bytes()
+                    bytes_cache[rel] = raw
+                if use_str:
+                    text = raw.decode("utf-8", errors="replace")
+                    hit = name in text and bool(spat.search(text))
+                else:
+                    hit = bname in raw and bool(bpat.search(raw))
+                if hit:
+                    matched.append(rel)
+                    if len(matched) > COMMON:
+                        too_common = True
+                        break
+            if not too_common:
+                for rel in matched:
+                    holds[rel].add(name)
+
+    rows = [{"source": rel, "matches": len(names), "identifiers": sorted(names)}
+            for rel, names in holds.items() if rel not in cited and len(names) >= 2]
+    return sorted(rows, key=lambda row: (-row["matches"], row["source"]))[:RELATED]
+
+
+def _related(
+    root: Path,
+    document,
+    frozen: dict,
+    cited: set[str],
+    *,
+    index_path: Path | None = None,
+) -> list[dict]:
+    """Up to ``RELATED`` frozen sources of the workspace (``sources/`` but its inbox) that the
+    concept does not cite and that state at least two of its identifiers, most first. An
+    identifier that more than ``COMMON`` sources state is dropped. Client-side only: the writer
+    keeps no index, so this reads the workspace the run pulled (using a compact run-scoped SQLite
+    inverted index when ``index_path`` is given, falling back cleanly to a direct scan)."""
+    if index_path is None:
+        return _related_direct(root, document, frozen, cited)
+    con: sqlite3.Connection | None = None
+    try:
+        con = _open_related_index(index_path)
+        id_to_rel, valid_ids = _sync_related_index(con, root, frozen)
+        return _related_query(con, root, document, cited, id_to_rel, valid_ids)
+    except (OSError, sqlite3.Error):
+        return _related_direct(root, document, frozen, cited)
+    finally:
+        if con is not None:
+            with contextlib.suppress(sqlite3.Error):
+                con.close()
 
 
 def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tuple[int, dict]:
@@ -365,7 +689,9 @@ def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tu
                 status = "match" if same else "differs (truncated or redacted)" if clipped else "differs"
                 detail = f"{detail}; re-read copy {copy}"
             rows.append({"source": rel, "part": part.get("ref"), "status": status, "detail": detail})
-    return OK, {"path": path, "evidence": rows, "related": _related(root, document, frozen, cited)}
+    index_path = _folder(state_dir, state["run"]) / _RELATED_INDEX
+    related = _related(root, document, frozen, cited, index_path=index_path)
+    return OK, {"path": path, "evidence": rows, "related": related}
 
 
 def verdict(state_dir: Path, bundle: str | None, path: str, value: str, note: str) -> tuple[int, dict]:
