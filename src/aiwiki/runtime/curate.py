@@ -39,7 +39,7 @@ from ..engine import append_log, bookkeeping, scan_sources
 from ..engine.digests import file_sha256
 from ..engine.document import load_yaml
 from ..engine.gen_indexes import generate_indexes
-from ..engine.lint import lint, lint_high_for_paths
+from ..engine.lint import lint_high_for_paths
 from ..engine.render_viz import generate_visualization
 from ..engine.validate import parse_doc as parse_doc  # re-exported: callers use curate.parse_doc
 from ..engine.validate import should_check, validate_changed

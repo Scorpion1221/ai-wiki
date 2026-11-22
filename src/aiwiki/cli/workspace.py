@@ -303,7 +303,9 @@ def _safe_delta_path(rel: object) -> bool:
     return parts[0] not in (META, ".git")
 
 
-def _parse_delta(incoming: Path, expected_base: str, expected_revision: str) -> tuple[list[str], list[str], dict[str, str]] | None:
+def _parse_delta(
+    incoming: Path, expected_base: str, expected_revision: str
+) -> tuple[list[str], list[str], dict[str, str]] | None:
     manifest_path = incoming / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

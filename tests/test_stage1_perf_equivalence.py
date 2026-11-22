@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from aiwiki.engine import gen_indexes, lint as lint_mod, scan_sources, validate
+from aiwiki.engine import gen_indexes, scan_sources, validate
+from aiwiki.engine import lint as lint_mod
 from aiwiki.engine.document import load_yaml
 from aiwiki.runtime import audit, changeset, policy
-from aiwiki.service import ingest as I
 
 
 def _concept(
@@ -165,7 +165,10 @@ def test_gen_indexes_meta_and_scan_sources_caches_and_dumper(tmp_path: Path) -> 
 
     # scan_sources preflight catches newly introduced legacy string source immediately.
     scan_sources._preflight_concepts(root)
-    target.write_text(orig.replace("  - {id: s1, resource: /sources/s1.md.source}", "  - /sources/s1.md.source"), encoding="utf-8")
+    target.write_text(
+        orig.replace("  - {id: s1, resource: /sources/s1.md.source}", "  - /sources/s1.md.source"),
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match="legacy string sources"):
         scan_sources._preflight_concepts(root)
     target.write_text(orig, encoding="utf-8")
@@ -180,7 +183,9 @@ def test_gen_indexes_meta_and_scan_sources_caches_and_dumper(tmp_path: Path) -> 
     assert ledger == scan_sources._current_sources(root)
 
 
-def test_isolated_concept_bundle_skips_sources_and_viz_but_keeps_symlinks_stray_md_and_collision(tmp_path: Path) -> None:
+def test_isolated_concept_bundle_skips_sources_and_viz_but_keeps_symlinks_stray_md_and_collision(
+    tmp_path: Path,
+) -> None:
     root = _make_bundle(tmp_path / "kb")
     (root / "sources" / "stray.md").write_text(_concept("Stray"), encoding="utf-8")
     outside = tmp_path / "outside.txt"

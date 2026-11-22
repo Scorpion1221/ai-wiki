@@ -133,7 +133,9 @@ def _check_broken_links(root: Path, root_resolved: Path, ids: set[str], norm_ind
             add("high", "broken-link", rel, f"unresolved link: {target}", sug)
 
 
-def _check_contradictions(root: Path, root_resolved: Path, ids: set[str], rel: str, fm: dict, add) -> tuple[list, list[str]]:
+def _check_contradictions(
+    root: Path, root_resolved: Path, ids: set[str], rel: str, fm: dict, add
+) -> tuple[list, list[str]]:
     c = fm.get("contradictions") or []
     if isinstance(c, str):
         c = [c]
