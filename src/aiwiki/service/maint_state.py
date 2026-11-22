@@ -31,11 +31,14 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import os
 import re
 import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -193,19 +196,71 @@ def _read_item(bundle: Path, item_id: str) -> dict | None:
     return item if _valid(item, item_id) else None
 
 
+_ITEM_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
+_ITEM_CACHE_LOCK = threading.Lock()
+_ITEM_CACHE_MAX = 32768
+_RACY_NS = 2_000_000_000
+
+
+def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _invalidate_item(path: Path) -> None:
+    with _ITEM_CACHE_LOCK:
+        _ITEM_CACHE.pop(os.fspath(path), None)
+
+
 def _scan(bundle: Path) -> tuple[list[dict], list[str]]:
-    """Every committed item, and the ids whose item.json is corrupt (skipped, never fatal)."""
+    """Every committed item, and the ids whose item.json is corrupt (skipped, never fatal).
+
+    Uses a stat-validated per-file cache (with a 2 s racy-clean guard) so scanning 10k+
+    historical items avoids re-opening and re-parsing unchanged JSON files. Callers MUST treat
+    returned dicts as read-only and copy (or ``_load``) any item before mutating it.
+    """
     base = _root(bundle) / "items"
+    try:
+        with os.scandir(base) as listing:
+            entries = sorted(listing, key=lambda e: e.name)
+    except OSError:
+        return [], []
+    now_ns = time.time_ns()
     items: list[dict] = []
     corrupt: list[str] = []
-    for path in sorted(base.iterdir()) if base.is_dir() else ():
-        if not _ID.fullmatch(path.name) or not (path / "item.json").exists():
+    for entry in entries:
+        item_id = entry.name
+        if not _ID.fullmatch(item_id):
+            continue
+        item_json = os.path.join(entry.path, "item.json")
+        try:
+            st = os.stat(item_json)
+        except OSError:
             continue  # a directory without item.json is an interrupted create
-        item = _read_item(bundle, path.name)
+        key = _stat_key(st)
+        cacheable = (now_ns - st.st_ctime_ns) > _RACY_NS
+        if cacheable:
+            with _ITEM_CACHE_LOCK:
+                hit = _ITEM_CACHE.get(item_json)
+                if hit is not None and hit[0] == key:
+                    _ITEM_CACHE.move_to_end(item_json)
+                    items.append(hit[1])
+                    continue
+        item = _read_item(bundle, item_id)
         if item is None:
-            corrupt.append(path.name)
-        else:
-            items.append(item)
+            corrupt.append(item_id)
+            continue
+        if cacheable:
+            try:
+                after = _stat_key(os.stat(item_json))
+            except OSError:
+                after = None
+            if after == key:
+                with _ITEM_CACHE_LOCK:
+                    _ITEM_CACHE[item_json] = (key, item)
+                    _ITEM_CACHE.move_to_end(item_json)
+                    while len(_ITEM_CACHE) > _ITEM_CACHE_MAX:
+                        _ITEM_CACHE.popitem(last=False)
+        items.append(item)
     return items, corrupt
 
 
@@ -224,7 +279,9 @@ def _load(bundle: Path, item_id: str) -> dict:
 
 def _save(bundle: Path, item: dict, now: datetime) -> None:
     item["updated_at"] = _iso(now)
-    _write_json(_item_dir(bundle, item["id"]) / "item.json", item)
+    path = _item_dir(bundle, item["id"]) / "item.json"
+    _write_json(path, item)
+    _invalidate_item(path)
 
 
 # --- validation ----------------------------------------------------------------------
@@ -399,9 +456,10 @@ def release_lease(bundle: Path, role: str, *, principal: str, run: str | None) -
         interrupted = []
         for item in _items(bundle) if role == "maintainer" else ():
             if item["status"] == "in_progress" and item.get("current_run") == run:
-                _fail_attempt(item, run=run, cls="interrupted", detail="run released its lease", now=now)
-                _save(bundle, item, now)
-                interrupted.append(item["id"])
+                fresh = _load(bundle, item["id"])
+                _fail_attempt(fresh, run=run, cls="interrupted", detail="run released its lease", now=now)
+                _save(bundle, fresh, now)
+                interrupted.append(fresh["id"])
         return {"released": True, "interrupted": interrupted}
 
 
@@ -411,21 +469,24 @@ def _begin_run(bundle: Path, now: datetime) -> dict:
     for item in _items(bundle):
         history = item["attempts"]["history"]
         if item["status"] == "in_progress":
-            _fail_attempt(item, run=item.get("current_run"), cls="interrupted",
+            fresh = _load(bundle, item["id"])
+            _fail_attempt(fresh, run=fresh.get("current_run"), cls="interrupted",
                           detail="run ended without resolving the item", now=now)
-            interrupted.append(item["id"])
+            interrupted.append(fresh["id"])
         elif item["status"] == "parked":
-            item["status"] = "ready"
-            unparked.append(item["id"])
+            fresh = _load(bundle, item["id"])
+            fresh["status"] = "ready"
+            unparked.append(fresh["id"])
         elif (item["status"] == "needs_human" and (item.get("resolution") or {}).get("reason") == "attempt_cap"
               and current and history and history[-1].get("build") != current
               and item.get("build_retry") != current):
             # A newer gate build may carry the fix: one extra attempt per build (the P0-A rule).
-            item.update(status="ready", resolution=None, build_retry=current)
-            build_retry.append(item["id"])
+            fresh = _load(bundle, item["id"])
+            fresh.update(status="ready", resolution=None, build_retry=current)
+            build_retry.append(fresh["id"])
         else:
             continue
-        _save(bundle, item, now)
+        _save(bundle, fresh, now)
     return {"interrupted": interrupted, "unparked": unparked, "build_retry": build_retry}
 
 
@@ -451,12 +512,13 @@ def _attention(bundle: Path, collect: Callable[[], list[dict]]) -> dict:
         with _LOCK:
             now = _now()
             current = _items(bundle)
+            index = _enqueue_index(current)
             capped = 0  # new items that took one of ATTENTION_CAP's slots
             for spec, files in specs:
                 reason = str(spec["origin"].get("reason"))
                 uncapped = reason in UNCAPPED_REASONS
                 outcome = _enqueue(bundle, spec, files, "service", current, now,
-                                   create=uncapped or capped < ATTENTION_CAP)["result"]
+                                   create=uncapped or capped < ATTENTION_CAP, index=index)["result"]
                 result[outcome] += 1
                 if outcome == "created":
                     capped += not uncapped
@@ -517,15 +579,40 @@ def _blob(bundle: Path, item_id: str, meta: dict) -> bytes:
     return data
 
 
+def _enqueue_index(items: list[dict]) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    """Lookup index over ``items`` for batch enqueue/attention without scanning 10k+ items per spec."""
+    by_key: dict[str, dict] = {}
+    mergeable_by_topic: dict[str, list[dict]] = {}
+    for item in items:
+        by_key.setdefault(item["item_key"], item)
+        for v in item["versions"]:
+            vk = v.get("item_key")
+            if vk is not None:
+                by_key.setdefault(vk, item)
+        if item["status"] in MERGEABLE:
+            mergeable_by_topic.setdefault(item["topic_key"], []).append(item)
+    return by_key, mergeable_by_topic
+
+
 def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principal: str, items: list[dict],
-             now: datetime, *, create: bool = True) -> dict:
+             now: datetime, *, create: bool = True,
+             index: tuple[dict[str, dict], dict[str, list[dict]]] | None = None) -> dict:
     """``create`` False still dedupes and merges, but answers ``deferred`` for a new item."""
     key = spec["item_key"]
-    for item in items:
-        if key == item["item_key"] or any(v.get("item_key") == key for v in item["versions"]):
-            _write_blobs(bundle, item["id"], files)  # the genuine bytes repair a damaged blob
-            return {"id": item["id"], "item_key": key, "result": "duplicate", "status": item["status"]}
-    for target in (i for i in items if i["status"] in MERGEABLE and i["topic_key"] == spec["topic_key"]):
+    if index is not None:
+        by_key, mergeable_by_topic = index
+        existing = by_key.get(key)
+        if existing is not None:
+            _write_blobs(bundle, existing["id"], files)  # the genuine bytes repair a damaged blob
+            return {"id": existing["id"], "item_key": key, "result": "duplicate", "status": existing["status"]}
+        candidates = list(mergeable_by_topic.get(spec["topic_key"], ()))
+    else:
+        for item in items:
+            if key == item["item_key"] or any(v.get("item_key") == key for v in item["versions"]):
+                _write_blobs(bundle, item["id"], files)  # the genuine bytes repair a damaged blob
+                return {"id": item["id"], "item_key": key, "result": "duplicate", "status": item["status"]}
+        candidates = [i for i in items if i["status"] in MERGEABLE and i["topic_key"] == spec["topic_key"]]
+    for target in candidates:
         # Same topic still waiting: fold the newer collection in. Same-named files take the
         # newer bytes, new files are appended, and the replaced entries stay in versions. A
         # merge that would overflow the item's caps queues a new item instead.
@@ -536,13 +623,32 @@ def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principa
         if not _fits(list(by_name.values())):
             continue
         _write_blobs(bundle, target["id"], files)
-        target["versions"].append({"item_key": key, "merged_at": _iso(now), "origin": target["origin"],
-                                   "brief": target["brief"], "replaced": replaced})
-        target.update(files=list(by_name.values()), origin=spec["origin"], brief=_briefed(target, spec["brief"]),
-                      priority=max(target["priority"], spec["priority"]), collected_by=principal,
-                      collected_at=_iso(now))
-        _save(bundle, target, now)
-        return {"id": target["id"], "item_key": key, "result": "merged", "status": target["status"]}
+        # Clone before mutating so a cached read-only item dict in _ITEM_CACHE is never modified.
+        updated = copy.deepcopy(target)
+        updated["versions"].append({"item_key": key, "merged_at": _iso(now), "origin": updated["origin"],
+                                    "brief": updated["brief"], "replaced": replaced})
+        updated.update(files=list(by_name.values()), origin=spec["origin"], brief=_briefed(updated, spec["brief"]),
+                       priority=max(updated["priority"], spec["priority"]), collected_by=principal,
+                       collected_at=_iso(now))
+        _save(bundle, updated, now)
+        for pos, existing in enumerate(items):
+            if existing["id"] == updated["id"]:
+                items[pos] = updated
+                break
+        if index is not None:
+            by_key, mergeable_by_topic = index
+            by_key[key] = updated
+            by_key[updated["item_key"]] = updated
+            for v in updated["versions"]:
+                vk = v.get("item_key")
+                if vk is not None:
+                    by_key[vk] = updated
+            bucket = mergeable_by_topic.get(spec["topic_key"], [])
+            for pos, existing in enumerate(bucket):
+                if existing["id"] == updated["id"]:
+                    bucket[pos] = updated
+                    break
+        return {"id": updated["id"], "item_key": key, "result": "merged", "status": updated["status"]}
     if not create:
         return {"id": None, "item_key": key, "result": "deferred", "status": None}
     item_id = "it_" + key[:12]
@@ -557,6 +663,10 @@ def _enqueue(bundle: Path, spec: dict, files: list[tuple[dict, bytes]], principa
     _write_blobs(bundle, item_id, files)
     _save(bundle, item, now)
     items.append(item)
+    if index is not None:
+        by_key, mergeable_by_topic = index
+        by_key.setdefault(key, item)
+        mergeable_by_topic.setdefault(item["topic_key"], []).append(item)
     return {"id": item_id, "item_key": key, "result": "created", "status": "ready"}
 
 
@@ -570,7 +680,8 @@ def enqueue(bundle: Path, items: object, *, principal: str, run: str | None = No
         now = _now()
         _touch(bundle, principal, run, now)
         current = _items(bundle)
-        results = [_enqueue(bundle, spec, files, principal, current, now) for spec, files in specs]
+        index = _enqueue_index(current)
+        results = [_enqueue(bundle, spec, files, principal, current, now, index=index) for spec, files in specs]
     return {"items": results, **{r: sum(x["result"] == r for x in results)
                                   for r in ("created", "merged", "duplicate")}}
 
@@ -667,11 +778,11 @@ def next_item(bundle: Path, *, principal: str, run: str | None, more: bool = Fal
         ready = [i for i in items if i["status"] == "ready"]
         current = next((i for i in items if i["status"] == "in_progress" and i.get("current_run") == run), None)
         if current is not None and not more:
-            return {"item": current, "resumed": True, "ready": len(ready)}
+            return {"item": copy.deepcopy(current), "resumed": True, "ready": len(ready)}
         if not ready:
             return {"item": None, "resumed": False, "ready": 0}
         ready.sort(key=lambda i: _serve_order(i, now))
-        item = ready[0]
+        item = _load(bundle, ready[0]["id"])
         item.update(status="in_progress", current_run=run)
         item["attempts"]["started"] += 1
         _save(bundle, item, now)
@@ -741,7 +852,8 @@ def _split(bundle: Path, parent: dict, children: object, principal: str, now: da
         raise MaintError(400, "input", f"split must place every file in a child; missing: {missing}")
     loaded = [(spec, [(meta, _blob(bundle, parent["id"], meta)) for meta in files]) for spec, files in specs]
     current = _items(bundle)
-    ids = [_enqueue(bundle, spec, files, principal, current, now)["id"] for spec, files in loaded]
+    index = _enqueue_index(current)
+    ids = [_enqueue(bundle, spec, files, principal, current, now, index=index)["id"] for spec, files in loaded]
     if _triage_reopened(parent):  # the review's ask and its note rule go with the evidence
         for child in (_load(bundle, child_id) for child_id in dict.fromkeys(ids)):
             # A child that is an item already closed (the same files and topic) stays as it was.
@@ -861,8 +973,8 @@ def list_items(bundle: Path, *, status: str | None = None, origin: str | None = 
     rows = [item for item in _items(bundle) if (status is None or item["status"] == status)
             and (origin is None or item["origin"].get("kind") == origin)]
     rows.sort(key=lambda item: (item["created_at"], item["id"]))
-    return {"items": rows[:limit], "shown": min(limit, len(rows)), "total": len(rows),
-            "truncated": len(rows) > limit}
+    return {"items": [copy.deepcopy(i) for i in rows[:limit]], "shown": min(limit, len(rows)),
+            "total": len(rows), "truncated": len(rows) > limit}
 
 
 # --- admin ---------------------------------------------------------------------------
@@ -1035,7 +1147,7 @@ def status(bundle: Path, *, triage: Callable[[list[dict]], dict] | None = None) 
         group["oldest_age_s"] = _age_s(group["oldest_created_at"], now)
     pending = I.pending_audits(bundle, older_than_hours=0, limit=1)
     mode = os.environ.get("AIWIKI_AUDIT", "").strip() or "codex"  # as app.MODES reads it for /whoami
-    jobs = [job for path in (bundle / ".okf" / "jobs").glob("*.json") if (job := _read_json(path)) is not None]
+    jobs = I._scan_jobs(bundle)
     # A queued (or lease-deferred) audit is not pending, but it is still backlog.
     queued_audits = [str(job.get("created") or "") for job in jobs
                      if job.get("kind") == "audit" and job.get("status") == "queued"]

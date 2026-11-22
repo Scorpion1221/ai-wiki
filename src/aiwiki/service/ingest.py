@@ -10,12 +10,15 @@ Deterministic, stdlib only.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
 import threading
+import time
 import uuid
+from collections import OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -39,6 +42,78 @@ _REUSABLE_CHANGESET_STATUSES = {"queued", "running", "done"}
 _VERDICT_FORMAT_REASONS = {"verdict_missing", "verdict_invalid"}
 MAX_VERDICT_FORMAT_AUDITS = 2
 _JOB_LOCK = threading.Lock()
+# Per-file parsed job cache validated on every scandir by (dev, ino, size, mtime_ns, ctime_ns).
+# Files whose ctime is within _RACY_NS of now are always read fresh (racy-clean guard, like Git),
+# so in-place rewrites within one filesystem tick never hit a stale entry.
+_JOB_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
+_JOB_CACHE_LOCK = threading.Lock()
+_JOB_CACHE_MAX = 32768
+_RACY_NS = 2_000_000_000
+
+
+def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _invalidate_job(path: Path) -> None:
+    with _JOB_CACHE_LOCK:
+        _JOB_CACHE.pop(os.fspath(path), None)
+
+
+def _scan_job_entries(bundle: Path, *, sort_mtime_desc: bool = False) -> list[tuple[str, dict]]:
+    """Read every valid job JSON under ``.okf/jobs/`` as ``(stem, job)`` using a stat-validated
+    per-file cache. Callers MUST treat returned dicts as read-only."""
+    jobs_dir = bundle / ".okf" / "jobs"
+    try:
+        with os.scandir(jobs_dir) as listing:
+            entries = [e for e in listing if e.name.endswith(".json")]
+    except OSError:
+        return []
+    stated: list[tuple[str, str, os.stat_result]] = []
+    for entry in entries:
+        try:
+            st = entry.stat()
+        except OSError:
+            continue
+        stated.append((entry.path, entry.name[:-5], st))
+    if sort_mtime_desc:
+        stated.sort(key=lambda item: item[2].st_mtime_ns, reverse=True)
+    now_ns = time.time_ns()
+    found: list[tuple[str, dict]] = []
+    for path_str, stem, st in stated:
+        key = _stat_key(st)
+        cacheable = (now_ns - st.st_ctime_ns) > _RACY_NS
+        if cacheable:
+            with _JOB_CACHE_LOCK:
+                hit = _JOB_CACHE.get(path_str)
+                if hit is not None and hit[0] == key:
+                    _JOB_CACHE.move_to_end(path_str)
+                    found.append((stem, hit[1]))
+                    continue
+        try:
+            with open(path_str, encoding="utf-8") as handle:
+                job = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(job, dict):
+            continue
+        if cacheable:
+            try:
+                after = _stat_key(os.stat(path_str))
+            except OSError:
+                after = None
+            if after == key:
+                with _JOB_CACHE_LOCK:
+                    _JOB_CACHE[path_str] = (key, job)
+                    _JOB_CACHE.move_to_end(path_str)
+                    while len(_JOB_CACHE) > _JOB_CACHE_MAX:
+                        _JOB_CACHE.popitem(last=False)
+        found.append((stem, job))
+    return found
+
+
+def _scan_jobs(bundle: Path, *, sort_mtime_desc: bool = False) -> list[dict]:
+    return [job for _stem, job in _scan_job_entries(bundle, sort_mtime_desc=sort_mtime_desc)]
 
 
 def _now() -> str:
@@ -119,7 +194,9 @@ def new_job(bundle: Path, source_rel: str, sha: str, curatable: bool,
         job["title"] = title
     if filename:
         job["original_name"] = filename
-    job_path(bundle, job["id"]).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = job_path(bundle, job["id"])
+    path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    _invalidate_job(path)
     return job
 
 
@@ -129,17 +206,10 @@ def find_job_by_sha(bundle: Path, sha: str) -> dict | None:
     A changeset job names its packet's sha too, but it is no receipt for an upload: it may
     be a noop that stored nothing, or be rejected later. So an upload only reuses ingests.
     """
-    jobs = bundle / ".okf" / "jobs"
-    if not jobs.is_dir():
-        return None
-    for path in sorted(jobs.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+    for job in _scan_jobs(bundle, sort_mtime_desc=True):
         if (job.get("kind", "ingest") == "ingest" and job.get("mode") != "changeset" and job.get("sha256") == sha
                 and job.get("status") in _REUSABLE_JOB_STATUSES):
-            return job
+            return copy.deepcopy(job)
     return None
 
 
@@ -181,18 +251,12 @@ def find_audit_job(bundle: Path, parent_job: str) -> dict | None:
     must not permanently block a fresh retry; neither does a bounded number of done
     attempts whose verdict was missing or invalid.
     """
-    jobs = bundle / ".okf" / "jobs"
-    if not jobs.is_dir():
-        return None
-    attempts = []
-    for path in sorted(jobs.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if job.get("kind") == "audit" and job.get("parent_job") == parent_job:
-            attempts.append(job)
-    return _reusable_audit(attempts)
+    attempts = [
+        job for job in _scan_jobs(bundle, sort_mtime_desc=True)
+        if job.get("kind") == "audit" and job.get("parent_job") == parent_job
+    ]
+    found = _reusable_audit(attempts)
+    return copy.deepcopy(found) if found is not None else None
 
 
 def new_audit_job(bundle: Path, parent_job: str, concept_files: list[str]) -> dict:
@@ -222,7 +286,9 @@ def new_audit_job(bundle: Path, parent_job: str, concept_files: list[str]) -> di
                 "corrected_concepts": [],
             },
         })
-    job_path(bundle, job["id"]).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = job_path(bundle, job["id"])
+    path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    _invalidate_job(path)
     return job
 
 
@@ -248,33 +314,22 @@ def _write_atomic(path: Path, value: dict) -> None:
         out.flush()
         os.fsync(out.fileno())
     os.replace(temporary, path)
+    _invalidate_job(path)
 
 
 def changeset_jobs(bundle: Path, principal: str | None = None) -> list[dict]:
     """The bundle's changeset jobs, or only those one principal submitted."""
-    jobs = []
-    for path in (bundle / ".okf" / "jobs").glob("*.json"):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(job, dict) and job.get("mode") == "changeset" and principal in (None, job.get("principal")):
-            jobs.append(job)
-    return jobs
+    return [
+        job for job in _scan_jobs(bundle)
+        if job.get("mode") == "changeset" and principal in (None, job.get("principal"))
+    ]
 
 
 def changesets_and_reverts(bundle: Path) -> tuple[list[dict], dict[str, str]]:
     """``changeset_jobs(bundle)`` and ``reverted_by(bundle)`` from one read of the job files, for
     a caller that needs both (the audit backlog read them four times: 7,484 files, ~20 s on the
     writer, 2026-11-18)."""
-    jobs = []
-    for path in (bundle / ".okf" / "jobs").glob("*.json"):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(job, dict):
-            jobs.append(job)
+    jobs = _scan_jobs(bundle)
     return [job for job in jobs if job.get("mode") == "changeset"], _reverted(jobs)
 
 
@@ -286,7 +341,8 @@ def find_changeset_job(bundle: Path, principal: str, digest: str) -> dict | None
     matches = [job for job in changeset_jobs(bundle, principal)
                if job.get("changeset_sha256") == digest and job.get("status") in _REUSABLE_CHANGESET_STATUSES]
     reverted = reverted_by(bundle) if matches else {}
-    return next((job for job in matches if job.get("id") not in reverted), None)
+    found = next((job for job in matches if job.get("id") not in reverted), None)
+    return copy.deepcopy(found) if found is not None else None
 
 
 def new_changeset_job(bundle: Path, record: dict, **fields) -> dict:
@@ -295,7 +351,9 @@ def new_changeset_job(bundle: Path, record: dict, **fields) -> dict:
     job = {"id": uuid.uuid4().hex[:12], "kind": "ingest", "mode": "changeset", "status": "queued",
            "created": _now(), "service": service_identity(), **fields}
     _write_atomic(changeset_path(bundle, job["id"]), record)
-    _write_atomic(job_path(bundle, job["id"]), job)
+    path = job_path(bundle, job["id"])
+    _write_atomic(path, job)
+    _invalidate_job(path)
     return job
 
 
@@ -304,20 +362,14 @@ def new_revert_job(bundle: Path, **fields) -> dict:
     re-queues it from the job alone."""
     job = {"id": uuid.uuid4().hex[:12], "kind": "revert", "status": "queued", "created": _now(),
            "service": service_identity(), **fields}
-    _write_atomic(job_path(bundle, job["id"]), job)
+    path = job_path(bundle, job["id"])
+    _write_atomic(path, job)
+    _invalidate_job(path)
     return job
 
 
 def revert_jobs(bundle: Path) -> list[dict]:
-    jobs = []
-    for path in (bundle / ".okf" / "jobs").glob("*.json"):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(job, dict) and job.get("kind") == "revert":
-            jobs.append(job)
-    return jobs
+    return [job for job in _scan_jobs(bundle) if job.get("kind") == "revert"]
 
 
 def _reverted(jobs: list[dict]) -> dict[str, str]:
@@ -331,7 +383,9 @@ def reverted_by(bundle: Path) -> dict[str, str]:
 
 
 def save_job(bundle: Path, job: dict) -> None:
-    job_path(bundle, job["id"]).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = job_path(bundle, job["id"])
+    _write_atomic(path, job)
+    _invalidate_job(path)
 
 
 def read_job(bundle: Path, job_id: str) -> dict | None:
@@ -341,12 +395,7 @@ def read_job(bundle: Path, job_id: str) -> dict | None:
 
 def pending_audits(bundle: Path, *, older_than_hours: float = 24, limit: int = 20) -> dict:
     """Discover orphaned successful ingests, excluding active or completed audits."""
-    jobs = []
-    for path in (bundle / ".okf" / "jobs").glob("*.json"):
-        try:
-            jobs.append(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            continue
+    jobs = _scan_jobs(bundle)
     attempts: dict = {}
     for job in sorted(jobs, key=lambda j: (j.get("created", ""), j.get("id", "")), reverse=True):
         if job.get("kind") == "audit":
@@ -380,15 +429,8 @@ def pending_audits(bundle: Path, *, older_than_hours: float = 24, limit: int = 2
 
 def active_jobs(bundle: Path) -> list[str]:
     """IDs of queued/running jobs that make bundle deletion unsafe."""
-    jobs = bundle / ".okf" / "jobs"
-    if not jobs.is_dir():
-        return []
     active: list[str] = []
-    for path in sorted(jobs.glob("*.json")):
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+    for stem, job in sorted(_scan_job_entries(bundle), key=lambda pair: f"{pair[0]}.json"):
         if job.get("status") in {"queued", "running"}:
-            active.append(str(job.get("id") or path.stem))
+            active.append(str(job.get("id") or stem))
     return active
