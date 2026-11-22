@@ -57,13 +57,13 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Callable
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from aiwiki.version import VERSION, build, service_identity
@@ -742,6 +742,34 @@ class _Rejected(Exception):
 
 
 _REVISION = re.compile(r"[0-9a-f]{7,64}")
+_WORKSPACE_CACHE_KEEP = 3
+_WORKSPACE_CACHE_LOCKS_GUARD = threading.Lock()
+_WORKSPACE_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_DELTA_MAX_PATHS = 200
+_DELTA_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _published_revision(bundle: Path, at: str | None = None) -> tuple[Path, str, str, str]:
+    """Return ``(repo_root, revision, prefix, tree_spec)`` without running ``git archive``."""
+    root = curate_runtime._repo_root(bundle)
+    if root is None:
+        raise HTTPException(status_code=503, detail="the bundle has no Git repository to publish from")
+    revision = ""
+    for ref in (f"refs/remotes/origin/{curate_runtime._branch(root)}", "HEAD"):
+        revision = curate_runtime._git(root, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}").stdout.strip()
+        if revision:
+            break
+    if not revision:
+        raise HTTPException(status_code=503, detail="the published revision could not be read; retry")
+    if at is not None:
+        earlier = curate_runtime._git(root, "rev-parse", "--verify", "-q", f"{at}^{{commit}}").stdout.strip() \
+            if _REVISION.fullmatch(at) else ""
+        if not earlier or curate_runtime._git(root, "merge-base", "--is-ancestor", earlier, revision).returncode:
+            raise HTTPException(status_code=404, detail=f"{at} is not a published revision of this bundle")
+        revision = earlier
+    prefix = os.path.relpath(bundle.resolve(), root.resolve())
+    tree = revision if prefix == "." else f"{revision}:{prefix}"
+    return root, revision, prefix, tree
 
 
 def _published(bundle: Path, at: str | None = None, paths: tuple[str, ...] = ()) -> tuple[Path, str, bytes]:
@@ -753,29 +781,14 @@ def _published(bundle: Path, at: str | None = None, paths: tuple[str, ...] = ())
     that is not an ancestor of the published one is a 404. ``paths`` are git pathspecs, relative
     to the bundle, that narrow the tar (``_PUBLISHED``, ``_CONCEPTS``).
     """
-    root = curate_runtime._repo_root(bundle)
-    if root is None:
-        raise HTTPException(status_code=503, detail="the bundle has no Git repository to publish from")
-    revision = ""
-    for ref in (f"refs/remotes/origin/{curate_runtime._branch(root)}", "HEAD"):
-        revision = curate_runtime._git(root, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}").stdout.strip()
-        if revision:
-            break
-    if at is not None and revision:
-        earlier = curate_runtime._git(root, "rev-parse", "--verify", "-q", f"{at}^{{commit}}").stdout.strip() \
-            if _REVISION.fullmatch(at) else ""
-        if not earlier or curate_runtime._git(root, "merge-base", "--is-ancestor", earlier, revision).returncode:
-            raise HTTPException(status_code=404, detail=f"{at} is not a published revision of this bundle")
-        revision = earlier
-    prefix = os.path.relpath(bundle.resolve(), root.resolve())
-    tree = revision if prefix == "." else f"{revision}:{prefix}"
+    root, revision, _prefix, tree = _published_revision(bundle, at)
     archive = subprocess.run(
         ["git", "-C", str(root), "archive", "--format=tar", tree, *(("--", *paths) if paths else ())],
         capture_output=True, timeout=curate_runtime.GIT_TIMEOUT_S,
-    ) if revision else None
-    if archive is not None and archive.returncode != 0 and paths and b"did not match any files" in archive.stderr:
+    )
+    if archive.returncode != 0 and paths and b"did not match any files" in archive.stderr:
         archive = subprocess.CompletedProcess(archive.args, 0, stdout=_EMPTY_TAR)  # nothing but what paths leave out
-    if archive is None or archive.returncode != 0:
+    if archive.returncode != 0:
         raise HTTPException(status_code=503, detail="the published revision could not be read; retry")
     return root, revision, archive.stdout
 
@@ -801,13 +814,202 @@ def _unpublished(member: tarfile.TarInfo) -> bool:
     return member.name == "viz.html" or member.name.split("/")[:2] == ["sources", "inbox"]
 
 
+def _workspace_cache_lock(key: str) -> threading.Lock:
+    with _WORKSPACE_CACHE_LOCKS_GUARD:
+        lock = _WORKSPACE_CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKSPACE_CACHE_LOCKS[key] = lock
+            if len(_WORKSPACE_CACHE_LOCKS) > 256:
+                for old in list(_WORKSPACE_CACHE_LOCKS):
+                    if old != key and not _WORKSPACE_CACHE_LOCKS[old].locked():
+                        _WORKSPACE_CACHE_LOCKS.pop(old, None)
+                        if len(_WORKSPACE_CACHE_LOCKS) <= 128:
+                            break
+        return lock
+
+
+def _prune_workspace_cache(cache_dir: Path, *, keep: Path) -> None:
+    try:
+        entries = []
+        for path in cache_dir.glob("workspace-*.tar.gz"):
+            if path == keep:
+                continue
+            try:
+                entries.append((path.stat().st_mtime_ns, path))
+            except OSError:
+                continue
+        entries.sort(reverse=True)
+        for _mtime, old in entries[max(0, _WORKSPACE_CACHE_KEEP - 1):]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _stream_published_gzip(root: Path, tree: str, target: Path, paths: tuple[str, ...] = _PUBLISHED) -> None:
+    """Stream ``git archive`` directly into a gzip file on disk (~15 MiB peak RAM vs ~372 MiB)."""
+    cmd = ["git", "-C", str(root), "archive", "--format=tar", tree, *(("--", *paths) if paths else ())]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None and proc.stderr is not None
+    written = 0
+    try:
+        with target.open("wb") as raw_out, gzip.GzipFile(filename="", mode="wb", compresslevel=1,
+                                                         fileobj=raw_out, mtime=0) as gz:
+            while chunk := proc.stdout.read(1 << 20):
+                gz.write(chunk)
+                written += len(chunk)
+            stderr = proc.stderr.read()
+            rc = proc.wait(timeout=curate_runtime.GIT_TIMEOUT_S)
+            if rc != 0:
+                if written == 0 and paths and b"did not match any files" in stderr:
+                    gz.write(_EMPTY_TAR)
+                else:
+                    raise HTTPException(status_code=503, detail="the published revision could not be read; retry")
+    except Exception:
+        with suppress(Exception):
+            proc.kill()
+            proc.wait(timeout=5)
+        target.unlink(missing_ok=True)
+        raise
+
+
+def _cached_workspace_archive(bundle: Path, root: Path, revision: str, tree: str) -> Path:
+    """Build (once per revision) and cache the full published workspace ``.tar.gz`` on disk."""
+    cache_dir = bundle / ".okf" / "cache"
+    cache_path = cache_dir / f"workspace-{revision}.tar.gz"
+    with _workspace_cache_lock(os.fspath(cache_path)):
+        if cache_path.is_file():
+            with suppress(OSError):
+                os.utime(cache_path, None)
+            return cache_path
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = cache_dir / f".workspace-{revision}.{os.getpid()}.{threading.get_ident()}.tmp"
+        _stream_published_gzip(root, tree, tmp, _PUBLISHED)
+        os.replace(tmp, cache_path)
+        _prune_workspace_cache(cache_dir, keep=cache_path)
+        return cache_path
+
+
+def _workspace_delta(root: Path, prefix: str, base_rev: str, revision: str) -> bytes | None:
+    """Build a gzipped delta tar (``manifest.json`` + ``tree/<rel>``) from ``base_rev`` to
+    ``revision`` for the published workspace subset, or ``None`` to fall back to a full archive."""
+    if not _REVISION.fullmatch(base_rev) or len(base_rev) < 40 or base_rev == revision:
+        return None
+    resolved = curate_runtime._git(root, "rev-parse", "--verify", "-q", f"{base_rev}^{{commit}}").stdout.strip()
+    if resolved != base_rev:
+        return None
+    if curate_runtime._git(root, "merge-base", "--is-ancestor", base_rev, revision).returncode != 0:
+        return None
+    base_tree = base_rev if prefix == "." else f"{base_rev}:{prefix}"
+    cur_tree = revision if prefix == "." else f"{revision}:{prefix}"
+    diff = subprocess.run(
+        ["git", "-C", str(root), "diff-tree", "-r", "--raw", "-z", "--no-renames", base_tree, cur_tree,
+         "--", *_PUBLISHED],
+        capture_output=True, timeout=curate_runtime.GIT_TIMEOUT_S,
+    )
+    if diff.returncode != 0:
+        return None
+    updated: list[str] = []
+    deleted: list[str] = []
+    updated_oids: list[str] = []
+    if diff.stdout:
+        tokens = diff.stdout.split(b"\x00")
+        if tokens and tokens[-1] == b"":
+            tokens.pop()
+        if len(tokens) % 2 != 0:
+            return None
+        for idx in range(0, len(tokens), 2):
+            try:
+                meta = tokens[idx].decode("ascii", errors="strict")
+                rel = tokens[idx + 1].decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                return None
+            if not meta.startswith(":"):
+                return None
+            parts = meta[1:].split(" ")
+            if len(parts) != 5:
+                return None
+            old_mode, new_mode, _old_oid, new_oid, status = parts
+            # Fall back to full tarball on symlinks, gitlinks, typechanges, or unexpected statuses.
+            if old_mode not in ("000000", "100644", "100755") or new_mode not in ("000000", "100644", "100755"):
+                return None
+            if status in ("A", "M"):
+                updated.append(rel)
+                updated_oids.append(new_oid)
+            elif status == "D":
+                deleted.append(rel)
+            else:
+                return None
+    if len(updated) + len(deleted) > _DELTA_MAX_PATHS:
+        return None
+    if updated_oids:
+        sizes = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "--batch-check=%(objectsize)"],
+            input=("\n".join(updated_oids) + "\n").encode("ascii"),
+            capture_output=True, timeout=curate_runtime.GIT_TIMEOUT_S,
+        )
+        if sizes.returncode != 0:
+            return None
+        try:
+            total_bytes = sum(int(line) for line in sizes.stdout.decode("ascii").splitlines() if line.strip())
+        except ValueError:
+            return None
+        if total_bytes > _DELTA_MAX_BYTES:
+            return None
+    updated.sort()
+    deleted.sort()
+    manifest = {
+        "version": 1,
+        "base_revision": base_rev,
+        "revision": revision,
+        "updated": updated,
+        "deleted": deleted,
+    }
+    manifest_bytes = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    out = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", compresslevel=1, fileobj=out, mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            info = tarfile.TarInfo("manifest.json")
+            info.size = len(manifest_bytes)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(manifest_bytes))
+            if updated:
+                pathspecs = [f":(literal){rel}" for rel in updated]
+                arch = subprocess.run(
+                    ["git", "-C", str(root), "archive", "--format=tar", "--prefix=tree/", cur_tree,
+                     "--", *pathspecs],
+                    capture_output=True, timeout=curate_runtime.GIT_TIMEOUT_S,
+                )
+                if arch.returncode != 0:
+                    return None
+                with tarfile.open(fileobj=io.BytesIO(arch.stdout), mode="r:") as src_tar:
+                    for member in src_tar:
+                        if member.type == tarfile.XGLTYPE:
+                            continue
+                        if member.isfile():
+                            extracted = src_tar.extractfile(member)
+                            if extracted is None:
+                                return None
+                            tar.addfile(member, extracted)
+                        elif member.isdir():
+                            tar.addfile(member)
+                        else:
+                            return None
+    return out.getvalue()
+
+
 @app.get("/workspace")
-def workspace(bundle: str | None = None, revision: str | None = None, if_none_match: str | None = Header(default=None),
+def workspace(bundle: str | None = None, revision: str | None = None, since: str | None = None,
+              if_none_match: str | None = Header(default=None),
               authorization: str | None = Header(default=None)):
     """The published bundle, sources/ included but for sources/inbox/ (the intake copies), and
     viz.html left out, as a gzipped tar.
 
-    ``X-AIWiki-Revision`` (also the ETag) names the commit; ``If-None-Match`` on it is a 304.
+    ``X-AIWiki-Revision`` (also the ETag) names the commit; ``If-None-Match`` on it is a 304
+    resolved from Git without building any archive. When ``since`` names an ancestor full commit
+    SHA of the current published revision (and ``revision`` is omitted), a compact delta tar
+    (``X-AIWiki-Workspace-Mode: delta``) is returned whenever safe; otherwise a full cached
+    archive is streamed from disk.
     ``revision`` asks for an earlier published commit instead; that needs the admin scope of a
     named principal, since history still holds what a revert or a removal took out of the
     bundle, and a shared legacy token (every scope, no actor) is in every member's hands.
@@ -820,14 +1022,20 @@ def workspace(bundle: str | None = None, revision: str | None = None, if_none_ma
             raise HTTPException(status_code=403, detail=f"{principal.id} has no actor; an earlier revision "
                                                         "needs a named admin principal")
     _name, path = _resolve(bundle, principal)
-    _root, revision, archive = _published(path, revision, _PUBLISHED)
-    headers = {"X-AIWiki-Revision": revision, "ETag": f'"{revision}"'}
-    if if_none_match and revision in {tag.strip().removeprefix("W/").strip('"') for tag in if_none_match.split(",")}:
+    root, resolved, prefix, tree = _published_revision(path, revision)
+    headers = {"X-AIWiki-Revision": resolved, "ETag": f'"{resolved}"'}
+    if if_none_match and resolved in {tag.strip().removeprefix("W/").strip('"') for tag in if_none_match.split(",")}:
         return Response(status_code=304, headers=headers)
-    # git leaves out what _unpublished names; one zlib pass at level 6 (a Python tar copy of the
-    # whole archive at level 9 took ~30 s of the writer's CPU a pull, 2026-11-18, for 0.3% less).
-    return Response(content=gzip.compress(archive, compresslevel=6, mtime=0), media_type="application/gzip",
-                    headers=headers)
+    if since is not None and revision is None:
+        delta = _workspace_delta(root, prefix, since, resolved)
+        if delta is not None:
+            return Response(
+                content=delta,
+                media_type="application/gzip",
+                headers={**headers, "X-AIWiki-Workspace-Mode": "delta", "X-AIWiki-Base-Revision": since},
+            )
+    archive_path = _cached_workspace_archive(path, root, resolved, tree)
+    return FileResponse(archive_path, media_type="application/gzip", headers=headers)
 
 
 def _evidence(path: Path, request: dict) -> list[changeset.EvidenceFile]:
