@@ -2,8 +2,9 @@
 
 A workspace is a directory holding one bundle's published tree plus ``.ai-wiki/``:
 ``workspace.json`` ``{bundle, base_revision, actor, hashes[, discard]}``, ``base/`` (the
-pulled tree, never edited) and ``items/`` (frozen work-item evidence fetched for
-``--item``). Every file that differs from ``base/`` is part of the changeset. ``validate``
+pulled tree, never edited), ``items/`` (frozen work-item evidence fetched for
+``--item``) and ``lock`` (held while a pull or a changeset's build and verdict runs: see
+``_locked``). Every file that differs from ``base/`` is part of the changeset. ``validate``
 judges it with ``runtime.changeset.evaluate`` on ``base/``, the code the server's dry-run
 runs, so both reach one verdict in one format; ``propose`` sends it to ``POST /changesets``.
 
@@ -13,7 +14,9 @@ Exit codes: 0 ok, 1 an unexpected failure, 2 usage, 4 preflight or authorization
 from __future__ import annotations
 
 import base64
+import contextlib
 import difflib
+import fcntl
 import hashlib
 import io
 import json
@@ -36,6 +39,7 @@ from aiwiki.runtime import changeset
 META = ".ai-wiki"
 MINE = ".mine"
 PLACEHOLDER = b"ai-wiki local validation placeholder\n"  # stands in for a packet only when judging locally
+LOCK_WAIT_S = 900  # longer than a pull holds the lock: GET /workspace gives up within 2 x 300 + 20 s
 RETRY_DELAYS_S = (5, 15, 30)  # resends of the same bytes after an answer that settles nothing
 POLL_S = 5
 OK, USAGE, PREFLIGHT, REJECTED, CONFLICT, TRANSIENT, RATE_LIMITED = 0, 2, 4, 6, 7, 8, 11
@@ -140,6 +144,32 @@ def _extract(archive: bytes, target: Path) -> None:
                 continue  # a link out of the tree: never follow it
 
 
+@contextlib.contextmanager
+def _locked(root: Path):
+    """``<root>/.ai-wiki/lock``, held exclusively: one ai-wiki command at a time pulls the workspace
+    or reads its base. Two at once (a command the agent's tool moved to the background, then the
+    next one) unpacked into one ``incoming/``, and a pull deleted the workspace files the other's
+    half tree lacked, then recorded their hashes (an audit round lost 32 concepts' bodies,
+    2026-11-20). The kernel drops the lock with its process, so a killed command never holds it."""
+    path = root / META / "lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise WorkspaceError(f"{path} stayed held for {LOCK_WAIT_S} s by another ai-wiki command on "
+                                         "this workspace; run this again once that command ends", TRANSIENT) from None
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _actor() -> str | None:
     """The token's ``generated.by``; ``None`` for a member, whose changesets the writer refuses."""
     status, _headers, body = cli._http("GET", "/whoami")
@@ -155,15 +185,26 @@ def pull(root: Path, bundle: str) -> dict:
     version takes its place (a conflict). A path ``propose`` committed (``discard`` in
     ``workspace.json``) that still holds the committed bytes takes the server's version, and
     its ``.mine`` goes. A ``.ai-wiki/`` without ``workspace.json`` is a first pull that never
-    finished, so it is pulled into afresh.
+    finished, so it is pulled into afresh. A second pull of the workspace waits for the first
+    (``_locked``), then finds its result.
     """
+    if not (root / META).is_dir() and root.exists() and any(root.iterdir()):
+        raise WorkspaceError(f"{root} is not empty and not a workspace; pull into a new directory")
+    # A first pull asks for the actor before it writes anything, the lock file included.
+    actor = _ASK if (root / META / "workspace.json").exists() else _actor()
+    with _locked(root):
+        return _pull(root, bundle, actor)
+
+
+_ASK = object()  # the actor is not known yet: ask the writer once the tree is downloaded
+
+
+def _pull(root: Path, bundle: str, actor: str | None | object = _ASK) -> dict:
     meta, state = root / META, None
     if (meta / "workspace.json").exists():
         state = load(root)
         if state["bundle"] != bundle:
             raise WorkspaceError(f"{root} holds bundle {state['bundle']!r}, not {bundle!r}")
-    elif not meta.is_dir() and root.exists() and any(root.iterdir()):
-        raise WorkspaceError(f"{root} is not empty and not a workspace; pull into a new directory")
     changed, local = changes(root, state) if state else ({}, {})
     discard = (state or {}).get("discard") or {}
     base = _hashes(meta / "base") if state else {}
@@ -174,7 +215,7 @@ def pull(root: Path, bundle: str) -> dict:
     if status == 304:
         revision, actor, new = state["base_revision"], state["actor"], base
     elif status == 200 and reply.get("X-AIWiki-Revision"):
-        actor = _actor()  # for local stamping; asked before the workspace changes
+        actor = _actor() if actor is _ASK else actor  # for local stamping; asked before the workspace changes
         revision, incoming = reply["X-AIWiki-Revision"], meta / "incoming"
         shutil.rmtree(incoming, ignore_errors=True)
         _extract(body, incoming)
@@ -455,17 +496,18 @@ def _revert(root: Path, files: list[dict]) -> list[str]:
     """Put a parked item's paths back to the pulled base, their ``.mine`` copies too, so the
     next item's changeset does not carry them (design §4.6)."""
     reverted = []
-    for entry in files:
-        if entry["op"] == "deprecate":
-            continue  # never a local edit
-        base, target = root / META / "base" / entry["path"], root / entry["path"]
-        if base.is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(base, target)
-        else:
-            target.unlink(missing_ok=True)
-        target.with_name(target.name + MINE).unlink(missing_ok=True)
-        reverted.append(entry["path"])
+    with _locked(root):  # a base a pull is replacing would read as missing: the file would go
+        for entry in files:
+            if entry["op"] == "deprecate":
+                continue  # never a local edit
+            base, target = root / META / "base" / entry["path"], root / entry["path"]
+            if base.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(base, target)
+            else:
+                target.unlink(missing_ok=True)
+            target.with_name(target.name + MINE).unlink(missing_ok=True)
+            reverted.append(entry["path"])
     return reverted
 
 
@@ -485,7 +527,8 @@ def propose(root: Path, request: dict, evidence: Evidence, *, dry_run: bool = Fa
     if dry_run:  # the server's verdict is the authority; a dry-run writes nothing, so ask it directly
         status, result = submit(bundle, data, dry_run=True, wait=wait)
         return _exit(status), result
-    local = judge(root, state, request, evidence)
+    with _locked(root):  # never judged on a base a pull is replacing
+        local = judge(root, state, request, evidence)
     if local["status"] == "rejected":
         return verdict_code(local), local  # never sent
     status, result = submit(bundle, data, wait=wait)
@@ -500,9 +543,11 @@ def propose(root: Path, request: dict, evidence: Evidence, *, dry_run: bool = Fa
     if code == OK:
         committed = {entry["path"]: _sha(entry["content"].encode("utf-8"))
                      for entry in request["files"] if entry["op"] == "put"}
-        _write(root / META / "workspace.json", json.dumps(
-            {**state, "discard": {**(state.get("discard") or {}), **committed}}, indent=1).encode())
         try:
+            with _locked(root):  # onto the state as it is now: a pull may have run while the writer judged
+                state = load(root)
+                _write(root / META / "workspace.json", json.dumps(
+                    {**state, "discard": {**(state.get("discard") or {}), **committed}}, indent=1).encode())
             result["workspace"] = pull(root, bundle)
         except (WorkspaceError, OSError) as exc:
             result["workspace"] = {"error": str(exc), "hint": "committed; run: ai-wiki workspace pull"}
@@ -606,19 +651,22 @@ def run(a, bundle: str | None) -> int:
         diffs = {rel: _diff(_read(base / rel), _read(root / rel), rel) for rel in changes(root, state)[0]}
         print(json.dumps(diffs, ensure_ascii=False, indent=2) if a.json else "".join(diffs.values()), end="")
         return OK
-    request, evidence = build(root, state, **_changeset_options(a))
-    if a.cmd == "workspace":  # diff --stamped
-        result = judge(root, state, request, evidence)
-        if result["status"] == "rejected":
-            _print(result, a.json, name="validation", fields=("status", "http_status"))
+    with _locked(root):  # built and judged on one base: a pull waits, never half way through either
+        state = load(root)
+        request, evidence = build(root, state, **_changeset_options(a))
+        if a.cmd == "workspace":  # diff --stamped
+            result = judge(root, state, request, evidence)
+            if result["status"] == "rejected":
+                _print(result, a.json, name="validation", fields=("status", "http_status"))
+                return verdict_code(result)
+            diffs = {rel: _diff(_read(base / rel), text, rel) for rel, text in result["files"].items()}
+            print(json.dumps(diffs, ensure_ascii=False, indent=2) if a.json else "".join(diffs.values()), end="")
+            return OK
+        if a.cmd == "validate":
+            result = judge(root, state, request, evidence)
+            _print(result, a.json, name="validation",
+                   fields=("status", "http_status", "validation", "changeset_sha256"))
             return verdict_code(result)
-        diffs = {rel: _diff(_read(base / rel), text, rel) for rel, text in result["files"].items()}
-        print(json.dumps(diffs, ensure_ascii=False, indent=2) if a.json else "".join(diffs.values()), end="")
-        return OK
-    if a.cmd == "validate":
-        result = judge(root, state, request, evidence)
-        _print(result, a.json, name="validation", fields=("status", "http_status", "validation", "changeset_sha256"))
-        return verdict_code(result)
     code, result = propose(root, request, evidence, dry_run=a.dry_run, wait=a.wait)
     if not a.dry_run:
         from aiwiki.cli import maint
