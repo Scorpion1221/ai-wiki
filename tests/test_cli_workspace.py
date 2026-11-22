@@ -259,6 +259,107 @@ def test_a_first_pull_that_fails_can_be_pulled_again(gate, tmp_path, capsys, mon
     assert state(ws)["actor"] == CURATOR and not (ws / ".ai-wiki" / "incoming").exists()
 
 
+def _published(gate) -> dict[str, bytes]:
+    """The writer's tree as a pull writes it: the files ``GET /workspace`` serves."""
+    status, _headers, body = workspace.cli._http("GET", "/workspace", bundle="kb-a")
+    assert status == 200
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(body)) as tree:
+        return {member.name: tree.extractfile(member).read() for member in tree if member.isfile()}
+
+
+def test_two_pulls_of_one_workspace_never_drop_its_files(gate, ws, capsys, monkeypatch) -> None:
+    # 2026-11-20: a `review submit` the agent re-issued while the first still ran; both pulled, one
+    # emptied `incoming/` under the other, which deleted the workspace files its half tree lacked.
+    assert gate.post(gate.request()).json()["status"] == "done"  # both pulls download the new revision
+    extract, extracted, second_in, first_done = workspace._extract, *(threading.Event() for _ in range(3))
+
+    def interleaved(archive, target):
+        if threading.current_thread().name == "first":
+            extract(archive, target)
+            extracted.set()
+            second_in.wait(1)  # the second pull empties incoming/ meanwhile, unless it waits its turn
+        else:
+            second_in.set()
+            first_done.wait(1)
+            extract(archive, target)
+
+    monkeypatch.setattr(workspace, "_extract", interleaved)
+    failures: list[BaseException] = []
+
+    def pull() -> None:
+        try:
+            workspace.pull(ws, "kb-a")
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            failures.append(exc)
+
+    first = threading.Thread(target=pull, name="first")
+    first.start()
+    assert extracted.wait(10)
+    second = threading.Thread(target=pull, name="second")
+    second.start()
+    first.join(10)
+    first_done.set()
+    second.join(10)
+
+    assert failures == [] and not second_in.is_set()  # the second pull waited for the first: then a 304
+    published = _published(gate)
+    assert {rel: (ws / rel).read_bytes() for rel in published if (ws / rel).is_file()} == published
+    assert state(ws)["hashes"] == workspace._hashes(ws / ".ai-wiki" / "base")
+    assert state(ws)["base_revision"] == gate.head()
+
+
+def test_validate_waits_for_a_pull_replacing_the_base(gate, ws, capsys, monkeypatch) -> None:
+    # 2026-11-20: a propose the agent's tool moved to the background committed and pulled; the next
+    # validate copied .ai-wiki/base while that pull had removed it, and failed on a missing file.
+    assert gate.post(gate.request(gate.put(VIEWS, cite(gate.read(VIEWS))))).json()["status"] == "done"
+    (ws / METRIC).write_text(cited(gate.read(METRIC)), encoding="utf-8")
+    rmtree, removed, validated = workspace.shutil.rmtree, threading.Event(), threading.Event()
+
+    def slow_swap(path, *args, **kwargs):
+        rmtree(path, *args, **kwargs)
+        if threading.current_thread().name == "pull" and Path(path).name == "base":
+            removed.set()
+            validated.wait(1)  # validate runs now, unless it waits for the pull
+
+    monkeypatch.setattr(workspace.shutil, "rmtree", slow_swap)
+    puller = threading.Thread(target=workspace.pull, args=(ws, "kb-a"), name="pull")
+    puller.start()
+    assert removed.wait(10)
+    try:
+        code, verdict = wiki_json(capsys, "validate", *upload(ws))
+    finally:
+        validated.set()
+        puller.join(10)
+
+    assert code == 0 and verdict["status"] == "would_apply", verdict
+    assert state(ws)["base_revision"] == gate.head()
+
+
+def test_a_pull_that_cannot_take_the_lock_changes_nothing_and_says_so(gate, ws, capsys, monkeypatch) -> None:
+    import fcntl
+    import os
+
+    assert gate.post(gate.request()).json()["status"] == "done"
+    before, sent = state(ws), len(gate.calls)
+    monkeypatch.setattr(workspace, "LOCK_WAIT_S", 0.2)
+    held = os.open(ws / ".ai-wiki" / "lock", os.O_RDWR)
+    fcntl.flock(held, fcntl.LOCK_EX)  # another ai-wiki command on this workspace
+    try:
+        code, out = wiki(capsys, "workspace", "pull", "--dir", ws)
+        assert code == 8 and ".ai-wiki/lock" in out and "stayed held" in out
+        assert state(ws) == before and gate.calls[sent:] == []  # nothing asked of the writer either
+        code, out = wiki(capsys, "validate", *upload(ws))
+        assert code == 8 and "stayed held" in out
+    finally:
+        os.close(held)  # as when that command's process dies: the kernel drops its lock
+
+    code, pulled = wiki_json(capsys, "workspace", "pull", "--dir", ws)
+    assert code == 0 and pulled["base_revision"] == gate.head() != before["base_revision"]
+
+
 def test_pull_downloads_the_tree_again_when_its_base_is_damaged(gate, ws, capsys) -> None:
     mine = cited(gate.read(METRIC), "My own claim.")
     (ws / METRIC).write_text(mine, encoding="utf-8")
