@@ -97,7 +97,8 @@ def test_the_auditor_skill_covers_its_loop_and_never_curates(root) -> None:
     # self-update preflight left 199/200, no room for the next small fix. 2026-11-01 to 230: the
     # Signals check of §3.3 (aliases, stale_after, supersession) left 226/220.
     # 2026-11-21 (0.3.41) to 240: reason: correction convergence rule (§3.1) and single-pass narrowing (§3.4).
-    assert len(text.splitlines()) <= 240
+    # 2026-11-22 (0.3.44) to 245: align alias audit rule with curator Signals and prevent alias-only churn (§3.3).
+    assert len(text.splitlines()) <= 245
     verbs = {resolve(root, command)[0] for command in commands(text)}
     assert verbs == {"update", "skill", "--version", "doctor", "review begin", "review next", "review evidence",
                      "review verdict", "review submit", "review triage next", "review triage verdict",
@@ -248,3 +249,26 @@ def test_installed_auditor_skill_converges_correction_rereviews_and_narrows_in_o
     assert "所有实质主张都已有依据、无矛盾且边界清楚" in corr_bullet and "直接记 verified" in corr_bullet
     assert "按 Skill §3.3/§3.4 记 unverified" in corr_bullet
     assert "不要为措辞润色或格式微调再次修正" in corr_bullet
+
+
+def test_installed_curator_and_auditor_skills_align_alias_rules_without_alias_only_churn(tmp_path: Path) -> None:
+    """2026-11-22 (0.3.44): 200/1,149 auditor corrections touched aliases (27 alias-only; 138 code/event
+    identifiers added per curator Signals and deleted by auditor). Align both skills cleanly."""
+    rows = skills.install(tmp_path)
+    assert {row["status"] for row in rows} == {"installed"}
+
+    curator = (tmp_path / "okf-knowledge-curator" / "SKILL.md").read_text(encoding="utf-8")
+    aliases_bullet = _section(curator, "- **Aliases.**", "\n- **`stale_after`.**")
+    assert "only the concept's own primary defining identifiers" in aliases_bullet
+    assert "that is this concept's subject" in aliases_bullet
+    assert "never incidental or proposed code symbols, component names or sub-tickets" in aliases_bullet
+    assert "no status, number, count, duration or date" in aliases_bullet
+
+    auditor = (tmp_path / "ai-wiki-auditor" / "SKILL.md").read_text(encoding="utf-8")
+    signals_bullet = _section(auditor, "- okf-knowledge-curator's Signals are claims too.", "\n### 3.4 ")
+    assert "stating a status, number, date or unsupported factual claim, or naming a different topic" in signals_bullet
+    assert "keep a concept's own primary defining identifier grounded in cited evidence" in signals_bullet
+    assert (
+        "never mark a concept `corrected` solely to trim a harmless search alias when every material claim is "
+        "already supported" in signals_bullet
+    )
