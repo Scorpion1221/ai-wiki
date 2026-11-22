@@ -338,6 +338,47 @@ def test_validate_waits_for_a_pull_replacing_the_base(gate, ws, capsys, monkeypa
     assert state(ws)["base_revision"] == gate.head()
 
 
+def test_a_pull_while_propose_waits_for_the_writer_keeps_the_commit_out_of_conflicts(
+        gate, operator, ws, capsys, tmp_path, monkeypatch) -> None:
+    # A propose the agent's tool moved to the background, and the agent's next pull: that pull's
+    # workspace.json must not drop the discard the commit records, or the commit comes back as .mine.
+    assert gate.post(gate.request(gate.put(VIEWS, cite(gate.read(VIEWS))))).json()["status"] == "done"
+    (ws / METRIC).write_text(cited(gate.read(METRIC)), encoding="utf-8")
+    extract, write, submit = workspace._extract, workspace._write, workspace.submit
+    pulling, discarded = threading.Event(), threading.Event()
+
+    def held(archive, target):
+        if threading.current_thread().name == "pull":
+            pulling.set()
+            discarded.wait(1)  # the propose records discard now, unless it waits for this pull
+        extract(archive, target)
+
+    def noted(path, data):
+        write(path, data)
+        if path.name == "workspace.json" and b'"discard"' in data:
+            discarded.set()
+
+    puller = threading.Thread(target=workspace.pull, args=(ws, "kb-a"), name="pull")
+
+    def submit_beside_a_pull(*args, **kwargs):
+        puller.start()
+        assert pulling.wait(10)
+        return submit(*args, **kwargs)
+
+    monkeypatch.setattr(workspace, "_extract", held)
+    monkeypatch.setattr(workspace, "_write", noted)
+    monkeypatch.setattr(workspace, "submit", submit_beside_a_pull)
+    try:
+        code, receipt = wiki_json(capsys, "propose", *upload(ws), "--state-dir", tmp_path / "st")
+    finally:
+        puller.join(10)
+
+    assert code == 0 and receipt["workspace"]["conflicts"] == [], receipt
+    assert not (ws / f"{METRIC}.mine").exists()
+    assert (ws / METRIC).read_bytes() == (gate.writer / METRIC).read_bytes()
+    assert state(ws)["base_revision"] == gate.head() and "discard" not in state(ws)
+
+
 def test_a_pull_that_cannot_take_the_lock_changes_nothing_and_says_so(gate, ws, capsys, monkeypatch) -> None:
     import fcntl
     import os

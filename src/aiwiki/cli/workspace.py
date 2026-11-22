@@ -543,9 +543,11 @@ def propose(root: Path, request: dict, evidence: Evidence, *, dry_run: bool = Fa
     if code == OK:
         committed = {entry["path"]: _sha(entry["content"].encode("utf-8"))
                      for entry in request["files"] if entry["op"] == "put"}
-        _write(root / META / "workspace.json", json.dumps(
-            {**state, "discard": {**(state.get("discard") or {}), **committed}}, indent=1).encode())
         try:
+            with _locked(root):  # onto the state as it is now: a pull may have run while the writer judged
+                state = load(root)
+                _write(root / META / "workspace.json", json.dumps(
+                    {**state, "discard": {**(state.get("discard") or {}), **committed}}, indent=1).encode())
             result["workspace"] = pull(root, bundle)
         except (WorkspaceError, OSError) as exc:
             result["workspace"] = {"error": str(exc), "hint": "committed; run: ai-wiki workspace pull"}
