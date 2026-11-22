@@ -407,7 +407,8 @@ def _create_related_tables(con: sqlite3.Connection) -> None:
         con.execute("COMMIT")
     except Exception:
         if con.in_transaction:
-            con.execute("ROLLBACK")
+            with contextlib.suppress(sqlite3.Error):
+                con.execute("ROLLBACK")
         raise
 
 
@@ -590,7 +591,8 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
             con.execute("COMMIT")
         except Exception:
             if con.in_transaction:
-                con.execute("ROLLBACK")
+                with contextlib.suppress(sqlite3.Error):
+                    con.execute("ROLLBACK")
             raise
 
     return id_to_rel, valid_ids
@@ -703,9 +705,9 @@ def _related(
         return []
     if index_path is None:
         return _related_direct(root, document, frozen, cited, identifiers=identifiers)
-    con: sqlite3.Connection | None = None
     try:
         with _related_locked(index_path):
+            con: sqlite3.Connection | None = None
             try:
                 con = _open_related_index(index_path)
                 id_to_rel, valid_ids = _sync_related_index(con, root, frozen)
@@ -717,13 +719,13 @@ def _related(
                     con = None
                 if _is_corrupt_error(exc):
                     _unlink_sqlite(index_path)
-                return _related_direct(root, document, frozen, cited, identifiers=identifiers)
+            finally:
+                if con is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        con.close()
     except OSError:
-        return _related_direct(root, document, frozen, cited, identifiers=identifiers)
-    finally:
-        if con is not None:
-            with contextlib.suppress(sqlite3.Error):
-                con.close()
+        pass
+    return _related_direct(root, document, frozen, cited, identifiers=identifiers)
 
 
 def evidence(state_dir: Path, bundle: str | None, path: str, config: Path) -> tuple[int, dict]:

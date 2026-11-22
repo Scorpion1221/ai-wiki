@@ -1391,6 +1391,7 @@ def test_review_evidence_related_compaction_corruption_unicode_and_concurrency(t
     serialization, and `review.end()` index cleanup."""
     import array
     import concurrent.futures
+    import contextlib
     import sqlite3
 
     from aiwiki.cli import maint
@@ -1496,6 +1497,49 @@ def test_review_evidence_related_compaction_corruption_unicode_and_concurrency(t
     code, _summary = verbs.end(state, "kb", RUN)
     assert code == 0
     assert not end_db.exists()
+
+    # 7. Lock lifecycle: con.close() completes BEFORE flock release, and _related_direct() runs AFTER release
+    events: list[str] = []
+    real_locked = verbs._related_locked
+    real_open = verbs._open_related_index
+    real_direct = verbs._related_direct
+
+    class _TrackedCon:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            events.append("con_close")
+            return self._inner.close()
+
+    @contextlib.contextmanager
+    def _tracked_lock(path):
+        with real_locked(path):
+            events.append("lock_enter")
+            try:
+                yield
+            finally:
+                events.append("lock_exit")
+
+    def _tracked_direct(*a, **kw):
+        events.append("direct_fallback")
+        return real_direct(*a, **kw)
+
+    monkeypatch.setattr(verbs, "_related_locked", _tracked_lock)
+    monkeypatch.setattr(verbs, "_open_related_index", lambda p: _TrackedCon(real_open(p)))
+    monkeypatch.setattr(verbs, "_related_direct", _tracked_direct)
+    assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == cur_expected
+    assert events == ["lock_enter", "con_close", "lock_exit"]
+
+    events.clear()
+    with sqlite3.connect(str(index_db)) as con:
+        con.execute("UPDATE tokens SET doc_ids = X'010203' WHERE token = 'AlphaSym'")
+        con.commit()
+    assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == cur_expected
+    assert events == ["lock_enter", "con_close", "lock_exit", "direct_fallback"]
 
 
 def test_review_next_skips_the_corrections_its_own_run_wrote(gate, capsys, monkeypatch) -> None:
