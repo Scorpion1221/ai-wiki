@@ -39,7 +39,8 @@ Presets (the id is also the actor stamped into generated.by / verified[].by; a m
                      solvely-wiki and solvely-wiki-shadow; 120/h, 800/day, 10 deprecations/day
   shadow-maintainer  process:ai-wiki-maintainer-shadow  aiw_c_  as maintainer, solvely-wiki-shadow only;
                      30/h, 150/day, 10 deprecations/day
-  auditor            process:ai-wiki-auditor            aiw_a_  read, audit; both bundles; 2000 reviews/day
+  auditor            process:ai-wiki-auditor            aiw_a_  read, audit; both bundles;
+                     120/h, 800/day, 2000 reviews/day
                      phase 4a: not before the Auditor agent runs as its own OS user (D2)
   watchdog           process:ai-wiki-watchdog           aiw_r_  read
   member             member:<name> (--id required)      aiw_m_  read, submit
