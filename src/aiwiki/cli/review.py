@@ -31,6 +31,7 @@ import argparse
 import array
 import collections
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -75,9 +76,10 @@ _LINK_TARGET = re.compile(r"\]\([^)]*\)")  # a concept link names a concept, not
 _RELATED_WORD_B = re.compile(rb"[A-Za-z0-9_]+")
 _RELATED_WORD_S = re.compile(r"[A-Za-z0-9_]+")
 _RELATED_INDEX = "related-index.sqlite"
-_RELATED_SCHEMA = f"1-{sys.byteorder}-{array.array('I').itemsize}"
+_RELATED_SCHEMA = f"2-{sys.byteorder}-{array.array('I').itemsize}"
 _RELATED_RACY_NS = 2_000_000_000  # 2 s racy-clean guard, matching workspace._RACY_NS
 _RELATED_MAX_STALE_IDS = 500
+_RELATED_LOCK_WAIT_S = 60.0
 RELATED, COMMON = 5, 30  # rows shown; an identifier in more sources than this distinguishes nothing
 
 
@@ -300,9 +302,16 @@ def _identifiers(document) -> set[str]:
     return found
 
 
-def _related_direct(root: Path, document, frozen: dict, cited: set[str]) -> list[dict]:
+def _related_direct(
+    root: Path,
+    document,
+    frozen: dict,
+    cited: set[str],
+    *,
+    identifiers: set[str] | None = None,
+) -> list[dict]:
     """Direct full-tree scan reference implementation for ``_related`` (also used as fallback)."""
-    identifiers = _identifiers(document)
+    identifiers = _identifiers(document) if identifiers is None else identifiers
     if not identifiers:
         return []
     holds: dict[str, set[str]] = {}
@@ -330,6 +339,13 @@ def _related_direct(root: Path, document, frozen: dict, cited: set[str]) -> list
     return sorted(rows, key=lambda row: (-row["matches"], row["source"]))[:RELATED]
 
 
+def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+_NULL_STAT = (None, None, None, None, None)
+
+
 def _unlink_sqlite(index_path: Path) -> None:
     for suffix in ("", "-wal", "-shm"):
         p = Path(f"{index_path}{suffix}")
@@ -338,19 +354,61 @@ def _unlink_sqlite(index_path: Path) -> None:
                 p.unlink()
 
 
+@contextlib.contextmanager
+def _related_locked(index_path: Path):
+    """Exclusive flock on ``<index_path>.lock`` serializing schema init, sync and query across
+    concurrent commands on the same review run (matching ``workspace._locked``)."""
+    if index_path.is_dir():
+        raise OSError(f"{index_path} is a directory")
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = Path(f"{index_path}.lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + _RELATED_LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{lock_path} stayed locked for {_RELATED_LOCK_WAIT_S}s") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _is_corrupt_error(exc: Exception) -> bool:
+    if isinstance(exc, (ValueError, TypeError, OverflowError)):
+        return True
+    if isinstance(exc, sqlite3.DatabaseError):
+        msg = str(exc).lower()
+        return any(k in msg for k in ("not a database", "malformed", "corrupt", "no such table", "no such column"))
+    return False
+
+
 def _create_related_tables(con: sqlite3.Connection) -> None:
-    con.executescript(
-        "DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS tokens;"
-        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;"
-        "CREATE TABLE files (id INTEGER PRIMARY KEY, rel TEXT UNIQUE, size INTEGER, "
-        "mtime_ns INTEGER, sha256 TEXT, indexed INTEGER);"
-        "CREATE TABLE tokens (token TEXT PRIMARY KEY, doc_count INTEGER, doc_ids BLOB) WITHOUT ROWID;"
-    )
-    con.executemany(
-        "INSERT INTO meta VALUES (?, ?)",
-        (("schema", _RELATED_SCHEMA), ("max_fid", "0"), ("stale_ids", "0")),
-    )
-    con.commit()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        con.execute("DROP TABLE IF EXISTS meta")
+        con.execute("DROP TABLE IF EXISTS files")
+        con.execute("DROP TABLE IF EXISTS tokens")
+        con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID")
+        con.execute(
+            "CREATE TABLE files (rel TEXT PRIMARY KEY, id INTEGER NOT NULL, "
+            "dev INTEGER, ino INTEGER, size INTEGER, mtime_ns INTEGER, ctime_ns INTEGER, "
+            "sha256 TEXT NOT NULL, indexed INTEGER NOT NULL) WITHOUT ROWID"
+        )
+        con.execute("CREATE TABLE tokens (token TEXT PRIMARY KEY, doc_count INTEGER, doc_ids BLOB) WITHOUT ROWID")
+        con.executemany(
+            "INSERT INTO meta VALUES (?, ?)",
+            (("schema", _RELATED_SCHEMA), ("max_fid", "0"), ("stale_ids", "0")),
+        )
+        con.execute("COMMIT")
+    except Exception:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
 
 
 def _open_related_index(index_path: Path) -> sqlite3.Connection:
@@ -358,7 +416,7 @@ def _open_related_index(index_path: Path) -> sqlite3.Connection:
         raise OSError(f"{index_path} is a directory")
     index_path.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(2):
-        con = sqlite3.connect(str(index_path), timeout=30.0)
+        con = sqlite3.connect(str(index_path), timeout=30.0, isolation_level=None)
         try:
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA synchronous=NORMAL")
@@ -378,8 +436,7 @@ def _open_related_index(index_path: Path) -> sqlite3.Connection:
             return con
         except sqlite3.DatabaseError as exc:
             con.close()
-            msg = str(exc).lower()
-            if attempt == 0 and any(k in msg for k in ("not a database", "malformed", "corrupt")):
+            if attempt == 0 and _is_corrupt_error(exc):
                 _unlink_sqlite(index_path)
                 continue
             raise
@@ -391,10 +448,10 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
     meta = dict(con.execute("SELECT key, value FROM meta").fetchall())
     max_fid = int(meta.get("max_fid", "0"))
     stale_ids = int(meta.get("stale_ids", "0"))
-    cached = {
-        rel: (fid, size, mtime_ns, sha, indexed)
-        for fid, rel, size, mtime_ns, sha, indexed in con.execute(
-            "SELECT id, rel, size, mtime_ns, sha256, indexed FROM files"
+    cached: dict[str, tuple[int, tuple, str, int]] = {
+        rel: (fid, (dev, ino, size, mtime_ns, ctime_ns), sha, indexed)
+        for rel, fid, dev, ino, size, mtime_ns, ctime_ns, sha, indexed in con.execute(
+            "SELECT rel, id, dev, ino, size, mtime_ns, ctime_ns, sha256, indexed FROM files"
         )
     }
 
@@ -407,7 +464,7 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
     id_to_rel: dict[int, str] = {}
     valid_ids: set[int] = set()
     delta_postings: dict[str, array.array] = collections.defaultdict(lambda: array.array("I"))
-    upserts: list[tuple[int, str, int, int, str, int]] = []
+    upserts: list[tuple] = []
     deletes: list[str] = []
 
     for rel_s in sorted(eligible):
@@ -421,18 +478,18 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
         if st is None or not stat_mod.S_ISREG(st.st_mode):
             if cur is not None:
                 deletes.append(rel_s)
-                if cur[4] == 1:
+                if cur[3] == 1:
                     stale_ids += 1
             continue
 
-        if (
-            cur is not None
-            and cur[1] == st.st_size
-            and cur[2] == st.st_mtime_ns
-            and (now_ns - st.st_mtime_ns) >= _RELATED_RACY_NS
-        ):
-            if cur[3] == recorded:
-                if cur[4] == 1:
+        key = _stat_key(st)
+        cacheable = (
+            (now_ns - st.st_mtime_ns) >= _RELATED_RACY_NS
+            and (now_ns - st.st_ctime_ns) >= _RELATED_RACY_NS
+        )
+        if cur is not None and cacheable and cur[1] == key:
+            if cur[2] == recorded:
+                if cur[3] == 1:
                     id_to_rel[cur[0]] = rel_s
                     valid_ids.add(cur[0])
                     continue
@@ -441,19 +498,28 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
                 continue
 
         data = file.read_bytes()
+        stored = _NULL_STAT
+        if cacheable:
+            try:
+                if _stat_key(os.lstat(file)) == key:
+                    stored = key
+            except OSError:
+                stored = _NULL_STAT
+
         sha = hashlib.sha256(data).hexdigest()
-        if cur is not None and cur[3] == sha:
-            fid, indexed = cur[0], cur[4]
+        if cur is not None and cur[2] == sha:
+            fid, indexed = cur[0], cur[3]
             if sha == recorded and indexed == 0:
                 for tok in set(_RELATED_WORD_B.findall(data)):
                     delta_postings[tok.decode("ascii")].append(fid)
                 indexed = 1
-            upserts.append((fid, rel_s, st.st_size, st.st_mtime_ns, sha, indexed))
+            if cur[1] != stored or cur[3] != indexed:
+                upserts.append((rel_s, fid, *stored, sha, indexed))
             if sha == recorded:
                 id_to_rel[fid] = rel_s
                 valid_ids.add(fid)
         else:
-            if cur is not None and cur[4] == 1:
+            if cur is not None and cur[3] == 1:
                 stale_ids += 1
             max_fid += 1
             fid = max_fid
@@ -464,12 +530,12 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
                 indexed = 1
                 id_to_rel[fid] = rel_s
                 valid_ids.add(fid)
-            upserts.append((fid, rel_s, st.st_size, st.st_mtime_ns, sha, indexed))
+            upserts.append((rel_s, fid, *stored, sha, indexed))
 
     for rel_s, cur in cached.items():
         if rel_s not in eligible:
             deletes.append(rel_s)
-            if cur[4] == 1:
+            if cur[3] == 1:
                 stale_ids += 1
 
     if stale_ids > _RELATED_MAX_STALE_IDS:
@@ -477,14 +543,17 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
         return _sync_related_index(con, root, frozen)
 
     if deletes or upserts or delta_postings:
-        with con:
+        con.execute("BEGIN IMMEDIATE")
+        try:
             if deletes:
                 con.executemany("DELETE FROM files WHERE rel = ?", ((r,) for r in deletes))
             if upserts:
                 con.executemany(
-                    "INSERT INTO files (id, rel, size, mtime_ns, sha256, indexed) VALUES (?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(rel) DO UPDATE SET id=excluded.id, size=excluded.size, "
-                    "mtime_ns=excluded.mtime_ns, sha256=excluded.sha256, indexed=excluded.indexed",
+                    "INSERT INTO files (rel, id, dev, ino, size, mtime_ns, ctime_ns, sha256, indexed) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(rel) DO UPDATE SET id=excluded.id, dev=excluded.dev, ino=excluded.ino, "
+                    "size=excluded.size, mtime_ns=excluded.mtime_ns, ctime_ns=excluded.ctime_ns, "
+                    "sha256=excluded.sha256, indexed=excluded.indexed",
                     upserts,
                 )
             if delta_postings:
@@ -494,6 +563,8 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
                     chunk = tok_keys[off:off + 500]
                     q = ",".join("?" * len(chunk))
                     for tok, blob in con.execute(f"SELECT token, doc_ids FROM tokens WHERE token IN ({q})", chunk):
+                        if not isinstance(blob, (bytes, bytearray)):
+                            raise TypeError("corrupt tokens.doc_ids payload")
                         arr = array.array("I")
                         arr.frombytes(blob)
                         existing[tok] = arr
@@ -516,6 +587,11 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (("max_fid", str(max_fid)), ("stale_ids", str(stale_ids))),
             )
+            con.execute("COMMIT")
+        except Exception:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
 
     return id_to_rel, valid_ids
 
@@ -523,12 +599,11 @@ def _sync_related_index(con: sqlite3.Connection, root: Path, frozen: dict) -> tu
 def _related_query(
     con: sqlite3.Connection,
     root: Path,
-    document,
+    identifiers: set[str],
     cited: set[str],
     id_to_rel: dict[int, str],
     valid_ids: set[int],
 ) -> list[dict]:
-    identifiers = _identifiers(document)
     if not identifiers:
         return []
     needed_toks: set[str] = set()
@@ -547,6 +622,8 @@ def _related_query(
         for tok, cnt, blob in con.execute(
             f"SELECT token, doc_count, doc_ids FROM tokens WHERE token IN ({q})", chunk
         ):
+            if not isinstance(blob, (bytes, bytearray)):
+                raise TypeError("corrupt tokens.doc_ids payload")
             arr = array.array("I")
             arr.frombytes(blob)
             tok_map[tok] = (cnt, arr)
@@ -558,7 +635,7 @@ def _related_query(
             entry = tok_map.get(name)
             if not entry:
                 continue
-            valid_docs = [doc_id for doc_id in entry[1] if doc_id in valid_ids]
+            valid_docs = {doc_id for doc_id in entry[1] if doc_id in valid_ids}
             if len(valid_docs) > COMMON:
                 continue  # exact early-out: stated[name] > COMMON is always dropped
             for doc_id in valid_docs:
@@ -621,15 +698,28 @@ def _related(
     identifier that more than ``COMMON`` sources state is dropped. Client-side only: the writer
     keeps no index, so this reads the workspace the run pulled (using a compact run-scoped SQLite
     inverted index when ``index_path`` is given, falling back cleanly to a direct scan)."""
+    identifiers = _identifiers(document)
+    if not identifiers:
+        return []
     if index_path is None:
-        return _related_direct(root, document, frozen, cited)
+        return _related_direct(root, document, frozen, cited, identifiers=identifiers)
     con: sqlite3.Connection | None = None
     try:
-        con = _open_related_index(index_path)
-        id_to_rel, valid_ids = _sync_related_index(con, root, frozen)
-        return _related_query(con, root, document, cited, id_to_rel, valid_ids)
-    except (OSError, sqlite3.Error):
-        return _related_direct(root, document, frozen, cited)
+        with _related_locked(index_path):
+            try:
+                con = _open_related_index(index_path)
+                id_to_rel, valid_ids = _sync_related_index(con, root, frozen)
+                return _related_query(con, root, identifiers, cited, id_to_rel, valid_ids)
+            except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError) as exc:
+                if con is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        con.close()
+                    con = None
+                if _is_corrupt_error(exc):
+                    _unlink_sqlite(index_path)
+                return _related_direct(root, document, frozen, cited, identifiers=identifiers)
+    except OSError:
+        return _related_direct(root, document, frozen, cited, identifiers=identifiers)
     finally:
         if con is not None:
             with contextlib.suppress(sqlite3.Error):
@@ -1001,6 +1091,7 @@ def end(state_dir: Path, bundle: str | None, run: str) -> tuple[int, dict]:
     if (maint._read(_pointer(state_dir, state["bundle"])) or {}).get("run") == run:
         _pointer(state_dir, state["bundle"]).unlink()
     try:  # disk housekeeping never fails the run's summary
+        _unlink_sqlite(_folder(state_dir, run) / _RELATED_INDEX)
         pruned = maint.prune_workspaces(state_dir, "reviews")
     except OSError:
         pruned = None

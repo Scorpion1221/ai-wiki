@@ -1250,7 +1250,7 @@ def test_review_evidence_related_uses_incremental_sqlite_index_and_matches_direc
     ws = tmp_path / "ws"
     (ws / "features").mkdir(parents=True)
     (ws / "sources" / "inbox").mkdir(parents=True)
-    # Build > COMMON files for `too_common_id` / `common/path.js` (COMMON+1 including cited.md)
+    # Build COMMON+11 files for `too_common_id` / `common/path.js` (to prove > COMMON early-stop halts reads)
     # and EXACTLY COMMON files for `exact_common_id` / `exact/common.js` (cited.md + match-a + COMMON-2 noise).
     sources = {
         "sources/cited.md": "GraphJsxController app/controller/graphJsx.js WAIO-9901 `foo bar` `route_测试` "
@@ -1263,7 +1263,7 @@ def test_review_evidence_related_uses_incremental_sqlite_index_and_matches_direc
         **{
             f"sources/noise-{n:02d}.md": "too_common_id common/path.js"
             + (" exact_common_id exact/common.js\n" if n < verbs.COMMON - 2 else "\n")
-            for n in range(verbs.COMMON)
+            for n in range(verbs.COMMON + 10)
         },
     }
     for rel, text in sources.items():
@@ -1308,12 +1308,11 @@ def test_review_evidence_related_uses_incremental_sqlite_index_and_matches_direc
     assert "too_common_id" not in found["related"][0]["identifiers"]
     assert "common/path.js" not in found["related"][0]["identifiers"]
 
-    # 2. Age mtimes past the racy window -> warm run does NOT re-read untouched/unrelated source files
-    old_t = time.time() - 60
-    for p in (ws / "sources").rglob("*.md"):
-        if not p.is_symlink():
-            os.utime(p, (old_t, old_t))
-    # One pass records the aged mtimes
+    # 2. Advance clock past the 2s racy window -> record stat keys once, then warm run skips untouched files
+    #    AND halts compound `common/path.js` disk reads at COMMON+1 candidates instead of reading all COMMON+10.
+    real_time_ns = time.time_ns
+    clock_offset = 10_000_000_000  # +10s
+    monkeypatch.setattr(verbs.time, "time_ns", lambda: real_time_ns() + clock_offset)
     assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == expected
 
     reads: list[str] = []
@@ -1326,11 +1325,15 @@ def test_review_evidence_related_uses_incremental_sqlite_index_and_matches_direc
 
     monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
     warm = verbs._related(ws, doc, ledger, cited, index_path=index_db)
-    monkeypatch.undo()
+    monkeypatch.setattr(Path, "read_bytes", real_read_bytes)
     assert warm == expected
     assert "untouched.md" not in reads  # untouched source was never re-read on warm call
+    noise_reads = [name for name in reads if name.startswith("noise-")]
+    # exact/common.js reads COMMON-2 noise files; common/path.js must stop after COMMON+1 total hits
+    assert len(set(noise_reads)) <= verbs.COMMON + 1 < verbs.COMMON + 10
 
-    # 3. Incremental updates: add new source, fix drifted file's ledger entry, delete match-b.md
+    # 3. Incremental updates at current clock (racy): add brand-new.md, fix drifted.md, delete match-b.md
+    monkeypatch.setattr(verbs.time, "time_ns", real_time_ns)
     new_text = "GraphJsxController WAIO-9901 app/controller/graphJsx.js `foo bar` `route_测试`\n"
     (ws / "sources" / "brand-new.md").write_text(new_text, encoding="utf-8")
     ledger["sources/brand-new.md"] = hashlib.sha256(new_text.encode()).hexdigest()
@@ -1345,27 +1348,154 @@ def test_review_evidence_related_uses_incremental_sqlite_index_and_matches_direc
         "sources/brand-new.md", "sources/match-a.md", "sources/drifted.md",
     ]
     assert "sources/match-b.md" not in [r["source"] for r in after_inc]
+    # Because brand-new.md was hashed inside the 2s racy window, its stat cache fields remain NULL
+    with sqlite3.connect(str(index_db)) as con:
+        row = con.execute("SELECT mtime_ns FROM files WHERE rel = 'sources/brand-new.md'").fetchone()
+        assert row == (None,)
 
-    # 4. Racy-clean guard: same-length rewrite within 2s window with same mtime is still detected
-    # even when the ledger still holds the old hash (cur.sha == recorded -> would falsely stay valid
-    # without the 2s racy window)
+    # 4. Racy-clean guard (post-2s): rewrite brand-new.md with same length & same mtime right after hashing,
+    #    then advance clock PAST 2s -> MUST still detect rewrite even when ledger keeps old sha & clock > 2s
     same_len = "X" * len(new_text.encode())
     st_before = (ws / "sources" / "brand-new.md").stat()
     (ws / "sources" / "brand-new.md").write_text(same_len, encoding="utf-8")
     os.utime(ws / "sources" / "brand-new.md", ns=(st_before.st_atime_ns, st_before.st_mtime_ns))
+    monkeypatch.setattr(verbs.time, "time_ns", lambda: real_time_ns() + 10_000_000_000)
     after_racy = verbs._related(ws, doc, ledger, cited, index_path=index_db)
     assert after_racy == verbs._related_direct(ws, doc, ledger, cited)
     assert "sources/brand-new.md" not in [r["source"] for r in after_racy]
 
-    # 5. Corrupt SQLite file or unwritable path falls back cleanly without failing
+    # 5. Valid -> valid in-place source rewrite with matching ledger hash replaces old-fid tokens cleanly
+    updated_a = "GraphJsxController app/controller/graphJsx.js only\n"
+    (ws / "sources" / "match-a.md").write_text(updated_a, encoding="utf-8")
+    ledger["sources/match-a.md"] = hashlib.sha256(updated_a.encode()).hexdigest()
+    after_mod = verbs._related(ws, doc, ledger, cited, index_path=index_db)
+    assert after_mod == verbs._related_direct(ws, doc, ledger, cited)
+    row_a = next(r for r in after_mod if r["source"] == "sources/match-a.md")
+    assert "exact_common_id" not in row_a["identifiers"]
+    assert "app/controller/graphJsx.js" in row_a["identifiers"]
+
+    # 6. Corrupt SQLite header auto-rebuilds in-place; unwritable dir falls back without creating .lock
     index_db.write_bytes(b"not a sqlite database")
-    assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == after_racy
-    # Rebuilt valid SQLite after corrupt file
+    assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == after_mod
     with sqlite3.connect(str(index_db)) as con:
         assert con.execute("SELECT COUNT(*) FROM files").fetchone()[0] > 0
     unwritable = tmp_path / "dir-as-db"
     unwritable.mkdir()
-    assert verbs._related(ws, doc, ledger, cited, index_path=unwritable) == after_racy
+    assert verbs._related(ws, doc, ledger, cited, index_path=unwritable) == after_mod
+    assert not Path(f"{unwritable}.lock").exists()
+
+
+def test_review_evidence_related_compaction_corruption_unicode_and_concurrency(tmp_path, monkeypatch) -> None:
+    """2026-11-22 (0.3.44): Covers stale-ID compaction, schema mismatch rebuild, non-UTF-8 + U+FFFD
+    identifiers, corrupt row payload self-healing, empty-identifier fast return, concurrent cold build
+    serialization, and `review.end()` index cleanup."""
+    import array
+    import concurrent.futures
+    import sqlite3
+
+    from aiwiki.cli import maint
+    from aiwiki.cli import review as verbs
+    from aiwiki.engine.document import parse_document
+
+    ws = tmp_path / "ws"
+    (ws / "features").mkdir(parents=True)
+    (ws / "sources").mkdir(parents=True)
+
+    # Non-UTF-8 raw bytes (\xff\xfe) adjacent to identifiers + exact COMMON (30) pure-word boundary
+    raw_sources: dict[str, bytes] = {
+        "sources/cited.md": b"AlphaSym \xff\xfe route_\xff_id exact_thirty_tok\n",
+        "sources/bin-match.md": b"AlphaSym \xff route_\xfe_id exact_thirty_tok BetaSym\n",
+        "sources/swap.md": b"AlphaSym BetaSym\n",
+        **{f"sources/c-{n:02d}.md": b"exact_thirty_tok\n" for n in range(verbs.COMMON - 2)},
+    }
+    ledger: dict[str, str] = {}
+    for rel, raw in raw_sources.items():
+        (ws / rel).write_bytes(raw)
+        ledger[rel] = hashlib.sha256(raw).hexdigest()
+
+    # Concept includes a U+FFFD compound identifier exercising use_str=True, plus pure-word identifiers
+    doc = parse_document(
+        "---\ntype: Feature\ntitle: Binary Match\nsources:\n- {id: s, resource: /sources/cited.md}\n---\n"
+        "# Summary\n\n`AlphaSym` `BetaSym` `exact_thirty_tok` `route_\ufffd_id`.\n"
+    )
+    cited = {"sources/cited.md"}
+    expected = verbs._related_direct(ws, doc, ledger, cited)
+    assert any(
+        r["source"] == "sources/bin-match.md" and "route_\ufffd_id" in r["identifiers"]
+        and "exact_thirty_tok" in r["identifiers"]
+        for r in expected
+    )
+
+    # 1. Empty identifiers short-circuit before touching SQLite
+    empty_doc = parse_document("---\ntype: Feature\ntitle: 无标识符\n---\n# Summary\n\n纯中文。\n")
+    empty_db = tmp_path / "never-created.sqlite"
+    assert verbs._related(ws, empty_doc, ledger, cited, index_path=empty_db) == []
+    assert not empty_db.exists()
+
+    # 2. Concurrent cold builds serialize via flock: zero duplicate doc_ids & exact COMMON parity
+    index_db = tmp_path / "run" / verbs._RELATED_INDEX
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: verbs._related(ws, doc, ledger, cited, index_path=index_db), range(4)))
+    for res in results:
+        assert res == expected
+    with sqlite3.connect(str(index_db)) as con:
+        blob = con.execute("SELECT doc_ids FROM tokens WHERE token = 'exact_thirty_tok'").fetchone()[0]
+        arr = array.array("I")
+        arr.frombytes(blob)
+        assert len(arr) == len(set(arr)) == verbs.COMMON
+
+    # 3. Schema mismatch rebuilds tables cleanly
+    with sqlite3.connect(str(index_db)) as con:
+        con.execute("UPDATE meta SET value = '0-legacy' WHERE key = 'schema'")
+        con.commit()
+    assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == expected
+    with sqlite3.connect(str(index_db)) as con:
+        assert con.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone() == (verbs._RELATED_SCHEMA,)
+
+    # 4. Stale-ID compaction triggers rebuild and resets stale_ids to 0
+    monkeypatch.setattr(verbs, "_RELATED_MAX_STALE_IDS", 1)
+    for i in range(2):
+        new_raw = f"AlphaSym BetaSym rev{i}\n".encode()
+        (ws / "sources" / "swap.md").write_bytes(new_raw)
+        ledger["sources/swap.md"] = hashlib.sha256(new_raw).hexdigest()
+        assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == verbs._related_direct(
+            ws, doc, ledger, cited
+        )
+    with sqlite3.connect(str(index_db)) as con:
+        assert con.execute("SELECT value FROM meta WHERE key = 'stale_ids'").fetchone() == ("0",)
+
+    # 5. Corrupt row payloads (truncated BLOB, NULL BLOB, non-integer meta) fall back AND unlink DB
+    cur_expected = verbs._related_direct(ws, doc, ledger, cited)
+    for corrupt_sql in (
+        "UPDATE tokens SET doc_ids = X'010203' WHERE token = 'AlphaSym'",
+        "UPDATE tokens SET doc_ids = NULL WHERE token = 'AlphaSym'",
+        "UPDATE meta SET value = 'not-an-int' WHERE key = 'max_fid'",
+    ):
+        with sqlite3.connect(str(index_db)) as con:
+            con.execute(corrupt_sql)
+            con.commit()
+        assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == cur_expected
+        assert not index_db.exists()  # unlinked so next call rebuilds cleanly
+        assert verbs._related(ws, doc, ledger, cited, index_path=index_db) == cur_expected
+        assert index_db.is_file()
+
+    # 6. review.end() unlinks the run's related-index.sqlite during housekeeping
+    state = tmp_path / "end-state"
+    end_folder = verbs._folder(state, RUN)
+    end_db = end_folder / verbs._RELATED_INDEX
+    end_folder.mkdir(parents=True)
+    end_db.write_bytes(b"placeholder")
+    maint._write(end_folder / "review.json", {
+        "run": RUN, "bundle": "kb", "max": 5, "taken": [], "pending": {},
+        "submitted": [], "dropped": [], "workspace": str(ws),
+    })
+    maint._write(verbs._pointer(state, "kb"), {"run": RUN, "bundle": "kb"})
+    monkeypatch.setattr(maint, "_call", lambda *_a, **_kw: (200, {"released": True}))
+    monkeypatch.setattr(verbs, "_backlog", lambda *_a, **_kw: {"total": 0})
+    monkeypatch.setattr(verbs, "_triage_backlog", lambda *_a, **_kw: {"total": 0})
+    code, _summary = verbs.end(state, "kb", RUN)
+    assert code == 0
+    assert not end_db.exists()
 
 
 def test_review_next_skips_the_corrections_its_own_run_wrote(gate, capsys, monkeypatch) -> None:
