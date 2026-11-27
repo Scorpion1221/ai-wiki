@@ -560,18 +560,6 @@ def _parsed(monkeypatch) -> list[str]:
     return parsed
 
 
-def _cold(root: Path):
-    """What a read answers from a snapshot scanned with nothing to carry over."""
-    B.drop_snapshots()
-    return (
-        [(hit["path"], hit["score"], hit["snippet"]) for hit in B.search(root, "needle zzqq", top_k=None)],
-        B.grep(root, "needle|zzqq"),
-        B.list_dir(root, recursive=True),
-        _graph(root, "topics/c1.md"),
-        [record[2:] for record in B._snapshot(root).records],
-    )
-
-
 def test_a_rescan_parses_only_the_files_that_changed(tmp_path: Path, settled, monkeypatch) -> None:
     for n in range(6):
         _concept(tmp_path, f"c{n}")
@@ -699,14 +687,32 @@ def test_the_search_index_reuses_the_fields_of_carried_over_concepts(tmp_path: P
         (hit["path"], hit["score"]) for hit in (B.drop_snapshots() or B.search(tmp_path, "needle zzqq", top_k=None))]
 
 
+def _answers(root: Path, link_from: str = "topics/c1.md"):
+    """Every read a step checks, with paths relative to ``root`` (a cold copy lives under another root)."""
+    return (
+        [(hit["path"], hit["score"], hit["snippet"]) for q in ("needle zzqq", "知识冻结")
+         for hit in B.search(root, q, top_k=None)],
+        B.grep(root, "needle|zzqq|冻结"),
+        B.list_dir(root, recursive=True),
+        _graph(root, link_from),
+        [record[1:] for record in B._snapshot(root).records],
+    )
+
+
 def test_reads_after_carried_over_rescans_equal_a_cold_scan(tmp_path: Path, settled, monkeypatch) -> None:
-    """Search scores (the per-field averages and document frequencies are over the whole new snapshot),
-    grep, ls and links after a sequence of pulls answer exactly what a scan from nothing answers. The
-    previous snapshot is held while each next one is indexed, as the warmer's prepared view holds it for
-    reads, so every step's index reuses the fields of the concepts the pull left alone."""
+    """Search scores (the per-field averages, document frequencies and CJK per-character frequencies are
+    over the whole new snapshot), grep, ls and links after a chain of pulls answer exactly what a scan of
+    the same files from nothing answers. As in production, each pull builds on the snapshot the previous
+    pull carried over, and that snapshot is held while the next one is indexed (the warmer's prepared
+    view), so every step's index reuses the fields of the concepts the pull left alone."""
+    import shutil
+
+    live = tmp_path / "live"
+    live.mkdir()
     for n in range(8):
-        _concept(tmp_path, f"c{n}", mentions=n % 3 + 1)
-    B.search(tmp_path, "needle")
+        _concept(live, f"c{n}", mentions=n % 3 + 1)
+    _rewrite(live / "topics" / "c7.md", "needle", "知识冻结 needle")
+    B.search(live, "needle")
     normalized: list[str] = []
     real_fields = B._search_fields
 
@@ -715,30 +721,27 @@ def test_reads_after_carried_over_rescans_equal_a_cold_scan(tmp_path: Path, sett
         return real_fields(rel, fm, body)
 
     steps = [
-        lambda: _rewrite(tmp_path / "topics" / "c1.md", "needle", "zzqq [C3](c3.md)"),
-        lambda: _concept(tmp_path, "c8", mentions=5),
-        lambda: (tmp_path / "topics" / "c5.md").unlink(),
-        lambda: (tmp_path / "topics" / "c6.md").rename(tmp_path / "topics" / "c9.md"),
-        lambda: _rewrite(tmp_path / "topics" / "c3.md", "needle", "zzqq zzqq [C1](c1.md)"),
+        lambda: _rewrite(live / "topics" / "c1.md", "needle", "zzqq [C3](c3.md)"),
+        lambda: _concept(live, "c8", mentions=5),
+        lambda: (live / "topics" / "c5.md").unlink(),
+        lambda: (live / "topics" / "c6.md").rename(live / "topics" / "c9.md"),
+        lambda: _rewrite(live / "topics" / "c3.md", "needle", "zzqq zzqq [C1](c1.md) 冻结规则"),
+        lambda: _rewrite(live / "topics" / "c7.md", "知识冻结", "知识库冻结 知识"),
     ]
-    reindexed = [["topics/c1.md"], ["topics/c8.md"], [], ["topics/c9.md"], ["topics/c3.md"]]
-    for step, expected in zip(steps, reindexed, strict=True):
-        held = B._snapshot(tmp_path)  # what the prepared view keeps for reads until the hand-over
+    reindexed = [["topics/c1.md"], ["topics/c8.md"], [], ["topics/c9.md"], ["topics/c3.md"], ["topics/c7.md"]]
+    for i, (step, expected) in enumerate(zip(steps, reindexed, strict=True)):
+        held = B._snapshot(live)  # what the prepared view keeps for reads until the hand-over
+        assert i == 0 or held.basis is not None  # from the second pull on, it was itself carried over
         step()
         monkeypatch.setattr(B, "_search_fields", counted)
         normalized.clear()
-        warm = (
-            [(hit["path"], hit["score"], hit["snippet"]) for hit in B.search(tmp_path, "needle zzqq", top_k=None)],
-            B.grep(tmp_path, "needle|zzqq"),
-            B.list_dir(tmp_path, recursive=True),
-            _graph(tmp_path, "topics/c1.md"),
-            [record[2:] for record in B._snapshot(tmp_path).records],
-        )
+        warm = _answers(live)
         assert normalized == expected  # the index was built from the held one's fields, not cold
         monkeypatch.setattr(B, "_search_fields", real_fields)
         del held
-        assert warm == _cold(tmp_path)
-        B.search(tmp_path, "needle")  # the next step builds on a carried-over snapshot, as pulls do
+        cold_root = tmp_path / f"cold{i}"  # the same files under another root: the live chain stays intact
+        shutil.copytree(live, cold_root)
+        assert warm == _answers(cold_root)
 
 
 def test_a_carried_over_snapshot_never_keeps_its_predecessor_alive(tmp_path: Path, settled) -> None:
