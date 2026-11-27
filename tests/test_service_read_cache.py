@@ -657,19 +657,23 @@ def test_a_drop_during_a_queued_rescan_is_not_carried_over(tmp_path: Path, settl
     B._snapshot(tmp_path)
     _rewrite(tmp_path / "topics" / "c0.md", "needle", "zzqq")  # so the reader rescans
 
+    bundle_lock = B._snapshot_locks.setdefault(tmp_path, threading.Lock())
+
     class DropAfterTheLockedRead(dict):
-        calls = 0
+        dropped = False
 
         def get(self, key, default=None):
             value = super().get(key, default)
-            DropAfterTheLockedRead.calls += 1
-            if DropAfterTheLockedRead.calls == 2:  # the read right after the reader took the bundle's lock
+            # the first read with the bundle's lock held and the guard free: a writer's drop lands here
+            if not DropAfterTheLockedRead.dropped and bundle_lock.locked() and not B._snapshot_guard.locked():
+                DropAfterTheLockedRead.dropped = True
                 B.drop_snapshots()
             return value
 
     monkeypatch.setattr(B, "_snapshots", DropAfterTheLockedRead(B._snapshots))
     parsed = _parsed(monkeypatch)
     B._snapshot(tmp_path)
+    assert DropAfterTheLockedRead.dropped
     assert sorted(parsed) == ["topics/c0.md", "topics/c1.md", "topics/c2.md"]
 
 
@@ -695,12 +699,21 @@ def test_the_search_index_reuses_the_fields_of_carried_over_concepts(tmp_path: P
         (hit["path"], hit["score"]) for hit in (B.drop_snapshots() or B.search(tmp_path, "needle zzqq", top_k=None))]
 
 
-def test_reads_after_carried_over_rescans_equal_a_cold_scan(tmp_path: Path, settled) -> None:
+def test_reads_after_carried_over_rescans_equal_a_cold_scan(tmp_path: Path, settled, monkeypatch) -> None:
     """Search scores (the per-field averages and document frequencies are over the whole new snapshot),
-    grep, ls and links after a sequence of pulls answer exactly what a scan from nothing answers."""
+    grep, ls and links after a sequence of pulls answer exactly what a scan from nothing answers. The
+    previous snapshot is held while each next one is indexed, as the warmer's prepared view holds it for
+    reads, so every step's index reuses the fields of the concepts the pull left alone."""
     for n in range(8):
         _concept(tmp_path, f"c{n}", mentions=n % 3 + 1)
     B.search(tmp_path, "needle")
+    normalized: list[str] = []
+    real_fields = B._search_fields
+
+    def counted(rel, fm, body):
+        normalized.append(rel)
+        return real_fields(rel, fm, body)
+
     steps = [
         lambda: _rewrite(tmp_path / "topics" / "c1.md", "needle", "zzqq [C3](c3.md)"),
         lambda: _concept(tmp_path, "c8", mentions=5),
@@ -708,8 +721,12 @@ def test_reads_after_carried_over_rescans_equal_a_cold_scan(tmp_path: Path, sett
         lambda: (tmp_path / "topics" / "c6.md").rename(tmp_path / "topics" / "c9.md"),
         lambda: _rewrite(tmp_path / "topics" / "c3.md", "needle", "zzqq zzqq [C1](c1.md)"),
     ]
-    for step in steps:
+    reindexed = [["topics/c1.md"], ["topics/c8.md"], [], ["topics/c9.md"], ["topics/c3.md"]]
+    for step, expected in zip(steps, reindexed, strict=True):
+        held = B._snapshot(tmp_path)  # what the prepared view keeps for reads until the hand-over
         step()
+        monkeypatch.setattr(B, "_search_fields", counted)
+        normalized.clear()
         warm = (
             [(hit["path"], hit["score"], hit["snippet"]) for hit in B.search(tmp_path, "needle zzqq", top_k=None)],
             B.grep(tmp_path, "needle|zzqq"),
@@ -717,19 +734,61 @@ def test_reads_after_carried_over_rescans_equal_a_cold_scan(tmp_path: Path, sett
             _graph(tmp_path, "topics/c1.md"),
             [record[2:] for record in B._snapshot(tmp_path).records],
         )
+        assert normalized == expected  # the index was built from the held one's fields, not cold
+        monkeypatch.setattr(B, "_search_fields", real_fields)
+        del held
         assert warm == _cold(tmp_path)
         B.search(tmp_path, "needle")  # the next step builds on a carried-over snapshot, as pulls do
 
 
 def test_a_carried_over_snapshot_never_keeps_its_predecessor_alive(tmp_path: Path, settled) -> None:
+    """The second index is built from the first one's fields while the first snapshot is held (the
+    prepared view); once that hold ends, neither the first snapshot nor its index stays alive."""
     import gc
     import weakref
 
     _concept(tmp_path, "c0")
     _concept(tmp_path, "c1")
     B.search(tmp_path, "needle")
-    first = weakref.ref(B._snapshot(tmp_path))
+    held = B._snapshot(tmp_path)
+    first, first_index = weakref.ref(held), weakref.ref(held.derived[B._SearchIndex])
     _rewrite(tmp_path / "topics" / "c1.md", "needle", "zzqq")
     B.search(tmp_path, "needle")
+    second = B._snapshot(tmp_path)
+    assert second is not held and second.basis() is held and B._SearchIndex in second.derived
+    del held
     gc.collect()
-    assert first() is None
+    assert first() is None and first_index() is None
+
+
+def test_an_index_after_a_racy_rescan_still_reuses_the_held_snapshots_fields(tmp_path: Path, monkeypatch) -> None:
+    """A warmer pass within the racy window of a pull scans without indexing (warm returns early) and
+    the next pass rescans: that settled snapshot's index reuses the fields of the snapshot reads hold."""
+    for n in range(4):
+        _concept(tmp_path, f"c{n}")
+    later = SimpleNamespace(time_ns=lambda: time.time_ns() + 10**9, monotonic_ns=time.monotonic_ns)
+    monkeypatch.setattr(B, "time", later)
+    B.search(tmp_path, "needle")
+    held = B._snapshot(tmp_path)  # the prepared view
+    time.sleep(0.15)  # the pull comes later than the racy window after the files it leaves alone
+    _rewrite(tmp_path / "topics" / "c2.md", "needle", "zzqq")
+    changed_at = (tmp_path / "topics" / "c2.md").stat().st_ctime_ns
+    racy_clock = SimpleNamespace(time_ns=lambda: changed_at + 1_000_000, monotonic_ns=time.monotonic_ns)
+    monkeypatch.setattr(B, "time", racy_clock)
+    racy = B._snapshot(tmp_path)
+    assert not racy.settled and B._SearchIndex not in racy.derived
+    _rewrite(tmp_path / "topics" / "c0.md", "needle", "needle aaaa")  # the next pass finds the files changed again
+    monkeypatch.setattr(B, "time", later)
+    normalized: list[str] = []
+    real_fields = B._search_fields
+    def counted(rel, fm, body):
+        normalized.append(rel)
+        return real_fields(rel, fm, body)
+
+    monkeypatch.setattr(B, "_search_fields", counted)
+    hits = B.search(tmp_path, "needle zzqq", top_k=None)
+    assert B._snapshot(tmp_path).settled and held is not None
+    assert sorted(normalized) == ["topics/c0.md", "topics/c2.md"]
+    monkeypatch.setattr(B, "_search_fields", real_fields)
+    assert [(hit["path"], hit["score"]) for hit in hits] == [
+        (hit["path"], hit["score"]) for hit in (B.drop_snapshots() or B.search(tmp_path, "needle zzqq", top_k=None))]

@@ -108,7 +108,8 @@ class _Snapshot:
     """One bundle's valid concepts as of ``fingerprint``, shared read-only by every request.
 
     It keeps only what the files say: metadata that depends on today's date (freshness) is
-    derived per request. Callers must not mutate the frontmatter they are handed.
+    derived per request. Callers must not mutate the frontmatter they are handed: a record is carried
+    over into the next snapshot while its file is unchanged (``_scan``), so a change would outlive pulls.
     """
     root: Path
     fingerprint: tuple
