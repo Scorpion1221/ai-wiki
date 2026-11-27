@@ -540,3 +540,196 @@ def test_grep_follows_an_edit(tmp_path: Path, settled) -> None:
     path.unlink()
     assert [hit["path"] for hit in B.grep(tmp_path, "needle", fixed=True)] == ["topics/one.md"]
     assert B.grep(tmp_path, "](y.md)", fixed=True) == []
+
+
+# A rescan carries over the record of every file unchanged since the previous scan (2026-11-27: a pull
+# changes a median of 7 of 2,348 concepts, and reparsing all of them held two copies of the bundle while
+# reads kept the previous snapshot, 1.8 times the mirror's steady memory at each pull).
+
+
+def _parsed(monkeypatch) -> list[str]:
+    """The concepts each scan reads and parses from disk, in order."""
+    parsed: list[str] = []
+    real_profile = B._profile_document
+
+    def counted(root, path):
+        parsed.append(Path(path).relative_to(root).as_posix())
+        return real_profile(root, path)
+
+    monkeypatch.setattr(B, "_profile_document", counted)
+    return parsed
+
+
+def _cold(root: Path):
+    """What a read answers from a snapshot scanned with nothing to carry over."""
+    B.drop_snapshots()
+    return (
+        [(hit["path"], hit["score"], hit["snippet"]) for hit in B.search(root, "needle zzqq", top_k=None)],
+        B.grep(root, "needle|zzqq"),
+        B.list_dir(root, recursive=True),
+        _graph(root, "topics/c1.md"),
+        [record[2:] for record in B._snapshot(root).records],
+    )
+
+
+def test_a_rescan_parses_only_the_files_that_changed(tmp_path: Path, settled, monkeypatch) -> None:
+    for n in range(6):
+        _concept(tmp_path, f"c{n}")
+    first = B._snapshot(tmp_path)
+    parsed = _parsed(monkeypatch)
+
+    _rewrite(tmp_path / "topics" / "c2.md", "needle", "zzqq")
+    _concept(tmp_path, "c6")
+    (tmp_path / "topics" / "c4.md").unlink()
+    second = B._snapshot(tmp_path)
+
+    assert sorted(parsed) == ["topics/c2.md", "topics/c6.md"]
+    old = {record[1]: record for record in first.records}
+    for record in second.records:
+        assert (record is old.get(record[1])) == (record[1] not in ("topics/c2.md", "topics/c6.md"))
+    assert [record[1] for record in second.records] == [f"topics/c{n}.md" for n in (0, 1, 2, 3, 5, 6)]
+    assert [hit["path"] for hit in B.search(tmp_path, "zzqq")] == ["topics/c2.md"]
+
+
+def test_a_carried_over_concept_is_reread_after_a_restored_stat_edit(tmp_path: Path, settled, monkeypatch) -> None:
+    """An edit that keeps the size and restores the mtime still changes the ctime the entry holds."""
+    _concept(tmp_path, "c0")
+    _concept(tmp_path, "c1")
+    path = tmp_path / "topics" / "c1.md"
+    _rewrite(path, "needle", "needle aaaa")
+    before = path.stat()
+    B._snapshot(tmp_path)
+    time.sleep(0.05)
+    _rewrite(path, "aaaa", "bbbb")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    _rewrite(tmp_path / "topics" / "c0.md", "needle", "zzqq")  # some other file changed too
+    parsed = _parsed(monkeypatch)
+
+    assert [hit["text"] for hit in B.grep(tmp_path, "bbbb")] == ["needle bbbb"]
+    assert sorted(parsed) == ["topics/c0.md", "topics/c1.md"]
+
+
+def test_a_file_racy_at_the_previous_scan_is_parsed_again(tmp_path: Path, monkeypatch) -> None:
+    """A file written within the racy window of a scan may change again with the same stat, so its
+    record is never carried over; a file settled at that scan is, even if the scan as a whole was not."""
+    _concept(tmp_path, "old")
+    _concept(tmp_path, "new")
+    old, new = tmp_path / "topics" / "old.md", tmp_path / "topics" / "new.md"
+    os.utime(old, ns=(1, 1))  # (ctime cannot be set; the clock below makes old's settled and new's racy)
+    old_ctime, new_ctime = old.stat().st_ctime_ns, new.stat().st_ctime_ns
+    real_fingerprint = B._fingerprint
+
+    def pinned(root):  # old.md changed long ago, new.md just now
+        top, entries = real_fingerprint(root)
+        return top, tuple((*e[:5], old_ctime - 10**10 if e[0] == "topics/old.md" else e[5]) for e in entries)
+
+    monkeypatch.setattr(B, "_fingerprint", pinned)
+    clock = SimpleNamespace(time_ns=lambda: new_ctime + 1_000_000, monotonic_ns=time.monotonic_ns)
+    monkeypatch.setattr(B, "time", clock)
+    first = B._snapshot(tmp_path)
+    assert not first.settled
+    parsed = _parsed(monkeypatch)
+
+    _concept(tmp_path, "third")
+    second = B._snapshot(tmp_path)
+    assert sorted(parsed) == ["topics/new.md", "topics/third.md"]
+    assert next(r for r in second.records if r[1] == "topics/old.md") is next(
+        r for r in first.records if r[1] == "topics/old.md")
+
+
+def test_a_writer_mutation_leaves_nothing_to_carry_over(tmp_path: Path, settled, monkeypatch) -> None:
+    for n in range(3):
+        _concept(tmp_path, f"c{n}")
+    B._snapshot(tmp_path)
+    parsed = _parsed(monkeypatch)
+    with worker.serialized_mutation():
+        pass
+    B._snapshot(tmp_path)
+    assert sorted(parsed) == ["topics/c0.md", "topics/c1.md", "topics/c2.md"]
+
+
+def test_a_drop_during_a_queued_rescan_is_not_carried_over(tmp_path: Path, settled, monkeypatch) -> None:
+    """The snapshot a rescan carries records over from is read together with the generation the scan is
+    kept under: a writer's drop just after a reader took the bundle's lock leaves nothing to carry over
+    into a scan that is then kept, since the drop says file stats may not show what the writer changed."""
+    for n in range(3):
+        _concept(tmp_path, f"c{n}")
+    B._snapshot(tmp_path)
+    _rewrite(tmp_path / "topics" / "c0.md", "needle", "zzqq")  # so the reader rescans
+
+    class DropAfterTheLockedRead(dict):
+        calls = 0
+
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            DropAfterTheLockedRead.calls += 1
+            if DropAfterTheLockedRead.calls == 2:  # the read right after the reader took the bundle's lock
+                B.drop_snapshots()
+            return value
+
+    monkeypatch.setattr(B, "_snapshots", DropAfterTheLockedRead(B._snapshots))
+    parsed = _parsed(monkeypatch)
+    B._snapshot(tmp_path)
+    assert sorted(parsed) == ["topics/c0.md", "topics/c1.md", "topics/c2.md"]
+
+
+def test_the_search_index_reuses_the_fields_of_carried_over_concepts(tmp_path: Path, settled, monkeypatch) -> None:
+    """While the previous snapshot is still held (the warmer's prepared view keeps it for reads until
+    hand-over: the case that held two copies), the new index normalizes only the changed concepts."""
+    for n in range(4):
+        _concept(tmp_path, f"c{n}")
+    B.search(tmp_path, "needle")
+    held = B._snapshot(tmp_path)  # noqa: F841 - what the prepared view does
+    normalized: list[str] = []
+    real_fields = B._search_fields
+
+    def counted(rel, fm, body):
+        normalized.append(rel)
+        return real_fields(rel, fm, body)
+
+    monkeypatch.setattr(B, "_search_fields", counted)
+    _rewrite(tmp_path / "topics" / "c1.md", "needle", "zzqq")
+    hits = B.search(tmp_path, "needle zzqq", top_k=None)
+    assert normalized == ["topics/c1.md"]
+    assert [(hit["path"], hit["score"]) for hit in hits] == [
+        (hit["path"], hit["score"]) for hit in (B.drop_snapshots() or B.search(tmp_path, "needle zzqq", top_k=None))]
+
+
+def test_reads_after_carried_over_rescans_equal_a_cold_scan(tmp_path: Path, settled) -> None:
+    """Search scores (the per-field averages and document frequencies are over the whole new snapshot),
+    grep, ls and links after a sequence of pulls answer exactly what a scan from nothing answers."""
+    for n in range(8):
+        _concept(tmp_path, f"c{n}", mentions=n % 3 + 1)
+    B.search(tmp_path, "needle")
+    steps = [
+        lambda: _rewrite(tmp_path / "topics" / "c1.md", "needle", "zzqq [C3](c3.md)"),
+        lambda: _concept(tmp_path, "c8", mentions=5),
+        lambda: (tmp_path / "topics" / "c5.md").unlink(),
+        lambda: (tmp_path / "topics" / "c6.md").rename(tmp_path / "topics" / "c9.md"),
+        lambda: _rewrite(tmp_path / "topics" / "c3.md", "needle", "zzqq zzqq [C1](c1.md)"),
+    ]
+    for step in steps:
+        step()
+        warm = (
+            [(hit["path"], hit["score"], hit["snippet"]) for hit in B.search(tmp_path, "needle zzqq", top_k=None)],
+            B.grep(tmp_path, "needle|zzqq"),
+            B.list_dir(tmp_path, recursive=True),
+            _graph(tmp_path, "topics/c1.md"),
+            [record[2:] for record in B._snapshot(tmp_path).records],
+        )
+        assert warm == _cold(tmp_path)
+        B.search(tmp_path, "needle")  # the next step builds on a carried-over snapshot, as pulls do
+
+
+def test_a_carried_over_snapshot_never_keeps_its_predecessor_alive(tmp_path: Path, settled) -> None:
+    import gc
+    import weakref
+
+    _concept(tmp_path, "c0")
+    _concept(tmp_path, "c1")
+    B.search(tmp_path, "needle")
+    first = weakref.ref(B._snapshot(tmp_path))
+    _rewrite(tmp_path / "topics" / "c1.md", "needle", "zzqq")
+    B.search(tmp_path, "needle")
+    gc.collect()
+    assert first() is None
