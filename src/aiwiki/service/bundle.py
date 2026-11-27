@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+import weakref
 from array import array
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
@@ -107,7 +108,8 @@ class _Snapshot:
     """One bundle's valid concepts as of ``fingerprint``, shared read-only by every request.
 
     It keeps only what the files say: metadata that depends on today's date (freshness) is
-    derived per request. Callers must not mutate the frontmatter they are handed.
+    derived per request. Callers must not mutate the frontmatter they are handed: a record is carried
+    over into the next snapshot while its file is unchanged (``_scan``), so a change would outlive pulls.
     """
     root: Path
     fingerprint: tuple
@@ -117,6 +119,10 @@ class _Snapshot:
     settled: bool  # no file changed within _RACY_NS of the scan: reusable while the stats hold
     derived: dict = field(default_factory=dict, compare=False, repr=False)  # see _derived
     lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
+    scanned: int = 0  # time.time_ns() the settled test of each fingerprint entry was made against
+    # The snapshot whose search fields ``_SearchIndex`` may reuse for the records this scan carried over
+    # (``_scan``), held weakly so a chain of pulls never keeps an old snapshot alive.
+    basis: weakref.ref | None = field(default=None, compare=False, repr=False)
 
 
 _snapshots: dict[Path, _Snapshot] = {}  # one per bundle path: its latest scan
@@ -231,19 +237,51 @@ def _fingerprint(root: Path) -> tuple:
     return (stat.S_ISLNK(top.st_mode), top.st_ino), tuple(entries)
 
 
-def _scan(root: Path, fingerprint: tuple, began: int, settled: bool) -> _Snapshot:
-    """Parse every valid v0.2 concept, in path order, exactly as each read used to."""
+def _unchanged_records(previous: _Snapshot | None, fingerprint: tuple, okf_version: str) -> dict:
+    """``previous``'s records, by path, whose file was settled when ``previous`` was scanned and which
+    the new walk finds with the same entry (link flag, inode, size, mtime and ctime): such a record
+    holds exactly what the file holds now, the guarantee by which ``_snapshot`` reuses a whole settled
+    snapshot, applied per file. A pull changes a few files (a median of 7 of 2,348, 2026-11-20..27),
+    and a rescan that parsed every one again held two copies of each concept while reads kept the
+    previous snapshot: 1.8 times the mirror's steady memory at each pull (production bundle, 2026-11-27)."""
+    if previous is None or previous.okf_version != okf_version or previous.fingerprint[0] != fingerprint[0]:
+        return {}
+    now = {entry[0]: entry for entry in fingerprint[1]}
+    before = {entry[0]: entry for entry in previous.fingerprint[1]}
+    unchanged = {}
+    for record in previous.records:
+        entry = before.get(record[1])
+        if entry is not None and now.get(record[1]) == entry and (
+                previous.settled or _settled(entry[-1], previous.scanned)):
+            unchanged[record[1]] = record
+    return unchanged
+
+
+def _scan(root: Path, fingerprint: tuple, began: int, settled: bool, previous: _Snapshot | None = None,
+          scanned: int = 0) -> _Snapshot:
+    """Parse every valid v0.2 concept, in path order, exactly as each read used to, except that the
+    record of a file unchanged since ``previous`` is carried over (``_unchanged_records``)."""
     okf_version = bundle_okf_version(root)
     records = []
+    unchanged: dict = {}
     if okf_version == OKF_VERSION:
+        unchanged = _unchanged_records(previous, fingerprint, okf_version)
         for path in sorted(root.rglob("*.md")):
             rel = _candidate_rel(root, path)
             if rel is None:
                 continue
+            if rel in unchanged:
+                records.append(unchanged[rel])
+                continue
             document = _profile_document(root, path)
             if document is not None:
                 records.append((path, rel, *document))
-    return _Snapshot(root, fingerprint, okf_version, tuple(records), began, settled)
+    basis = None
+    if unchanged:
+        basis = weakref.ref(previous)
+        if _SearchIndex not in previous.derived and previous.basis is not None:
+            basis = previous.basis  # a racy rescan nobody searched: the fields its own basis built still apply
+    return _Snapshot(root, fingerprint, okf_version, tuple(records), began, settled, scanned=scanned, basis=basis)
 
 
 def _snapshot(root: Path) -> _Snapshot:
@@ -260,13 +298,14 @@ def _snapshot(root: Path) -> _Snapshot:
         cached = _snapshots.get(root)
         if cached is not None and cached.began > arrived:  # read wholly after this request arrived
             return cached
-        generation = _generation
+        with _snapshot_guard:  # read together: a writer's drop since the read above leaves nothing to reuse
+            generation, cached = _generation, _snapshots.get(root)
         began, now = time.monotonic_ns(), time.time_ns()
         fingerprint = _fingerprint(root)  # before any read, so a change during the scan rescans
         if cached is not None and cached.settled and cached.fingerprint == fingerprint:
             return cached
         settled = all(_settled(entry[-1], now) for entry in fingerprint[1])
-        snapshot = _scan(root, fingerprint, began, settled)
+        snapshot = _scan(root, fingerprint, began, settled, cached, now)
         replaced = False
         with _snapshot_guard:
             if generation == _generation:  # a scan that overlapped a writer's drop is this request's only
@@ -787,8 +826,21 @@ class _SearchIndex:
 
     def __init__(self, snapshot: _Snapshot) -> None:
         self.records = snapshot.records
-        self.fields = [_search_fields(rel, fm, body) for _path, rel, fm, body, _text in self.records]
-        self.lengths = [tuple(map(_field_length, fields)) for fields in self.fields]
+        basis = snapshot.basis() if snapshot.basis is not None else None
+        previous = basis.derived.get(_SearchIndex) if basis is not None else None
+        # A record the scan carried over (the very tuple) has the same fields: only a pull's changed concepts
+        # are normalized again, and the two indexes share the rest while reads still use the previous one.
+        known = {id(record): i for i, record in enumerate(previous.records)} if previous is not None else {}
+        self.fields, self.lengths = [], []
+        for record in self.records:
+            i = known.get(id(record))
+            if i is not None:
+                self.fields.append(previous.fields[i])
+                self.lengths.append(previous.lengths[i])
+            else:
+                fields = _search_fields(record[1], record[2], record[3])
+                self.fields.append(fields)
+                self.lengths.append(tuple(map(_field_length, fields)))
         self.averages = tuple(
             sum(lengths[i] for lengths in self.lengths) / len(self.lengths) for i in range(len(_SEARCH_WEIGHTS))
         ) if self.lengths else ()
